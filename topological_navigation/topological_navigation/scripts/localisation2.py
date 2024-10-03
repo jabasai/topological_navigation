@@ -44,6 +44,7 @@ class TopologicalNavLoc(rclpy.node.Node):
         self.wpstr="Unknown"
         self.closest_dist = 10e5-1
         self.cnstr="Unknown"
+        self.nodetag="Unknown"   #current node tag
         self.closest_edge_ids = []
         self.closest_edge_dists = []
         self.node_poses = {}
@@ -63,6 +64,7 @@ class TopologicalNavLoc(rclpy.node.Node):
         self.wd_pub = self.create_publisher(Float32,'closest_node_distance', qos_profile=self.qos)
         self.cn_pub = self.create_publisher(String, 'current_node', qos_profile=self.qos)
         self.ce_pub = self.create_publisher(ClosestEdges, 'closest_edges', qos_profile=self.qos)
+        self.tag_pub = self.create_publisher(String, 'current_node/tag', qos_profile=self.qos)
         self.robot_navigation_area_pub = self.create_publisher(String, 'robot_navigation_area', qos_profile=self.qos)
 
         self.force_check = True
@@ -167,6 +169,7 @@ class TopologicalNavLoc(rclpy.node.Node):
                 self.distances = self.get_distances_to_pose(msg)
                 closeststr='none'
                 currentstr='none'
+                nodetag = 'Unknown'
                 
                 closest_edges, edge_dists = self.get_edge_distances_to_pose(msg)
                 if len(closest_edges) > 1:
@@ -198,6 +201,7 @@ class TopologicalNavLoc(rclpy.node.Node):
                     ind = 0
                     while not_loc and ind<len(self.distances) and ind<3:
                         name = self.distances[ind]['node']['node']['name']
+                        # nodetag = self.distances[ind]['node']['meta']['tag']
                         if name not in self.names_by_topic:
                             if self.point_in_poly(self.distances[ind]['node'], msg) :
                                 currentstr=str(name)
@@ -215,11 +219,25 @@ class TopologicalNavLoc(rclpy.node.Node):
                             closeststr=str(name)
                             not_loc=False
                         ind+=1
-                
+
+                node = get_node_from_tmap2(self.tmap, closeststr)
+
+                if node is None:
+                    self.get_logger().warn(f"Node '{closeststr}' not found in the topological map.")
+                    nodetag = 'Unknown'
+                else:
+                    try:
+                        nodetag = node['meta']['tag'][0]
+                    except KeyError:
+                        self.get_logger().warn(f"Node '{closeststr}' does not contain a 'meta' or 'tag' field.")
+                        nodetag = 'Unknown'
+                    except Exception as e:
+                        self.get_logger().warn(f"Unexpected error while accessing 'meta' or 'tag': {e}")
+                        nodetag = 'Unknown'
+                                
                 # distance to physically closest node.
                 closest_dist = np.round(self.distances[0]["dist"], 3)
-                
-                self.publishTopics(closeststr, closest_dist, currentstr, closest_edges, list(np.round(edge_dists, 3)))
+                self.publishTopics(closeststr, closest_dist, currentstr, closest_edges, list(np.round(edge_dists, 3)), nodetag)
                 self.throttle=1
             else:
                 self.throttle +=1
@@ -255,7 +273,7 @@ class TopologicalNavLoc(rclpy.node.Node):
         msg.data = num
         return msg 
 
-    def publishTopics(self, wpstr, closest_dist, cnstr, closest_edge_ids, closest_edge_dists) :
+    def publishTopics(self, wpstr, closest_dist, cnstr, closest_edge_ids, closest_edge_dists, nodetag = 'Unknown') :
         
         def pub_closest_edges(closest_edge_ids, closest_edge_dists):
             msg = ClosestEdges()
@@ -273,6 +291,8 @@ class TopologicalNavLoc(rclpy.node.Node):
                 self.wd_pub.publish(self.get_float32_msgs(closest_dist))
             if self.cnstr != cnstr:
                 self.cn_pub.publish(self.get_string_msgs(cnstr))
+            if self.nodetag != nodetag:
+                self.tag_pub.publish(self.get_string_msgs(nodetag))
             if self.closest_edge_ids != closest_edge_ids \
                 or self.closest_edge_dists != closest_edge_dists:
                 pub_closest_edges(closest_edge_ids, closest_edge_dists)
@@ -280,11 +300,13 @@ class TopologicalNavLoc(rclpy.node.Node):
             self.wp_pub.publish(self.get_string_msgs(wpstr))
             self.wd_pub.publish(self.get_float32_msgs(closest_dist))
             self.cn_pub.publish(self.get_string_msgs(cnstr))
+            self.tag_pub.publish(self.get_string_msgs(nodetag))
             pub_closest_edges(closest_edge_ids, closest_edge_dists)
             
         self.wpstr = wpstr
         self.closest_dist = closest_dist
         self.cnstr = cnstr
+        self.nodetag = nodetag
         self.closest_edge_ids = closest_edge_ids
         self.closest_edge_dists = closest_edge_dists
         
