@@ -232,7 +232,7 @@ class TopologicalNavLoc(rclpy.node.Node):
                         self.get_logger().warn(f"Node '{closeststr}' does not contain a 'meta' or 'tag' field.")
                         nodetag = 'Unknown'
                     except Exception as e:
-                        self.get_logger().warn(f"Unexpected error while accessing 'meta' or 'tag': {e}")
+                        # self.get_logger().warn(f"Unexpected error while accessing 'meta' or 'tag': {e}")
                         nodetag = 'Unknown'
                                 
                 # distance to physically closest node.
