@@ -229,7 +229,7 @@ class TopologicalNavLoc(rclpy.node.Node):
                     try:
                         nodetag = node['meta']['tag'][0]
                     except KeyError:
-                        self.get_logger().warn(f"Node '{closeststr}' does not contain a 'meta' or 'tag' field.")
+                        # self.get_logger().warn(f"Node '{closeststr}' does not contain a 'meta' or 'tag' field.")
                         nodetag = 'Unknown'
                     except Exception as e:
                         # self.get_logger().warn(f"Unexpected error while accessing 'meta' or 'tag': {e}")
