@@ -79,11 +79,11 @@ class TopoMap2Vis(rclpy.node.Node):
         self.status_mapping[4] = "STATUS_SUCCEEDED"
         self.status_mapping[5] = "STATUS_CANCELED"
         self.status_mapping[6] = "STATUS_ABORTED"
-        self.goal_cancle_error_codes = {} 
-        self.goal_cancle_error_codes[0] = "ERROR_NONE"
-        self.goal_cancle_error_codes[1] = "ERROR_REJECTED"
-        self.goal_cancle_error_codes[2] = "ERROR_UNKNOWN_GOAL_ID"
-        self.goal_cancle_error_codes[3] = "ERROR_GOAL_TERMINATED"
+        self.goal_cancel_error_codes = {} 
+        self.goal_cancel_error_codes[0] = "ERROR_NONE"
+        self.goal_cancel_error_codes[1] = "ERROR_REJECTED"
+        self.goal_cancel_error_codes[2] = "ERROR_UNKNOWN_GOAL_ID"
+        self.goal_cancel_error_codes[3] = "ERROR_GOAL_TERMINATED"
 
         rclpy.get_default_context().on_shutdown(self._on_node_shutdown)
 
@@ -288,19 +288,19 @@ class TopoMap2Vis(rclpy.node.Node):
                     # rclpy.spin_until_future_complete(self, cancel_future, executor=self.executor_goto_client, timeout_sec=2.0)
                     if cancel_future.done() and self.goal_get_result_future.done():
                         self.action_status = self.goal_get_result_future.result().status
-                        self.get_logger().info("The goal cancel error code {} ".format(self.get_goal_cancle_error_msg(cancel_future.result().return_code)))
+                        self.get_logger().info("The goal cancel error code {} ".format(self.get_goal_cancel_error_msg(cancel_future.result().return_code)))
                         return True 
                 except Exception as e:
                     # self.goal_handle = None
                     self.get_logger().error("Edge Action Manager: error while canceling the previous action")
                     return False 
 
-    def get_goal_cancle_error_msg(self, status_code):
+    def get_goal_cancel_error_msg(self, status_code):
         try:
-            return self.goal_cancle_error_codes[status_code]
+            return self.goal_cancel_error_codes[status_code]
         except Exception as e:
-            self.get_logger().error("Goal cancle code {}".format(status_code))
-            return self.goal_cancle_error_codes[0]
+            self.get_logger().error("Goal cancel code {}".format(status_code))
+            return self.goal_cancel_error_codes[0]
 
     def go_to_node_task(self, ):
         self.preempt_action()

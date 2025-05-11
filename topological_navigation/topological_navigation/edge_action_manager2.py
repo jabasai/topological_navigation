@@ -125,7 +125,7 @@ class EdgeActionManager(rclpy.node.Node):
         self.current_action = "none"
         self.dt = dict_tools()
         
-    def init(self, ACTIONS, route_search, update_params_control_server, update_params_pd_regulator, inrow_step_size=3.0, intermediate_dis=0.7):
+    def init(self, ACTIONS, route_search, update_params_control_server, inrow_step_size=3.0, intermediate_dis=0.7):
         self.ACTIONS = ACTIONS
         self.route_search = route_search
         self.goal_handle = None 
@@ -141,7 +141,6 @@ class EdgeActionManager(rclpy.node.Node):
         self.nav2_client_callback_group = MutuallyExclusiveCallbackGroup()
 
         self.update_params_control_server = update_params_control_server
-        self.update_params_pd_regulator = update_params_pd_regulator
         self.current_robot_pose = None 
         self.odom_sub = self.create_subscription(Odometry, '/odometry/global', self.odom_callback,
                                 QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT))
@@ -174,12 +173,12 @@ class EdgeActionManager(rclpy.node.Node):
             self.get_logger().error("Status code is invalid {}".format(status_code))
             return self.ACTIONS.status_mapping[0]
         
-    def get_goal_cancle_error_msg(self, status_code):
+    def get_goal_cancel_error_msg(self, status_code):
         try:
-            return self.ACTIONS.goal_cancle_error_codes[status_code]
+            return self.ACTIONS.goal_cancel_error_codes[status_code]
         except Exception as e:
-            self.get_logger().error("Goal cancle code {}".format(status_code))
-            return self.ACTIONS.goal_cancle_error_codes[0]
+            self.get_logger().error("Goal cancel code {}".format(status_code))
+            return self.ACTIONS.goal_cancel_error_codes[0]
         
     def initialise(self, bt_trees, edge, destination_node, origin_node=None
                                 , action_name=None, package="nav2_msgs.action", in_row_operation=False):
@@ -343,7 +342,7 @@ class EdgeActionManager(rclpy.node.Node):
                 # self.internal_executor.spin_until_future_complete(cancel_future)
                 self.get_logger().info("Edge Action Manager: Waiting till terminating the current preemption")
                 self.action_status = 5
-                self.get_logger().info("Edge Action Manager: The goal cancel error code {} ".format(self.get_goal_cancle_error_msg(cancel_future.result().return_code)))
+                self.get_logger().info("Edge Action Manager: The goal cancel error code {} ".format(self.get_goal_cancel_error_msg(cancel_future.result().return_code)))
                 self.robot_current_status = self.ACTIONS.ROBOT_STATUS_NATURAL_STATE
                 self.publish_robot_current_status_msg(self.ACTIONS.NAVIGATE_THROUGH_POSES, self.robot_current_status)
                 return True 
@@ -449,7 +448,6 @@ class EdgeActionManager(rclpy.node.Node):
             if( (action == self.ACTIONS.ROW_TRAVERSAL) and (self.in_row_operation == False)):
                 controller_plugin = self.ACTIONS.bt_tree_with_control_server_config[self.ACTIONS.ROW_TRAVERSAL]
                 control_server_configs[self.ACTIONS.ROW_TRAVERSAL] = self.ACTIONS.planner_with_goal_checker_config[controller_plugin]
-                control_server_configs[self.ACTIONS.ROW_TRAVERSAL + "pd_reg"] = self.ACTIONS.planner_with_pd_regulator_config[controller_plugin]
                 if(self.ACTIONS.ROW_TRAVERSAL in self.bt_trees):
                     nav_goal.behavior_tree = self.bt_trees[self.ACTIONS.ROW_TRAVERSAL]
                 edge_action_is_valid = True
@@ -457,7 +455,6 @@ class EdgeActionManager(rclpy.node.Node):
             if((action == self.ACTIONS.NAVIGATE_TO_POSE) or (action == self.ACTIONS.ROW_CHANGE)):
                 controller_plugin = self.ACTIONS.bt_tree_with_control_server_config[self.ACTIONS.NAVIGATE_TO_POSE]
                 control_server_configs[self.ACTIONS.NAVIGATE_TO_POSE] = self.ACTIONS.planner_with_goal_checker_config[controller_plugin] 
-                control_server_configs[self.ACTIONS.NAVIGATE_TO_POSE + "pd_reg"] = self.ACTIONS.planner_with_pd_regulator_config[controller_plugin]
                 if(self.ACTIONS.NAVIGATE_TO_POSE in self.bt_trees):
                     nav_goal.behavior_tree = self.bt_trees[self.ACTIONS.NAVIGATE_TO_POSE]
                 edge_action_is_valid = True
@@ -465,7 +462,6 @@ class EdgeActionManager(rclpy.node.Node):
             if(action == self.ACTIONS.GOAL_ALIGN):
                 controller_plugin = self.ACTIONS.bt_tree_with_control_server_config[self.ACTIONS.GOAL_ALIGN]
                 control_server_configs[self.ACTIONS.GOAL_ALIGN] = self.ACTIONS.planner_with_goal_checker_config[controller_plugin]
-                control_server_configs[self.ACTIONS.GOAL_ALIGN + "pd_reg"] = self.ACTIONS.planner_with_pd_regulator_config[controller_plugin] 
                 if(self.ACTIONS.GOAL_ALIGN in self.bt_trees):
                     nav_goal.behavior_tree = self.bt_trees[self.ACTIONS.GOAL_ALIGN]
                 edge_action_is_valid = True
@@ -694,11 +690,7 @@ class EdgeActionManager(rclpy.node.Node):
         control_server_config = self.ACTIONS.planner_with_goal_checker_config[controller_plugin] 
         self.get_logger().info(" Edge Action Manager: Control params {}".format(control_server_config))
         self.update_params_control_server.set_params(control_server_config)
-        
-        pd_reg_config = self.ACTIONS.planner_with_pd_regulator_config[controller_plugin] 
-        self.get_logger().info(" Edge Action Manager: PD params {}".format(pd_reg_config))
-        self.update_params_pd_regulator.set_params(pd_reg_config)
-        
+                
         send_goal_future = self.client.send_goal_async(target_goal,  feedback_callback=self.feedback_callback)
         goal_accepted = self.send_goal_request(send_goal_future, self.ACTIONS.ROW_OPERATION)
         if(goal_accepted == False):
@@ -920,11 +912,7 @@ class EdgeActionManager(rclpy.node.Node):
             if target_action in self.control_server_configs:
                 control_server_config = self.control_server_configs[target_action]
                 self.update_params_control_server.set_params(control_server_config)
-                
-                pd_reg_config = self.control_server_configs[target_action + "pd_reg"]
-                self.get_logger().info(" Edge Action Manager: PD params {}".format(pd_reg_config))
-                self.update_params_pd_regulator.set_params(pd_reg_config)
-        
+                        
             if (target_action == self.ACTIONS.ROW_OPERATION):
                 row_operation_is_completed = self.execute_row_operation_action(action_msg)
                 if(row_operation_is_completed == False):

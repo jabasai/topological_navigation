@@ -43,7 +43,7 @@ class TopologicalNavServer(rclpy.node.Node):
     _feedback_exec_policy = ExecutePolicyModeFeedback()
     _result_exec_policy = ExecutePolicyMode.Result()
 
-    def __init__(self, name, update_params_control_server, edge_action_manager_server , update_params_pd_regulator, robot_controller_name):
+    def __init__(self, name, update_params_control_server, edge_action_manager_server ):
         super().__init__(name)
         rclpy.get_default_context().on_shutdown(self._on_node_shutdown)
         self.node_by_node = False
@@ -58,9 +58,7 @@ class TopologicalNavServer(rclpy.node.Node):
         self.nav_from_closest_edge = False
         self.fluid_navigation = True
         self.final_goal = False
-        self.robot_controller_name = robot_controller_name
         self.update_params_control_server = update_params_control_server
-        self.update_params_pd_regulator = update_params_pd_regulator
 
         self.current_node = "Unknown"
         self.closest_node = "Unknown"
@@ -185,7 +183,7 @@ class TopologicalNavServer(rclpy.node.Node):
         
         self.edge_action_manager = edge_action_manager_server 
         self.edge_action_manager.init(self.ACTIONS, self.rsearch, self.update_params_control_server
-                    , self.update_params_pd_regulator, self.inrow_step_size, self.inrow_step_intermediate_dis)
+                    , self.inrow_step_size, self.inrow_step_intermediate_dis)
 
         self.edge_reconfigure = self.get_parameter_or("reconfigure_edges", Parameter('bool', Parameter.Type.BOOL, True)).value
         self.srv_edge_reconfigure = self.get_parameter_or("reconfigure_edges_srv", Parameter('bool', Parameter.Type.BOOL, False)).value 
@@ -1253,22 +1251,12 @@ class TopologicalNavServer(rclpy.node.Node):
 
 def main():
     rclpy.init(args=None)
-    update_params_control_server = ParameterUpdaterNode("controller_server")
-    ROBOT_MODEL = os.environ['ROBOT_MODEL']
-    robot_controller_name = ""
-    if(ROBOT_MODEL == "dogtooth"):
-        update_params_pd_regulator = ParameterUpdaterNode("dogtooth_robot")
-        robot_controller_name = "dogtooth_robot"
-    elif(ROBOT_MODEL == "hunter"):
-        update_params_pd_regulator = ParameterUpdaterNode("hunter")
-        robot_controller_name = "hunter"
-        
+    update_params_control_server = ParameterUpdaterNode("controller_server")        
     edge_action_manager_server = EdgeActionManager("edge_action_manager")
-    node = TopologicalNavServer('topological_navigation', update_params_control_server, edge_action_manager_server, update_params_pd_regulator, robot_controller_name)
+    node = TopologicalNavServer('topological_navigation', update_params_control_server, edge_action_manager_server)
     executor = MultiThreadedExecutor()
     executor.add_node(update_params_control_server)
     executor.add_node(edge_action_manager_server)
-    executor.add_node(update_params_pd_regulator)
     executor.add_node(node)
     try:
         executor.spin()
