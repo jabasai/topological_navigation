@@ -57,8 +57,7 @@ class RobotTmapping(Node):
         # Topics 
         self.declare_parameter( 'topic_joy'       , Parameter.Type.STRING  )  
         self.declare_parameter( 'topic_pose'      , Parameter.Type.STRING  )   
-        self.declare_parameter( 'topic_imu'       , Parameter.Type.STRING  )   
-       
+        self.declare_parameter( 'topic_imu'       , Parameter.Type.STRING  )          
 
         self.pointset        = self.get_parameter_or('tmap'            , Parameter('str'   , Parameter.Type.STRING, '')  ).value
         self.tmap_dir        = self.get_parameter_or('tmap_dir'        , Parameter('str'   , Parameter.Type.STRING, '')  ).value
@@ -98,7 +97,9 @@ class RobotTmapping(Node):
 
         # Subscribers
         self.create_subscription(Joy     , self.topic_joy , self.joy_cb       , 10)
+
         self.create_subscription(Imu     , self.topic_pose, self.robot_imu_cb , 10)
+
         self.create_subscription(Odometry, self.topic_pose, self.robot_pose_cb, 10)
 
         # Publishers
@@ -112,8 +113,8 @@ class RobotTmapping(Node):
         # Load existing nodes from tmap_dir if there are any
         self.get_tmap_nodes()
 
-        self.robot_imu_msg = None
 
+        self.robot_imu_msg = None
 
     def load_yaml(self, filename):
         with open(filename, 'r') as f:
@@ -154,6 +155,7 @@ class RobotTmapping(Node):
 
     def robot_pose_cb(self, msg):
         self.robot_pose_msg = msg.pose.pose
+
         #Please note, this is an ugly hack, the better way to do it is via topics sync 
         if self.robot_imu_msg != None:
             self.robot_pose_msg.orientation = self.robot_imu_msg
