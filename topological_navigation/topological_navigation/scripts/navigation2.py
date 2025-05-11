@@ -88,10 +88,6 @@ class TopologicalNavServer(rclpy.node.Node):
         self.declare_parameter("default_planner_xy_yaw_goal_tolerance", Parameter.Type.DOUBLE)
         self.declare_parameter("goal_align_planner_xy_yaw_goal_tolerance", Parameter.Type.DOUBLE)
         
-        self.declare_parameter("row_traversal_planner_pd_params", [20.0, 0.2, 10.0, 0.2])
-        self.declare_parameter("default_planner_pd_params", [20.0, 0.2, 10.0, 0.2])
-        self.declare_parameter("goal_align_planner_pd_params", [20.0, 0.2, 10.0, 0.2])
-
         self.declare_parameter('use_nav2_follow_route', Parameter.Type.BOOL)
         self.declare_parameter('use_in_row_operation', Parameter.Type.BOOL)
         self.declare_parameter('inrow_step_size', Parameter.Type.DOUBLE)
@@ -127,17 +123,10 @@ class TopologicalNavServer(rclpy.node.Node):
         goal_align_planner_xy_goal_tolerance = self.get_parameter_or("goal_align_planner_xy_goal_tolerance", Parameter('double', Parameter.Type.DOUBLE, 0.2)).value
         goal_align_planner_xy_yaw_goal_tolerance = self.get_parameter_or("goal_align_planner_xy_yaw_goal_tolerance", Parameter('double', Parameter.Type.DOUBLE, 0.1)).value
 
-        self.row_traversal_planner_pd_params = self.get_parameter("row_traversal_planner_pd_params").value
-        self.default_planner_pd_params = self.get_parameter("default_planner_pd_params").value
-        self.goal_align_planner_pd_params = self.get_parameter("goal_align_planner_pd_params").value
 
         self.ACTIONS.setPlannerParams(row_traversal_planner, row_traversal_planner_xy_goal_tolerance, row_traversal_planner_yaw_goal_tolerance)
         self.ACTIONS.setPlannerParams(default_planner, default_planner_xy_goal_tolerance, default_planner_xy_yaw_goal_tolerance)
         self.ACTIONS.setPlannerParams(goal_align_planner, goal_align_planner_xy_goal_tolerance, goal_align_planner_xy_yaw_goal_tolerance)
-        
-        self.ACTIONS.setPDRegulstorParams(row_traversal_planner, self.row_traversal_planner_pd_params, self.robot_controller_name)
-        self.ACTIONS.setPDRegulstorParams(default_planner, self.default_planner_pd_params, self.robot_controller_name)
-        self.ACTIONS.setPDRegulstorParams(goal_align_planner, self.goal_align_planner_pd_params, self.robot_controller_name)
 
         bt_tree_default = os.path.join(get_package_share_directory('topological_navigation'), 'config', 'bt_tree_default.xml')
         bt_tree_goal_align = os.path.join(get_package_share_directory('topological_navigation'), 'config', 'bt_tree_goal_align.xml')
