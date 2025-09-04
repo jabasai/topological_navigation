@@ -49,7 +49,8 @@ setup(
             'topomap_marker.py = topological_navigation.topomap_marker:main',
             'topomap_marker2.py = topological_navigation.topomap_marker2:main',
             'policy_marker.py = topological_navigation.policy_marker:main',
-            'manual_topomapping.py = topological_navigation.scripts.manual_topomapping:main'
+            'manual_topomapping.py = topological_navigation.scripts.manual_topomapping:main',
+            'overlap_checker.py = topological_navigation.scripts.overlap_checker:main',
         ],
     },
 
