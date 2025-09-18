@@ -50,7 +50,8 @@ setup(
             'topomap_marker2.py = topological_navigation.topomap_marker2:main',
             'policy_marker.py = topological_navigation.policy_marker:main',
             'manual_topomapping.py = topological_navigation.scripts.manual_topomapping:main',
-            'overlap_checker.py = topological_navigation.scripts.overlap_checker:main',
+            'occupancy_checker.py = topological_navigation.scripts.occupancy_checker:main',
+            'topological_visual.py = topological_navigation.scripts.topological_visual:main',
         ],
     },
 

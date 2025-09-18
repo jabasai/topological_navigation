@@ -59,7 +59,7 @@ class TopologicalNavServer(rclpy.node.Node):
     _feedback_exec_policy = ExecutePolicyModeFeedback()
     _result_exec_policy = ExecutePolicyMode.Result()
 
-    def __init__(self, name, update_params_control_server, edge_action_manager_server ):
+    def __init__(self, name, update_params_control_server, edge_action_manager_server):
         super().__init__(name)
         rclpy.get_default_context().on_shutdown(self._on_node_shutdown)
         self.node_by_node = False
@@ -400,6 +400,8 @@ class TopologicalNavServer(rclpy.node.Node):
                 final_edge = get_edge_from_id_tmap2(self.lnodes, route.source[-1], route.edge_id[-1])
                 target = final_edge["node"]
                 route = self.enforce_navigable_route(route, target)
+                self.get_logger().warn("[executeCallbackexecpolicy] - publishing route")
+                self.publish_route(route, target)
                 result = self.execute_policy(route, target)
             else:
                 result = False
@@ -809,6 +811,7 @@ class TopologicalNavServer(rclpy.node.Node):
                     route = self.enforce_navigable_route(route, target)
                     if route.source:
                         self.get_logger().info("Navigating Case 1: Following route")
+                        self.get_logger().warn("[navigate] - publishing route")
                         self.publish_route(route, target)
                         if(self.use_nav2_follow_route):
                             result, inc, status = self.navigate_to_poses(route, target, 0)
@@ -1017,7 +1020,7 @@ class TopologicalNavServer(rclpy.node.Node):
         pubst.origin = self.stat.origin
         pubst.target = self.stat.target
         pubst.topological_map = self.stat.topological_map
-        pubst.final_node = self.stat.final_node
+        # pubst.final_node = self.stat.final_node # FIXME: not
         self.get_logger().info(" {}".format(self.stat.time_to_wp))
         pubst.time_to_waypoint = float(self.stat.time_to_wp)
         pubst.operation_time = self.stat.operation_time

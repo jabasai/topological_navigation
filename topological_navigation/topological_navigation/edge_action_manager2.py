@@ -39,16 +39,19 @@ try:
 except ImportError:
     from collections import Mapping
 
+
 def _import(location, name):
     mod = __import__(location, fromlist=[name]) 
     return getattr(mod, name) 
 
 
 class dict_tools(object):
+               
                     
     def get_paths_from_nested_dict(self, nested):
         paths = list(self.nested_dict_iter(nested))
         return [{"keys": item[0], "value": item[1]} for item in paths]
+    
     
     def nested_dict_iter(self, nested, prefix=""):
         """
@@ -72,25 +75,29 @@ class dict_tools(object):
         self.getFromDict(dataDict, mapList[:-1])[mapList[-1]] = value
         return dataDict
     
+    
 class TopoNavEdgeActionMsg():
 
     def __init__(self,):
         pass 
 
+
     def setAction(self, action):
         self.action = action 
 
+
     def setNavGoal(self, nav_goal):
         self.nav_goal = nav_goal 
+
 
     def setSideEdges(self, side_edges, target_frame_id):
         self.side_edges = side_edges
         self.target_frame_id = target_frame_id
 
+
     def getBoundary(self, ):
         path = Path()
         header = Header()
-        # header.stamp = self.get_clock().now().to_msg()
         header.frame_id = self.target_frame_id
         path.header = header
         if(len(self.side_edges)>0):
@@ -99,14 +106,18 @@ class TopoNavEdgeActionMsg():
                     path.poses.append(pose)
         return path 
     
+    
     def getTargetFrameId(self, ):
         return self.target_frame_id
+    
     
     def getAction(self):
         return self.action
 
+
     def getNavGoal(self):
         return self.nav_goal 
+        
         
     def setControlPluginParams(self, control_plugin_params):
         self.control_plugin_params = control_plugin_params
@@ -119,17 +130,19 @@ class TopoNavEdgeActionMsg():
 #########################################################################################################
 class EdgeActionManager(rclpy.node.Node):
     
+    
     def __init__(self, name="edge_action_manager"):
         super().__init__(name)
         self.client = None        
         self.current_action = "none"
         self.dt = dict_tools()
         
+        
     def init(self, ACTIONS, route_search, update_params_control_server, inrow_step_size=3.0, intermediate_dis=0.7):
         self.ACTIONS = ACTIONS
         self.route_search = route_search
         self.goal_handle = None 
-        self.goal_resposne = None 
+        self.goal_response = None 
         self.internal_executor = SingleThreadedExecutor()
         self.latching_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL, reliability=ReliabilityPolicy.RELIABLE)
         self.bt_trees =  {}
@@ -149,7 +162,7 @@ class EdgeActionManager(rclpy.node.Node):
        
         self.boundary_publisher = self.create_publisher(Path, '/boundary_checker', qos_profile=self.latching_qos)
         self.robot_current_status_pub = self.create_publisher(String, '/robot_operation_current_status', qos_profile=self.latching_qos)
-       
+        self.current_dest = self.create_publisher(String, '/topological_navigation/current_destination', qos_profile=self.latching_qos)
 
         self.robot_current_behavior_pub = None
         self.current_node = None 
@@ -157,14 +170,18 @@ class EdgeActionManager(rclpy.node.Node):
         self.robot_current_status = self.ACTIONS.ROBOT_STATUS_AUTONOMOUS_NAVIGATION_STATE 
         self.executor_nav_client = SingleThreadedExecutor()
 
+
     def set_current_pose(self, msg):
         self.current_node = msg.data
+
 
     def odom_callback(self, msg):
         self.current_robot_pose = msg.pose
     
+    
     def get_nav_action_server_status(self, ):
         return self.ACTIONS.status_mapping 
+    
     
     def get_status_msg(self, status_code):
         try:
@@ -303,6 +320,16 @@ class EdgeActionManager(rclpy.node.Node):
             self.action_msgs = self.construct_navigate_to_pose_goal(target_pose)
 
         if self.action_name == self.ACTIONS.NAVIGATE_THROUGH_POSES:
+            
+            self.destination_node_str = {}
+            for item in destination_node:
+                name = item['node']['name']
+                x_coord = item['node']['pose']['position']['x']
+                y_coord = item['node']['pose']['position']['y']
+                coordinates = (x_coord, y_coord)
+                self.destination_node_str[coordinates] = name
+            self.get_logger().warn(f"Destination nodes: {self.destination_node_str}")
+                
             poses, actions, edge_ids = self._process_and_segment_edges(edge, destination_node, origin_node, is_execpolicy)
             if is_execpolicy: poses = self._adjust_orientations_for_next_wp(poses)
                         
@@ -311,143 +338,6 @@ class EdgeActionManager(rclpy.node.Node):
 
         return True
         
-        
-    # def initialise(self, bt_trees, edge, destination_node, origin_node=None, 
-    #                action_name=None, package="nav2_msgs.action", in_row_operation=False, is_execpolicy=False):
-
-    #     self.bt_trees = bt_trees
-    #     self.in_row_operation = in_row_operation
-    #     if self.in_row_operation:
-    #         try: 
-    #             from robot_behavior_msg.msg import RobotBehavior
-    #             self.robot_current_behavior_pub = self.create_publisher(RobotBehavior, '/robot_current_behavior', qos_profile=self.latching_qos)
-    #         except  Exception as e:
-    #             self.get_logger().error("robot_behavior_msg.msg.RobotBehavior message type is not defined")
-                
-    #     if(action_name is not None):
-    #         self.action_name = action_name
-    #     else:
-    #         self.edge = yaml.safe_load(json.dumps(edge)) # no unicode in edge
-    #         self.action_name = self.edge["action"]
-
-    #     if (self.action_name == self.ACTIONS.ROW_TRAVERSAL or self.action_name == self.ACTIONS.ROW_CHANGE):
-    #         self.action_name = self.ACTIONS.NAVIGATE_TO_POSE #TODO change this to actual  
-
-    #     if self.action_name != self.current_action:
-    #         self.preempt()
-
-    #     self.package = package
-    #     self.set_nav_client()
-    #     self.action_status = 0 
-
-    #     if self.action_name == self.ACTIONS.NAVIGATE_TO_POSE:
-    #         self.destination_node = destination_node
-    #         self.origin_node = origin_node
-    #         self.get_logger().info("Processing edge {}".format(self.edge["edge_id"]))
-    #         self.get_logger().info("Constructing the goal")
-    #         target_pose = self.construct_goal(copy.deepcopy(edge["goal"]), destination_node, origin_node)
-    #         self.action_msgs = self.construct_navigate_to_pose_goal(target_pose)
-            
-
-    #     if self.action_name == self.ACTIONS.NAVIGATE_THROUGH_POSES:            
-    #         if not is_execpolicy:
-    #             self.get_logger().error("[LC][initialise] - GO-TO-NODE")
-    #             poses = {}
-    #             actions = {}
-    #             edge_ids = {}
-    #             segment = 0
-    #             previous_action = ""
-    #             current_action = ""
-    #             total_edges = len(edge)
-                
-    #             for index in range(0, total_edges):
-    #                 self.get_logger().error("[LC][initialise] - ...")
-    #                 edge_i, dest_i, origin_i = edge[index], destination_node[index], origin_node[index]
-    #                 edge_i = yaml.safe_load(json.dumps(edge_i)) # no unicode in edge
-    #                 current_action = edge_i["action"]
-    #                 # self.get_logger().info("-----> before processing edge {} action {}  goal {}".format(edge_i["edge_id"], current_action, edge_i["action"]))
-    #                 if(index < (total_edges-1)):
-    #                     self.get_logger().error("[LC][initialise] - intermediate edge {} - current_action {}".format(edge_i["edge_id"], current_action))
-    #                     next_edge_id = edge[index+1]["edge_id"]
-    #                     current_action = self.get_goal_align_if(edge_i["edge_id"], current_action, next_edge_id)
-    #                 else:
-    #                     self.get_logger().error("[LC][initialise] - final edge {} - current_action {}".format(edge_i["edge_id"], current_action))
-    #                     current_action = self.get_goal_align_if(edge_i["edge_id"], current_action)
-
-    #                 # current_action = self.get_goal_align_if(edge_i["edge_id"], current_action)
-    #                 self.get_logger().info("Processing edge {} action {}  goal {}".format(edge_i["edge_id"], current_action, edge_i["action"]))
-    #                 intermediate_goal = self.construct_goal(copy.deepcopy(edge_i["goal"]), dest_i, origin_i)
-    #                 self.get_logger().info("Constructing intermediate goal")
-    #                 if (previous_action != current_action):
-    #                     segment = segment + 1
-    #                     self.get_logger().error("[LC][initialise] - previous action != current_action -> segment incremented {}".format(segment))
-
-    #                 if segment in poses:
-    #                     self.get_logger().error("[LC][initialise] - segment in poses")
-    #                     poses[segment].append(intermediate_goal)
-    #                     actions[segment].append(current_action)
-    #                     edge_ids[segment].append(edge_i["edge_id"])
-    #                 else:                    
-    #                     self.get_logger().error("[LC][initialise] - segment NOT in poses")
-    #                     poses[segment] = []
-    #                     actions[segment] = []
-    #                     edge_ids[segment] = []
-    #                     poses[segment].append(intermediate_goal)
-    #                     actions[segment].append(current_action)
-    #                     edge_ids[segment].append(edge_i["edge_id"])
-
-    #                 previous_action = current_action
-                
-    #         else:
-    #             self.get_logger().error("[LC][initialise] - EXECUTE-POLICY")
-    #             poses = {}
-    #             actions = {}
-    #             edge_ids = {}
-    #             total_edges = len(edge)
-                
-    #             for index in range(0, total_edges):
-    #                 self.get_logger().error("[LC][initialise] - ...")
-    #                 edge_i, dest_i, origin_i = edge[index], destination_node[index], origin_node[index]
-    #                 edge_i = yaml.safe_load(json.dumps(edge_i)) # no unicode in edge
-    #                 current_action = edge_i["action"]
-                    
-    #                 if(index < (total_edges-1)):
-    #                     next_edge_id = edge[index+1]["edge_id"]
-    #                     current_action = self.get_goal_align_if(edge_i["edge_id"], current_action, next_edge_id)
-    #                     self.get_logger().error("[LC][initialise] - intermediate edge {} - current_action {}".format(edge_i["edge_id"], current_action))
-    #                 else:
-    #                     current_action = self.get_goal_align_if(edge_i["edge_id"], current_action)
-    #                     self.get_logger().error("[LC][initialise] - final edge {} - current_action {}".format(edge_i["edge_id"], current_action))
-
-    #                 self.get_logger().info("Processing edge {} action {}  goal {}".format(edge_i["edge_id"], current_action, edge_i["action"]))
-    #                 intermediate_goal = self.construct_goal(copy.deepcopy(edge_i["goal"]), dest_i, origin_i)
-    #                 self.get_logger().info("Constructing intermediate goal")
-                
-    #                 segment = index
-                    
-    #                 if segment in poses:
-    #                     # This case should technically not be hit with the new logic, but it's safe to keep.
-    #                     self.get_logger().error("[LC][initialise] - segment in poses")
-    #                     poses[segment].append(intermediate_goal)
-    #                     actions[segment].append(current_action)
-    #                     edge_ids[segment].append(edge_i["edge_id"])
-    #                 else:                    
-    #                     self.get_logger().error("[LC][initialise] - segment NOT in poses")
-    #                     poses[segment] = []
-    #                     actions[segment] = []
-    #                     edge_ids[segment] = []
-    #                     poses[segment].append(intermediate_goal)
-    #                     actions[segment].append(current_action)
-    #                     edge_ids[segment].append(edge_i["edge_id"])
-
-    #         self.get_logger().error("[LC][initialise] - poses: {}".format(poses))
-    #         self.get_logger().error("[LC][initialise] - actions: {}".format(actions))
-    #         self.get_logger().error("[LC][initialise] - edge_ids: {}".format(edge_ids))
-
-    #         self.destination_node = destination_node[-1]
-    #         self.action_msgs, self.control_server_configs = self.construct_navigate_through_poses_goal(poses, actions, edge_ids, is_execpolicy=is_execpolicy)
-
-    #     return True 
     
     def get_goal_align_if(self, edge_id, current_action, next_edge_id=None):
         edges = edge_id.split("_")
@@ -469,6 +359,7 @@ class EdgeActionManager(rclpy.node.Node):
                     return self.ACTIONS.GOAL_ALIGN 
         return current_action
 
+
     def set_nav_client(self):
         self.action_server_name = self.get_action_server_name(self.action_name)
         self.get_logger().info("Importing {} from {}".format(self.action_name, self.package))
@@ -482,15 +373,17 @@ class EdgeActionManager(rclpy.node.Node):
         self.action = action 
         self.client = ActionClient(self, self.action, self.action_server_name, callback_group=self.nav2_client_callback_group)
     
+    
     def feedback_callback(self, feedback_msg):
         self.nav_client_feedback = feedback_msg
-        # self.get_logger().info("Distance to goal: {} ".format(self.nav_client_feedback.distance_remaining))
         return 
+    
     
     def preempt_feedback_callback(self, feedback_msg):
         self.nav_client_preempt_feedback = feedback_msg
         self.get_logger().info("preempt: {} ".format(self.nav_client_preempt_feedback))
         return 
+
 
     def get_action_server_name(self, action_name):
         action_topic = ""
@@ -505,8 +398,10 @@ class EdgeActionManager(rclpy.node.Node):
                 action_topic += char
         return action_topic  
     
+    
     def get_state(self,):
         return self.action_status 
+        
         
     def preempt(self, timeout_secs=2.0):
         if self.client is not None:
@@ -523,10 +418,8 @@ class EdgeActionManager(rclpy.node.Node):
             counter = 0
             
             try: 
-                # rclpy.spin_until_future_complete(self, cancel_future, feedback=self.preempt_feedback_callback)
                 cancel_future = self.goal_handle.cancel_goal_async()
                 rclpy.spin_until_future_complete(self, cancel_future, timeout_sec=5.0)
-                # self.internal_executor.spin_until_future_complete(cancel_future)
                 self.get_logger().info("Waiting till terminating the current preemption")
                 self.action_status = 5
                 self.get_logger().info("The goal cancel error code {} ".format(self.get_goal_cancel_error_msg(cancel_future.result().return_code)))
@@ -534,11 +427,9 @@ class EdgeActionManager(rclpy.node.Node):
                 self.publish_robot_current_status_msg(self.ACTIONS.NAVIGATE_THROUGH_POSES, self.robot_current_status)
                 return True 
             except Exception as e:
-                # counter = counter +1
-                # if(counter < 3):
-                # self.goal_handle = None
                 self.get_logger().error("Something wrong with Nav2 Control server {} while preempting {}".format(e, self.action_server_name))
                 return True 
+        
         
     def construct_goal(self, goal_args, destination_node, origin_node):
         paths = self.dt.get_paths_from_nested_dict(goal_args)
@@ -553,12 +444,13 @@ class EdgeActionManager(rclpy.node.Node):
                     _property = self.dt.getFromDict(origin_node, value[1:].split("."))
                     goal_args = self.dt.setInDict(goal_args, item["keys"], _property)
         goal = goal_args
-        # self.get_logger().info("  goal {} ".format(goal))
         return goal 
+    
     
     def construct_navigate_to_pose_goal(self, goal):
             action_msgs = self.get_navigate_to_pose_goal(goal["target_pose"]["header"]["frame_id"], goal["target_pose"]["pose"])
             return action_msgs
+    
     
     def get_navigate_to_pose_goal(self, frame_id, goal):
         nav_goal = NavigateToPose.Goal()
@@ -576,11 +468,12 @@ class EdgeActionManager(rclpy.node.Node):
         action_msgs.append(action_msg)
         return action_msgs
 
+
     def construct_navigate_through_poses_goal(self, goals, actions, edge_ids, is_execpolicy=False):
-        # action_msgs, control_server_configs = self.get_navigate_through_poses_goal(goals, actions, edge_ids, is_execpolicy=is_execpolicy)
-        action_msgs, control_server_configs = self.get_navigate_through_poses_goal(goals, actions, edge_ids)
-        return action_msgs, control_server_configs 
-    
+        action_msgs, control_server_configs = self.get_navigate_through_poses_goal(goals, actions, edge_ids, is_execpolicy=is_execpolicy)
+        return action_msgs, control_server_configs
+
+
     def check_edges_area_same(self, side_edges):
         edge_poses = []
         if(len(side_edges) >= 2):
@@ -614,359 +507,193 @@ class EdgeActionManager(rclpy.node.Node):
         return float(s.split('-')[0][1:])
                 
 
-    # def get_navigate_through_poses_goal(self, poses, actions, edge_ids, is_execpolicy=False):
+    def get_navigate_through_poses_goal(self, poses, actions, edge_ids, is_execpolicy=False):
         
-    #     def handle_row_operation():
-    #         # print("===========edge_id {} edge_ids {}".format(edge_id, edge_ids))
-    #         self.target_row_edge_id = edge_id.split("_")[0]
-    #         tag_id = self.target_row_edge_id.split("-")[1]
-    #         self.target_row_edge_id = self.target_row_edge_id[:-1] + self.ACTIONS.ROW_START_INDEX
-    #         tag_id = tag_id[:-1] + self.ACTIONS.ROW_START_INDEX
+        def handle_row_operation():
+            self.target_row_edge_id = edge_id.split("_")[0]
+            tag_id = self.target_row_edge_id.split("-")[1]
+            self.target_row_edge_id = self.target_row_edge_id[:-1] + self.ACTIONS.ROW_START_INDEX
+            tag_id = tag_id[:-1] + self.ACTIONS.ROW_START_INDEX
 
-    #         self.get_logger().info("Action in_row_operation ")
-    #         self.get_logger().info("Edge id and tag id  {} {}".format(self.target_row_edge_id, tag_id))
-    #         cen =  self.route_search.get_node_from_tmap2(self.target_row_edge_id)
-    #         children = self.route_search.get_connected_nodes_tmap2(cen)
-    #         selected_row_edge_nodes = {}
-    #         for next_edge in children:
-    #             if(next_edge.startswith(self.ACTIONS.OUTSIDE_EDGE_START_INDEX)):
-    #                 upper_nodes =  self.route_search.get_node_from_tmap2(next_edge)["node"]["edges"]
-    #                 for edges_all in upper_nodes:
-    #                     if((self.ACTIONS.GOAL_ALIGN_INDEX[0] in edges_all["node"]) 
-    #                                         and (self.target_row_edge_id not in edges_all["node"])):
+            self.get_logger().info("Action in_row_operation ")
+            self.get_logger().info("Edge id and tag id  {} {}".format(self.target_row_edge_id, tag_id))
+            cen =  self.route_search.get_node_from_tmap2(self.target_row_edge_id)
+            children = self.route_search.get_connected_nodes_tmap2(cen)
+            selected_row_edge_nodes = {}
+            for next_edge in children:
+                if(next_edge.startswith(self.ACTIONS.OUTSIDE_EDGE_START_INDEX)):
+                    upper_nodes =  self.route_search.get_node_from_tmap2(next_edge)["node"]["edges"]
+                    for edges_all in upper_nodes:
+                        if((self.ACTIONS.GOAL_ALIGN_INDEX[0] in edges_all["node"]) 
+                                            and (self.target_row_edge_id not in edges_all["node"])):
                             
-    #                         targte_pose = self.route_search.get_node_from_tmap2(edges_all["node"])["node"]["pose"]
-    #                         targte_pose_x_y = np.array([targte_pose["position"]["x"], targte_pose["position"]["y"]])
-    #                         selected_row_edge_nodes[edges_all["node"]] = (targte_pose, targte_pose_x_y)
+                            targte_pose = self.route_search.get_node_from_tmap2(edges_all["node"])["node"]["pose"]
+                            targte_pose_x_y = np.array([targte_pose["position"]["x"], targte_pose["position"]["y"]])
+                            selected_row_edge_nodes[edges_all["node"]] = (targte_pose, targte_pose_x_y)
                     
-    #         center_pose = self.route_search.get_node_from_tmap2(self.target_row_edge_id)["node"]["pose"]["position"]
-    #         center_pose = np.array([center_pose["x"], center_pose["y"]])
-    #         distance_vector = []
-    #         distance_with_edge_ids = {}
-    #         index_dis = 0
-    #         for the_key, the_value in selected_row_edge_nodes.items():  
-    #             distance_vector.append(np.linalg.norm(center_pose- the_value[1]))
-    #             distance_with_edge_ids[index_dis] = the_key
-    #             index_dis += 1
-    #         # print("index distance .....", distance_vector)    
-    #         min_indices = self.two_smallest_indices(distance_vector)
-    #         children = []
-    #         for index in min_indices:
-    #             children.append(distance_with_edge_ids[index])
-    #             # print("----------Index.... {} ".format(distance_with_edge_ids[index]))
+            center_pose = self.route_search.get_node_from_tmap2(self.target_row_edge_id)["node"]["pose"]["position"]
+            center_pose = np.array([center_pose["x"], center_pose["y"]])
+            distance_vector = []
+            distance_with_edge_ids = {}
+            index_dis = 0
+            for the_key, the_value in selected_row_edge_nodes.items():  
+                distance_vector.append(np.linalg.norm(center_pose- the_value[1]))
+                distance_with_edge_ids[index_dis] = the_key
+                index_dis += 1
+            min_indices = self.two_smallest_indices(distance_vector)
+            children = []
+            for index in min_indices:
+                children.append(distance_with_edge_ids[index])
                     
-    #         # Sort the list based on the extracted number in descending order
-    #         children = sorted(children, key=self.extract_number, reverse=True)
+            # Sort the list based on the extracted number in descending order
+            children = sorted(children, key=self.extract_number, reverse=True)
+            
+            self.get_logger().info("Children edges {}".format(children)) 
+                    
+            target_pose_frame_id = nodes[0]["target_pose"]["header"]["frame_id"]
+            last_goal = nodes[-1]
 
-    #         # self.get_logger().info("Next Egdges edges {}".format(selected_row_edge_nodes))  
+            if(len(nodes) > 1):
+                if(self.check_target_is_same(cen["node"], last_goal["target_pose"])):
+                    last_goal = nodes[0]
+
+            selected_last_node = last_goal
+            if(len(nodes) == 1):
+                edges = edge_id.split("_")
+                if(len(edges) == 2):
+                    edge_0, edge_1 = edges[0], edges[1]
+                    tag_0, tag_1 = edge_0.split("-")[1], edge_1.split("-")[1]
+                    if(tag_1 == tag_id):
+                            selected_last_node["target_pose"]["pose"] = self.route_search.get_node_from_tmap2(edge_0)["node"]["pose"]
+                    elif(tag_0 == tag_id):
+                            selected_last_node["target_pose"]["pose"] = self.route_search.get_node_from_tmap2(edge_1)["node"]["pose"]
+                elif(len(selected_last_node) == 0 and self.current_node is not None):
+                    selected_last_node["target_pose"]["pose"] = self.route_search.get_node_from_tmap2(self.current_node)["node"]["pose"]
+                else:
+                    self.get_logger().error("Cound not find bounday edge...") 
                             
-    #         self.get_logger().info("Children edges {}".format(children)) 
-                    
-    #         target_pose_frame_id = nodes[0]["target_pose"]["header"]["frame_id"]
-    #         last_goal = nodes[-1]
+            self.selected_edges = {}    
+            for child in children:
+                if tag_id in child:
+                    child_node = self.route_search.get_node_from_tmap2(child)
+                    side_intermediate_pose = self.get_intermediate_pose(cen, child_node, target_pose_frame_id)
+                    side_last_intermediate_pose = self.get_last_intermediate_pose(side_intermediate_pose, cen, selected_last_node)
+                    self.selected_edges[child] = [side_intermediate_pose, side_last_intermediate_pose]
 
-    #         if(len(nodes) > 1):
-    #             if(self.check_target_is_same(cen["node"], last_goal["target_pose"])):
-    #                 last_goal = nodes[0]
+            if(len(self.selected_edges) == 1):
+                self.selected_edges["side_wall"] = self.get_intermediate_poses_interpolated(self.selected_edges, cen, selected_last_node)
 
-    #         selected_last_node = last_goal
-    #         if(len(nodes) == 1):
-    #             edges = edge_id.split("_")
-    #             if(len(edges) == 2):
-    #                 edge_0, edge_1 = edges[0], edges[1]
-    #                 tag_0, tag_1 = edge_0.split("-")[1], edge_1.split("-")[1]
-    #                 if(tag_1 == tag_id):
-    #                         selected_last_node["target_pose"]["pose"] = self.route_search.get_node_from_tmap2(edge_0)["node"]["pose"]
-    #                 elif(tag_0 == tag_id):
-    #                         selected_last_node["target_pose"]["pose"] = self.route_search.get_node_from_tmap2(edge_1)["node"]["pose"]
-    #             elif(len(selected_last_node) == 0 and self.current_node is not None):
-    #                 selected_last_node["target_pose"]["pose"] = self.route_search.get_node_from_tmap2(self.current_node)["node"]["pose"]
-    #             else:
-    #                 self.get_logger().error("Cound not find bounday edge...") 
-                            
-    #         # print("===============nodes {}".format(nodes)) 
-    #         self.selected_edges = {}    
-    #         for child in children:
-    #             # self.get_logger().info("=============children h selected ===== {} {} ".format(child, tag_id))
-    #             if tag_id in child:
-    #                 # self.get_logger().info("=============children h selected ===== {}".format(child))
-    #                 child_node = self.route_search.get_node_from_tmap2(child)
-    #                 # self.get_logger().info("=============after children===== {}".format(child))
-    #                 # distance = self.route_search.get_distance_to_node_tmap2(cen, child_node)
-    #                 side_intermediate_pose = self.get_intermediate_pose(cen, child_node, target_pose_frame_id)
-    #                 side_last_intermediate_pose = self.get_last_intermediate_pose(side_intermediate_pose, cen, selected_last_node)
-    #                 self.selected_edges[child] = [side_intermediate_pose, side_last_intermediate_pose]
-    #                 # self.get_logger().info("=============children i selected ===== {} {} ".format(side_intermediate_pose, side_last_intermediate_pose))
-
-    #         if(len(self.selected_edges) == 1):
-    #             self.selected_edges["side_wall"] = self.get_intermediate_poses_interpolated(self.selected_edges, cen, selected_last_node)
-
-    #         if(self.check_edges_area_same(self.selected_edges)):
-    #             edge_action_is_valid = True
-    #             self.get_logger().error("Bounday edges are same")
-    #         else:
-    #             edge_action_is_valid = True   
-    #         if edge_action_is_valid:
-    #             action_msg.setSideEdges(self.selected_edges, target_pose_frame_id) 
-    #             if self.is_row_boundary_published == False:
-    #                 boundary_info = action_msg.getBoundary()
-    #                 self.boundary_publisher.publish(boundary_info)
-    #                 self.is_row_boundary_published = True  
-    #             action = self.ACTIONS.ROW_OPERATION
-    #         return action, action_msg
+            if(self.check_edges_area_same(self.selected_edges)):
+                edge_action_is_valid = True
+                self.get_logger().error("Bounday edges are same")
+            else:
+                edge_action_is_valid = True   
+            if edge_action_is_valid:
+                action_msg.setSideEdges(self.selected_edges, target_pose_frame_id) 
+                if self.is_row_boundary_published == False:
+                    boundary_info = action_msg.getBoundary()
+                    self.boundary_publisher.publish(boundary_info)
+                    self.is_row_boundary_published = True  
+                action = self.ACTIONS.ROW_OPERATION
+            return action, action_msg
         
         
-    #     # goals = []
-    #     # actions_execute = []
-    #     control_server_configs = {}
-    #     # edge_actions = []
-    #     action_msgs = []
-    #     self.is_row_boundary_published = False
-    #     edge_action_is_valid = True
-        
-        
-    #     # ==================================================================
-    #     #  IF in Execute-Policy Mode: relaxed yaw tolerance for all segments
-    #     # ==================================================================
-    #     if is_execpolicy:
-    #         control_server_configs = []
-
-    #         self.get_logger().debug("[get_navigate_through_poses_goal] Executing with Execute-policy logic.")
-
-    #         for seg_i, nodes in poses.items():
-    #             nav_goal = NavigateThroughPoses.Goal()
-    #             for pose in nodes:
-    #                 target_pose = self.create_pose_stamped_msg(pose["target_pose"]["header"]["frame_id"], pose["target_pose"]["pose"])
-    #                 nav_goal.poses.append(target_pose)
-
-    #             action = actions[seg_i][0]
-    #             edge_id = edge_ids[seg_i][0]
-    #             action_msg = TopoNavEdgeActionMsg()
-
-    #             self.get_logger().info("seg: {}, action: {}, edge id: {} ".format(seg_i, action, edge_id))
-
-    #             # This block is now generalized to handle parameter setting for any action.
-    #             current_config = None
-    #             if action in self.ACTIONS.bt_tree_with_control_server_config:
-    #                 controller_plugin = self.ACTIONS.bt_tree_with_control_server_config[action]
-    #                 current_config = self.ACTIONS.planner_with_goal_checker_config[controller_plugin].copy()
-
-    #                 # If this is NOT the final segment, relax the yaw tolerance
-    #                 if seg_i < len(poses) - 1:
-    #                     self.get_logger().info(f"Segment {seg_i} is intermediate. Relaxing yaw tolerance.")
-    #                     current_config['goal_checker.yaw_goal_tolerance'] = 2 * math.pi # 2 * pi, less strict yaw tolerance
-    #                 else:
-    #                     self.get_logger().info(f"Segment {seg_i} is the final goal. Using strict yaw tolerance.")
-
-    #                 control_server_configs.append(current_config)
-
-    #             if action in self.bt_trees:
-    #                 nav_goal.behavior_tree = self.bt_trees[action]
-    #             edge_action_is_valid = True
-                
-    #             if(action == self.ACTIONS.ROW_TRAVERSAL and self.in_row_operation == True and (len(nodes) > 0)):
-    #                 action, action_msg = handle_row_operation()
-                    
-    #             self.get_logger().info(" Action {}  Bt_tree : {}".format(action, nav_goal.behavior_tree))
-    #             if edge_action_is_valid:
-    #                 action_msg.setAction(action)
-    #                 action_msg.setNavGoal(nav_goal)
-    #                 action_msgs.append(action_msg)
-
-    #     # ==================================================================
-    #     #  ELSE (Go-To-Node Mode): Use the original logic
-    #     # ==================================================================
-    #     else:
-
-    #         self.get_logger().debug("[get_navigate_through_poses_goal] Executing with Go-To-Node logic.")
-        
-    #         for seg_i, nodes  in poses.items():
-    #             nav_goal = NavigateThroughPoses.Goal()
-    #             # print("===============nodes: {}".format(nodes))     
-    #             for pose in nodes:
-    #                 target_pose = self.create_pose_stamped_msg(pose["target_pose"]["header"]["frame_id"], pose["target_pose"]["pose"])
-    #                 nav_goal.poses.append(target_pose)
-
-    #             action = actions[seg_i][0]
-    #             edge_id = edge_ids[seg_i][0]
-    #             action_msg = TopoNavEdgeActionMsg()
-
-    #             self.get_logger().info("seg: {}, action: {}, edge id: {} ".format(seg_i, action, edge_id))
-
-    #             if action in self.ACTIONS.bt_tree_with_control_server_config:
-    #                 controller_plugin = self.ACTIONS.bt_tree_with_control_server_config[action]
-    #                 control_server_configs[action] = self.ACTIONS.planner_with_goal_checker_config[controller_plugin]
-    #                 if(action in self.bt_trees):
-    #                     nav_goal.behavior_tree = self.bt_trees[action]
-    #                 edge_action_is_valid = True
-
-    #             if(action == self.ACTIONS.ROW_TRAVERSAL and self.in_row_operation == True and (len(nodes) > 0)):
-    #                 action, action_msg = handle_row_operation()
-
-    #             self.get_logger().info(" Action {}  Bt_tree : {}".format(action, nav_goal.behavior_tree))
-    #             if edge_action_is_valid:
-    #                 action_msg.setAction(action)
-    #                 action_msg.setNavGoal(nav_goal)
-    #                 action_msgs.append(action_msg)
-
-    #     self.get_logger().debug("[get_navigate_through_poses_goal] - Control server configs: {}".format(control_server_configs))
-    #     return action_msgs, control_server_configs
-    
-    def get_navigate_through_poses_goal(self, poses, actions, edge_ids):
-        # goals = []
-        # actions_execute = []
         control_server_configs = {}
-        # edge_actions = []
         action_msgs = []
         self.is_row_boundary_published = False
         edge_action_is_valid = True
-        for seg_i, nodes  in poses.items():
-            nav_goal = NavigateThroughPoses.Goal()
-            # print("===============nodes: {}".format(nodes))     
-            for pose in nodes:
-                target_pose = self.create_pose_stamped_msg(pose["target_pose"]["header"]["frame_id"], pose["target_pose"]["pose"])
-                nav_goal.poses.append(target_pose)
+        
+        
+        # ==================================================================
+        #  IF in Execute-Policy Mode: relaxed yaw tolerance for all segments
+        # ==================================================================
+        if is_execpolicy:
+            control_server_configs = []
 
-            action = actions[seg_i][0]
-            edge_id = edge_ids[seg_i][0]
-            action_msg = TopoNavEdgeActionMsg()
+            self.get_logger().debug("[get_navigate_through_poses_goal] Executing with Execute-policy logic.")
 
-            self.get_logger().info("Edge Action Manager: seg: {}, action: {}, edge id: {} ".format(seg_i, action, edge_id))
-            # if( (action == self.ACTIONS.ROW_TRAVERSAL) and (self.in_row_operation == False)):
-            #     controller_plugin = self.ACTIONS.bt_tree_with_control_server_config[self.ACTIONS.ROW_TRAVERSAL]
-            #     control_server_configs[self.ACTIONS.ROW_TRAVERSAL] = self.ACTIONS.planner_with_goal_checker_config[controller_plugin]
-            #     control_server_configs[self.ACTIONS.ROW_TRAVERSAL + "pd_reg"] = self.ACTIONS.planner_with_pd_regulator_config[controller_plugin]
-            #     if(self.ACTIONS.ROW_TRAVERSAL in self.bt_trees):
-            #         nav_goal.behavior_tree = self.bt_trees[self.ACTIONS.ROW_TRAVERSAL]
-            #     edge_action_is_valid = True
+            for seg_i, nodes in poses.items():
+                nav_goal = NavigateThroughPoses.Goal()
+                for pose in nodes:
+                    target_pose = self.create_pose_stamped_msg(pose["target_pose"]["header"]["frame_id"], pose["target_pose"]["pose"])
+                    nav_goal.poses.append(target_pose)
+
+                action = actions[seg_i][0]
+                edge_id = edge_ids[seg_i][0]
+                action_msg = TopoNavEdgeActionMsg()
+
+                self.get_logger().info("seg: {}, action: {}, edge id: {} ".format(seg_i, action, edge_id))
                 
-            # if((action == self.ACTIONS.NAVIGATE_TO_POSE) or (action == self.ACTIONS.ROW_CHANGE)):
-            #     controller_plugin = self.ACTIONS.bt_tree_with_control_server_config[self.ACTIONS.NAVIGATE_TO_POSE]
-            #     control_server_configs[self.ACTIONS.NAVIGATE_TO_POSE] = self.ACTIONS.planner_with_goal_checker_config[controller_plugin] 
-            #     control_server_configs[self.ACTIONS.NAVIGATE_TO_POSE + "pd_reg"] = self.ACTIONS.planner_with_pd_regulator_config[controller_plugin]
-            #     if(self.ACTIONS.NAVIGATE_TO_POSE in self.bt_trees):
-            #         nav_goal.behavior_tree = self.bt_trees[self.ACTIONS.NAVIGATE_TO_POSE]
-            #     edge_action_is_valid = True
+                
+                self.get_logger().info(f"Segment {seg_i} -- action {action}")                    
+                current_config = None
+                if action in self.ACTIONS.bt_tree_with_control_server_config:
+                    controller_plugin = self.ACTIONS.bt_tree_with_control_server_config[action]
+                    current_config = self.ACTIONS.planner_with_goal_checker_config[controller_plugin].copy()
+
+                    if action == self.ACTIONS.NAVIGATE_TO_POSE and seg_i < len(poses) - 1:
+                        self.get_logger().info(f"Segment {seg_i} is intermediate NAVIGATE_TO_POSE. Relaxing yaw tolerance.")
+                        current_config['goal_checker.yaw_goal_tolerance'] = 2 * math.pi
                     
-            # if(action == self.ACTIONS.GOAL_ALIGN):
-            #     controller_plugin = self.ACTIONS.bt_tree_with_control_server_config[self.ACTIONS.GOAL_ALIGN]
-            #     control_server_configs[self.ACTIONS.GOAL_ALIGN] = self.ACTIONS.planner_with_goal_checker_config[controller_plugin]
-            #     control_server_configs[self.ACTIONS.GOAL_ALIGN + "pd_reg"] = self.ACTIONS.planner_with_pd_regulator_config[controller_plugin] 
-            #     if(self.ACTIONS.GOAL_ALIGN in self.bt_trees):
-            #         nav_goal.behavior_tree = self.bt_trees[self.ACTIONS.GOAL_ALIGN]
-            #     edge_action_is_valid = True
-            if action in self.ACTIONS.bt_tree_with_control_server_config:
-                controller_plugin = self.ACTIONS.bt_tree_with_control_server_config[action]
-                control_server_configs[action] = self.ACTIONS.planner_with_goal_checker_config[controller_plugin]
-                if(action in self.bt_trees):
+                control_server_configs.append(current_config)
+
+                if current_config:
+                    self.get_logger().warn(f"Segment {seg_i} | XY tol: {current_config['goal_checker.xy_goal_tolerance']} | Yaw tol: {current_config['goal_checker.yaw_goal_tolerance']}")
+
+
+                if action in self.bt_trees:
                     nav_goal.behavior_tree = self.bt_trees[action]
                 edge_action_is_valid = True
                 
-            if(action == self.ACTIONS.ROW_TRAVERSAL and self.in_row_operation == True and (len(nodes) > 0)):
-                # print("===========edge_id {} edge_ids {}".format(edge_id, edge_ids))
-                self.target_row_edge_id = edge_id.split("_")[0]
-                tag_id = self.target_row_edge_id.split("-")[1]
-                self.target_row_edge_id = self.target_row_edge_id[:-1] + self.ACTIONS.ROW_START_INDEX
-                tag_id = tag_id[:-1] + self.ACTIONS.ROW_START_INDEX
+                if(action == self.ACTIONS.ROW_TRAVERSAL and self.in_row_operation == True and (len(nodes) > 0)):
+                    self.get_logger().warn(f"Segment {seg_i} action == self.ACTIONS.ROW_TRAVERSAL and self.in_row_operation == True and (len(nodes) > 0)")
+                    action, action_msg = handle_row_operation()
 
-                self.get_logger().info("Edge Action Manager: Action in_row_operation ")
-                self.get_logger().info("Edge Action Manager: Edge id and tag id  {} {}".format(self.target_row_edge_id, tag_id))
-                cen =  self.route_search.get_node_from_tmap2(self.target_row_edge_id)
-                children = self.route_search.get_connected_nodes_tmap2(cen)
-                selected_row_edge_nodes = {}
-                for next_edge in children:
-                    if(next_edge.startswith(self.ACTIONS.OUTSIDE_EDGE_START_INDEX)):
-                        upper_nodes =  self.route_search.get_node_from_tmap2(next_edge)["node"]["edges"]
-                        for edges_all in upper_nodes:
-                            if((self.ACTIONS.GOAL_ALIGN_INDEX[0] in edges_all["node"]) 
-                                                and (self.target_row_edge_id not in edges_all["node"])):
-                                
-                                targte_pose = self.route_search.get_node_from_tmap2(edges_all["node"])["node"]["pose"]
-                                targte_pose_x_y = np.array([targte_pose["position"]["x"], targte_pose["position"]["y"]])
-                                selected_row_edge_nodes[edges_all["node"]] = (targte_pose, targte_pose_x_y)
-                
-                center_pose = self.route_search.get_node_from_tmap2(self.target_row_edge_id)["node"]["pose"]["position"]
-                center_pose = np.array([center_pose["x"], center_pose["y"]])
-                distance_vector = []
-                distance_with_edge_ids = {}
-                index_dis = 0
-                for the_key, the_value in selected_row_edge_nodes.items():  
-                    distance_vector.append(np.linalg.norm(center_pose- the_value[1]))
-                    distance_with_edge_ids[index_dis] = the_key
-                    index_dis += 1
-                # print("index distance .....", distance_vector)    
-                min_indices = self.two_smallest_indices(distance_vector)
-                children = []
-                for index in min_indices:
-                    children.append(distance_with_edge_ids[index])
-                    # print("----------Index.... {} ".format(distance_with_edge_ids[index]))
-                
-                # Sort the list based on the extracted number in descending order
-                children = sorted(children, key=self.extract_number, reverse=True)
-
-                # self.get_logger().info("Edge Action Manager: Next Egdges edges {}".format(selected_row_edge_nodes))  
-                        
-                self.get_logger().info("Edge Action Manager: Children edges {}".format(children)) 
-                
-                target_pose_frame_id = nodes[0]["target_pose"]["header"]["frame_id"]
-                last_goal = nodes[-1]
-
-                if(len(nodes) > 1):
-                    if(self.check_target_is_same(cen["node"], last_goal["target_pose"])):
-                        last_goal = nodes[0]
-
-                selected_last_node = last_goal
-                if(len(nodes) == 1):
-                    edges = edge_id.split("_")
-                    if(len(edges) == 2):
-                        edge_0, edge_1 = edges[0], edges[1]
-                        tag_0, tag_1 = edge_0.split("-")[1], edge_1.split("-")[1]
-                        if(tag_1 == tag_id):
-                                selected_last_node["target_pose"]["pose"] = self.route_search.get_node_from_tmap2(edge_0)["node"]["pose"]
-                        elif(tag_0 == tag_id):
-                                selected_last_node["target_pose"]["pose"] = self.route_search.get_node_from_tmap2(edge_1)["node"]["pose"]
-                    elif(len(selected_last_node) == 0 and self.current_node is not None):
-                        selected_last_node["target_pose"]["pose"] = self.route_search.get_node_from_tmap2(self.current_node)["node"]["pose"]
-                    else:
-                        self.get_logger().error("Cound not find bounday edge...") 
-                        
-                # print("===============nodes {}".format(nodes)) 
-                self.selected_edges = {}    
-                for child in children:
-                    # self.get_logger().info("=============children h selected ===== {} {} ".format(child, tag_id))
-                    if tag_id in child:
-                        # self.get_logger().info("=============children h selected ===== {}".format(child))
-                        child_node = self.route_search.get_node_from_tmap2(child)
-                        # self.get_logger().info("=============after children===== {}".format(child))
-                        # distance = self.route_search.get_distance_to_node_tmap2(cen, child_node)
-                        side_intermediate_pose = self.get_intermediate_pose(cen, child_node, target_pose_frame_id)
-                        side_last_intermediate_pose = self.get_last_intermediate_pose(side_intermediate_pose, cen, selected_last_node)
-                        self.selected_edges[child] = [side_intermediate_pose, side_last_intermediate_pose]
-                        # self.get_logger().info("=============children i selected ===== {} {} ".format(side_intermediate_pose, side_last_intermediate_pose))
-
-                if(len(self.selected_edges) == 1):
-                    self.selected_edges["side_wall"] = self.get_intermediate_poses_interpolated(self.selected_edges, cen, selected_last_node)
-
-                if(self.check_edges_area_same(self.selected_edges)):
-                    edge_action_is_valid = True
-                    self.get_logger().error("Edge Action Manager: Bounday edges are same")
-                else:
-                    edge_action_is_valid = True   
+                self.get_logger().info(" Action {}  Bt_tree : {}".format(action, nav_goal.behavior_tree))
                 if edge_action_is_valid:
-                    action_msg.setSideEdges(self.selected_edges, target_pose_frame_id) 
-                    if self.is_row_boundary_published == False:
-                        boundary_info = action_msg.getBoundary()
-                        self.boundary_publisher.publish(boundary_info)
-                        self.is_row_boundary_published = True  
-                    action = self.ACTIONS.ROW_OPERATION
+                    self.get_logger().warn(f"Segment {seg_i} edge_action_is_valid")
+                    action_msg.setAction(action)
+                    action_msg.setNavGoal(nav_goal)
+                    action_msgs.append(action_msg)
 
-            self.get_logger().info("Edge Action Manager:  Action {}  Bt_tree : {}".format(action, nav_goal.behavior_tree))
-            if edge_action_is_valid:
-                action_msg.setAction(action)
-                action_msg.setNavGoal(nav_goal)
-                action_msgs.append(action_msg)
-                
+        # ==================================================================
+        #  ELSE (Go-To-Node Mode): Use the original logic
+        # ==================================================================
+        else:
+
+            self.get_logger().debug("[get_navigate_through_poses_goal] Executing with Go-To-Node logic.")
+        
+            for seg_i, nodes  in poses.items():
+                nav_goal = NavigateThroughPoses.Goal()
+                for pose in nodes:
+                    target_pose = self.create_pose_stamped_msg(pose["target_pose"]["header"]["frame_id"], pose["target_pose"]["pose"])
+                    nav_goal.poses.append(target_pose)
+
+                action = actions[seg_i][0]
+                edge_id = edge_ids[seg_i][0]
+                action_msg = TopoNavEdgeActionMsg()
+
+                self.get_logger().info("seg: {}, action: {}, edge id: {} ".format(seg_i, action, edge_id))
+
+                if action in self.ACTIONS.bt_tree_with_control_server_config:
+                    controller_plugin = self.ACTIONS.bt_tree_with_control_server_config[action]
+                    control_server_configs[action] = self.ACTIONS.planner_with_goal_checker_config[controller_plugin]
+                    if(action in self.bt_trees):
+                        nav_goal.behavior_tree = self.bt_trees[action]
+                    edge_action_is_valid = True
+
+                if(action == self.ACTIONS.ROW_TRAVERSAL and self.in_row_operation == True and (len(nodes) > 0)):
+                    action, action_msg = handle_row_operation()
+
+                self.get_logger().info(" Action {}  Bt_tree : {}".format(action, nav_goal.behavior_tree))
+                if edge_action_is_valid:
+                    action_msg.setAction(action)
+                    action_msg.setNavGoal(nav_goal)
+                    action_msgs.append(action_msg)
+
+        self.get_logger().debug("[get_navigate_through_poses_goal] - Control server configs: {}".format(control_server_configs))
         return action_msgs, control_server_configs
+    
     
     def get_intermediate_poses_interpolated(self, side_poses, center_pose, last_pose):
         
@@ -1069,7 +796,7 @@ class EdgeActionManager(rclpy.node.Node):
         return target_pose 
 
     def get_result(self, ):
-        return self.goal_resposne
+        return self.goal_response
 
     def execute_row_operation_one_step(self, next_goal, target_pose_frame_id):
         target_goal = NavigateThroughPoses.Goal()
@@ -1131,7 +858,7 @@ class EdgeActionManager(rclpy.node.Node):
                     self.action_status = status
                     self.get_logger().info("Executing the action response with status {}".format(self.get_status_msg(self.action_status)))
                     self.current_action = self.action_name
-                    self.goal_resposne = self.goal_get_result_future.result()
+                    self.goal_response = self.goal_get_result_future.result()
                     if((self.get_status_msg(self.action_status) == "STATUS_EXECUTING") or (self.get_status_msg(self.action_status) == "STATUS_SUCCEEDED")):
                         self.get_logger().info("action is completed {}".format(target_action))
                         break  
@@ -1291,76 +1018,36 @@ class EdgeActionManager(rclpy.node.Node):
                                             .format(next_goal.pose.position.x, next_goal.pose.position.y))
                         break
         return True 
-
-    # def execute(self):     
-    #     if not self.client.server_is_ready():
-    #         self.get_logger().info("Waiting for the action server  {}...".format(self.action_server_name))
-    #         self.client.wait_for_server(timeout_sec=2)
-        
-    #     if not self.client.server_is_ready():
-    #         self.get_logger().info("action server  {} not responding ... can not perform any action".format(self.action_server_name))
-    #         return 
-        
-    #     for action_msg in self.action_msgs:
-    #         self.get_logger().error("[LC][execute] - I AM HERE")
-    #         target_goal, target_action = action_msg.getNavGoal(), action_msg.getAction()
-    #         self.get_logger().error("[LC][execute] - target_action {}".format(target_action))
-    #         self.get_logger().info("Executing action : {} ".format(target_action))
-    #         self.get_logger().info("===========================================Executing action : {} ".format(self.control_server_configs))
-    #         if target_action in self.control_server_configs:
-    #             self.get_logger().error("[LC][execute] - target_action in self.control_server_configs")
-    #             control_server_config = self.control_server_configs[target_action]
-    #             self.update_params_control_server.set_params(control_server_config)
-                        
-    #         if (target_action == self.ACTIONS.ROW_OPERATION):
-    #             self.get_logger().error("[LC][execute] - target_action == self.ACTIONS.ROW_OPERATION")
-    #             row_operation_is_completed = self.execute_row_operation_action(action_msg)
-    #             if(row_operation_is_completed == False):
-    #                 return False
-    #         else:
-    #             self.get_logger().error("[LC][execute] - else")
-    #             self.robot_current_status = self.ACTIONS.ROBOT_STATUS_AUTONOMOUS_NAVIGATION_STATE
-    #             self.publish_robot_current_status_msg(self.ACTIONS.NAVIGATE_THROUGH_POSES, self.robot_current_status)
-    #             send_goal_future = self.client.send_goal_async(target_goal,  feedback_callback=self.feedback_callback)
-    #             self.get_logger().error("[LC][execute] - send_goal - target_goal {}".format(target_goal))
-    #             goal_accepted = self.send_goal_request(send_goal_future, target_action)
-    #             if(goal_accepted == False):
-    #                 self.get_logger().error("[LC][execute] - goal_accepted == False")
-    #                 self.robot_current_status = self.ACTIONS.ROBOT_STATUS_DISABLE_STATE
-    #                 self.publish_robot_current_status_msg(self.ACTIONS.NAVIGATE_THROUGH_POSES, self.robot_current_status)
-    #                 return False 
-    #             processed_goal = self.processing_goal_request(target_action)
-    #             if(processed_goal == False):
-    #                 self.get_logger().error("[LC][execute] - processed_goal == False")
-    #                 self.robot_current_status = self.ACTIONS.ROBOT_STATUS_DISABLE_STATE
-    #                 self.publish_robot_current_status_msg(self.ACTIONS.NAVIGATE_THROUGH_POSES, self.robot_current_status)
-    #                 return processed_goal
-    #     self.robot_current_status = self.ACTIONS.ROBOT_STATUS_NATURAL_STATE
-    #     self.publish_robot_current_status_msg(self.ACTIONS.NAVIGATE_THROUGH_POSES, self.robot_current_status)
-    #     return True 
                             
                             
     def execute(self):     
+        self.get_logger().warn("===========================================Executing action===========================================")
         if not self.client.server_is_ready():
             self.get_logger().info("Waiting for the action server  {}...".format(self.action_server_name))
             self.client.wait_for_server(timeout_sec=2)
         
         if not self.client.server_is_ready():
             self.get_logger().info("action server  {} not responding ... can not perform any action".format(self.action_server_name))
-            return 
-        
+            return
+
+        self.get_logger().info("Number of actions : {} ".format(len(self.action_msgs)))
         for index, action_msg in enumerate(self.action_msgs):
             target_goal, target_action = action_msg.getNavGoal(), action_msg.getAction()
-            self.get_logger().info("Executing action : {} ".format(target_action))
+            self.get_logger().warn("Executing action : {} ".format(target_action))
+
+            # Publish segment destination for visualisation purposes
+            current_destination = (target_goal.poses[-1].pose.position.x, target_goal.poses[-1].pose.position.y)
+            self.get_logger().warn("Current destination : {} ".format(self.destination_node_str[current_destination]))
+            self.current_dest.publish(String(data=self.destination_node_str[current_destination]))
             
-            # This block now handles both lists and dictionaries.
+            # Handles both lists and dictionaries
             control_server_config = None
             if isinstance(self.control_server_configs, list):
-                # New exec_policy mode: Get the config for this specific index.
+                # New exec_policy mode
                 if index < len(self.control_server_configs):
                     control_server_config = self.control_server_configs[index]
             elif isinstance(self.control_server_configs, dict):
-                # Original go-to-node mode: Get the config using the action name as the key.
+                # Original go-to-node mode
                 if target_action in self.control_server_configs:
                     control_server_config = self.control_server_configs[target_action]
             

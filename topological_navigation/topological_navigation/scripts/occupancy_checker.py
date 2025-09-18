@@ -11,6 +11,7 @@ import tf_transformations
 from std_msgs.msg import String
 from visualization_msgs.msg import Marker, MarkerArray
 from rclpy.qos import QoSProfile, DurabilityPolicy
+from topological_navigation_msgs.msg import TopologicalOccupiedNode
 
 # ===============================================================
 #  UTILS
@@ -31,7 +32,7 @@ def load_waypoints_from_tmap(file_path):
                 pos = node_entry['node']['pose']['position']
                 orient = node_entry['node']['pose']['orientation']
 
-                # --- Create the transformation matrix for this waypoint ---
+                # Create the transformation matrix for this waypoint
                 translation = [pos['x'], pos['y'], pos['z']]
                 rotation = [orient['x'], orient['y'], orient['z'], orient['w']]
                     
@@ -39,7 +40,7 @@ def load_waypoints_from_tmap(file_path):
                 rot_matrix = tf_transformations.quaternion_matrix(rotation)
                 transform_matrix = np.dot(trans_matrix, rot_matrix)
 
-                # --- Transform local vertices into map frame vertices ---
+                # Transform local vertices into map frame vertices
                 local_verts = node_entry['node'].get('verts', [])
                 map_frame_verts = []
                 for vert in local_verts:
@@ -49,7 +50,7 @@ def load_waypoints_from_tmap(file_path):
                     # Store the transformed (x, y) coordinates
                     map_frame_verts.append((map_point[0], map_point[1]))
 
-                # --- Store the pre-transformed data ---
+                # Store the pre-transformed data
                 waypoints_data[node_name] = {
                     'pose': (pos['x'], pos['y']),
                     'verts': map_frame_verts
@@ -69,7 +70,7 @@ def load_waypoints_from_tmap(file_path):
 # ===============================================================
 class PoseTransformerNode(Node):
     def __init__(self):
-        super().__init__('pose_transformer') # Give it a unique name
+        super().__init__('pose_transformer')
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
         self.publisher = self.create_publisher(PoseArray, '/plan_in_map_frame', 10)
@@ -116,35 +117,37 @@ class PoseTransformerNode(Node):
 # ===============================================================
 #  NODE B: The Checker Class
 # ===============================================================
-class OverlapCheckerNode(Node):
+class OccupancyCheckerNode(Node):
     def __init__(self):
-        super().__init__('overlap_checker')
+        super().__init__('occupancy_checker')
         
         # 1. DECLARE PARAMETERS for file path and threshold
         self.declare_parameter('tmap', rclpy.Parameter.Type.STRING)
-        self.declare_parameter('overlap_threshold', rclpy.Parameter.Type.DOUBLE)
+        self.declare_parameter('occupancy_threshold', rclpy.Parameter.Type.DOUBLE)
 
         # 2. GET PARAMETER VALUES
         self.tmap_path = self.get_parameter('tmap').get_parameter_value().string_value
-        self.overlap_threshold = self.get_parameter('overlap_threshold').get_parameter_value().double_value
+        self.occupancy_threshold = self.get_parameter('occupancy_threshold').get_parameter_value().double_value
 
-        # 3. subscribe to the '/rownav_teb_poses' topic.
+        # 3. subscribe to the '/plan_in_map_frame' topic.
         self.create_subscription(PoseArray, '/plan_in_map_frame', self.teb_poses_cb, 10)
+        self.create_subscription(String, '/topological_navigation/current_destination', self.current_destination_cb, 10)
 
         # 4. Load waypoints from the specified topological map file
         self.tmap = load_waypoints_from_tmap(self.tmap_path)
 
         # 5. Create Publisher and State variable to only publish when the set of waypoints changes
-        self.overlap_pub = self.create_publisher(String, '/overlapped_waypoints', 10)
+        self.occupancy_pub = self.create_publisher(TopologicalOccupiedNode, '/topological_navigation/occupied_node', 10)
         self.last_published_wps = set()
+        self.current_destination = None
         
-        self.get_logger().info('Overlap Checker has started.')
+        self.get_logger().info('Occupancy Checker has started.')
         if self.tmap:
             self.get_logger().info(f'Successfully loaded and now monitoring {len(self.tmap)} waypoints.')
         else:
             self.get_logger().warn('No waypoints loaded. Please check the topological map file path.')
             return
-        self.get_logger().info(f'Overlap threshold is {self.overlap_threshold} meters.')
+        self.get_logger().info(f'occupancy threshold is {self.occupancy_threshold} meters.')
     
 
     def teb_poses_cb(self, msg):
@@ -152,44 +155,44 @@ class OverlapCheckerNode(Node):
         Callback to check if any received pose overlaps with waypoints.
         Uses a polygon check if vertices are available, otherwise uses a distance threshold.
         """
-        overlapped_wps = set()
+        occupied_wps = set()
+        if self.current_destination is not None: occupied_wps.add(self.current_destination)
         for i, pose in enumerate(msg.poses):
             for wp, wp_data in self.tmap.items():
-                is_overlapping = False
+                is_occupied = False
                 verts = wp_data.get('verts', [])
                 if verts:
                     if self._is_inside_polygon(pose.position.x, pose.position.y, verts):
-                        is_overlapping = True
-                        overlapped_wps.add(wp)
+                        is_occupied = True
+                        occupied_wps.add(wp)
                 else:
                     self.get_logger().warn("Checking overlap using DISTANCE THRESHOLD.")
                     waypoint_pose = wp_data['pose']
                     distance = math.hypot(pose.position.x - waypoint_pose[0], pose.position.y - waypoint_pose[1])
                     
-                    if distance < self.overlap_threshold:
-                        self.get_logger().warn(f"OVERLAP: Pose #{i} is NEAR Waypoint {wp} (using distance check).")
-                        is_overlapping = True
-                        overlapped_wps.add(wp)
+                    if distance < self.occupancy_threshold:
+                        self.get_logger().warn(f"OCCUPANCY: Pose #{i} is NEAR Waypoint {wp} (using distance check).")
+                        is_occupied = True
+                        occupied_wps.add(wp)
                 
-                if is_overlapping:
+                if is_occupied:
                     break
 
-        if overlapped_wps != self.last_published_wps:
+        if occupied_wps != self.last_published_wps:
             # Create the message object
-            overlap_msg = String()
-            overlap_msg.data = ','.join(sorted(list(overlapped_wps)))
-            self.overlap_pub.publish(overlap_msg)
-            
+            occupancy_msg = TopologicalOccupiedNode()
+            occupancy_msg.nodes = list(occupied_wps)
+            self.occupancy_pub.publish(occupancy_msg)
+
             # Log the change for debugging
-            if overlap_msg.data:
-                self.get_logger().warn(f"PUBLISHED Overlapping Waypoints: {overlap_msg.data}")
-            else:
-                self.get_logger().info("PUBLISHED: Overlap cleared.")
+            if occupancy_msg.nodes: self.get_logger().debug(f"Occupied nodes: {occupancy_msg.nodes}")
 
             # Update the state for the next check
-            self.last_published_wps = overlapped_wps
-           
-        
+            self.last_published_wps = occupied_wps
+            
+    def current_destination_cb(self, msg: String):
+        self.current_destination = msg.data
+
     def _is_inside_polygon(self, point_x, point_y, polygon_verts):
         num_verts = len(polygon_verts)
         is_inside = False
@@ -210,73 +213,72 @@ class OverlapCheckerNode(Node):
         return is_inside
     
     
-# ==============================================================================
-#  NODE C: The Visualizer Class
-# ==============================================================================
-class WaypointVisualizerNode(Node):
-    """
-    Subscribes to the list of overlapped waypoints and publishes visualization markers.
-    """
-    def __init__(self):
-        super().__init__('overlapped_waypoint_visualizer')
-        self.declare_parameter('tmap', rclpy.Parameter.Type.STRING)
-        self.tmap_path = self.get_parameter('tmap').get_parameter_value().string_value
-        self.tmap = load_waypoints_from_tmap(self.tmap_path)
+# # ==============================================================================
+# #  NODE C: The Visualiser Class
+# # ==============================================================================
+# class WaypointVisualiserNode(Node):
+#     """
+#     Subscribes to the list of occupied waypoints and publishes visualization markers.
+#     """
+#     def __init__(self):
+#         super().__init__('occupied_waypoint_visualiser')
+#         self.declare_parameter('tmap', rclpy.Parameter.Type.STRING)
+#         self.tmap_path = self.get_parameter('tmap').get_parameter_value().string_value
+#         self.tmap = load_waypoints_from_tmap(self.tmap_path)
 
-        self.last_marker_count = 0
+#         self.last_marker_count = 0
         
-        # A "latching" publisher ensures RViz gets the last message when it starts
-        latching_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
-        self.marker_pub = self.create_publisher(MarkerArray, '/occupied_waypoint_markers', latching_qos)
-        
-        self.create_subscription(String, '/overlapped_waypoints', self.overlap_callback, 10)
-        self.get_logger().info('Waypoint Visualizer component has started.')
+#         latching_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+#         self.marker_pub = self.create_publisher(MarkerArray, '/topological_navigation/visual/occupied_node', latching_qos)
 
-    def overlap_callback(self, msg):
-        waypoint_names = msg.data.split(',') if msg.data else []
-        marker_array = MarkerArray()
+#         self.create_subscription(TopologicalOccupiedNode, '/topological_navigation/occupied_node', self.occupancy_cb, 10)
+#         self.get_logger().info('Waypoint Visualiser component has started.')
 
-        # Create ADD markers for all currently overlapped waypoints
-        for i, wp_name in enumerate(waypoint_names):
-            wp_data = self.tmap.get(wp_name)
-            if not wp_data: continue
+#     def occupancy_cb(self, msg):
+#         waypoint_names = msg.nodes if msg.nodes else []
+#         marker_array = MarkerArray()
 
-            marker = Marker()
-            marker.header.frame_id = "map"
-            marker.header.stamp = self.get_clock().now().to_msg()
-            marker.ns = "occupied_waypoints"
-            marker.id = i
-            marker.type = Marker.SPHERE
-            marker.action = Marker.ADD
+#         # Create ADD markers for all currently occupied waypoints
+#         for i, wp_name in enumerate(waypoint_names):
+#             wp_data = self.tmap.get(wp_name)
+#             if not wp_data: continue
+
+#             marker = Marker()
+#             marker.header.frame_id = "map"
+#             marker.header.stamp = self.get_clock().now().to_msg()
+#             marker.ns = "occupied_waypoints"
+#             marker.id = i
+#             marker.type = Marker.SPHERE
+#             marker.action = Marker.ADD
             
-            pose_coords = wp_data['pose']
-            marker.pose.position.x = pose_coords[0]
-            marker.pose.position.y = pose_coords[1]
-            marker.pose.position.z = 0.15  # Lift it off the ground slightly
-            marker.pose.orientation.w = 1.0
+#             pose_coords = wp_data['pose']
+#             marker.pose.position.x = pose_coords[0]
+#             marker.pose.position.y = pose_coords[1]
+#             marker.pose.position.z = 0.15  # Lift it off the ground slightly
+#             marker.pose.orientation.w = 1.0
 
-            marker.scale.x = 1.0
-            marker.scale.y = 1.0
-            marker.scale.z = 0.1
+#             marker.scale.x = 1.0
+#             marker.scale.y = 1.0
+#             marker.scale.z = 0.1
 
-            marker.color.r = 1.0  # Red
-            marker.color.g = 0.0
-            marker.color.b = 0.0
-            marker.color.a = 0.8  # Slightly transparent
+#             marker.color.r = 1.0  # Red
+#             marker.color.g = 0.0
+#             marker.color.b = 0.0
+#             marker.color.a = 0.8  # Slightly transparent
             
-            marker_array.markers.append(marker)
+#             marker_array.markers.append(marker)
 
-        # Create DELETE markers for any old markers that are no longer needed
-        for i in range(len(waypoint_names), self.last_marker_count):
-            marker = Marker()
-            marker.header.frame_id = "map"
-            marker.ns = "occupied_waypoints"
-            marker.id = i
-            marker.action = Marker.DELETE
-            marker_array.markers.append(marker)
+#         # Create DELETE markers for any old markers that are no longer needed
+#         for i in range(len(waypoint_names), self.last_marker_count):
+#             marker = Marker()
+#             marker.header.frame_id = "map"
+#             marker.ns = "occupied_waypoints"
+#             marker.id = i
+#             marker.action = Marker.DELETE
+#             marker_array.markers.append(marker)
 
-        self.marker_pub.publish(marker_array)
-        self.last_marker_count = len(waypoint_names)
+#         self.marker_pub.publish(marker_array)
+#         self.last_marker_count = len(waypoint_names)
 
 # ===============================================================
 #  The Main Execution Block
@@ -286,8 +288,8 @@ def main(args=None):
 
     # Create instances of both nodes
     transformer_node = PoseTransformerNode()
-    checker_node = OverlapCheckerNode()
-    visualizer_node = WaypointVisualizerNode()
+    checker_node = OccupancyCheckerNode()
+    # visualizer_node = WaypointVisualiserNode()
 
     # Create a MultiThreadedExecutor
     executor = MultiThreadedExecutor()
@@ -295,7 +297,7 @@ def main(args=None):
     # Add both nodes to the executor
     executor.add_node(transformer_node)
     executor.add_node(checker_node)
-    executor.add_node(visualizer_node)
+    # executor.add_node(visualizer_node)
 
     try:
         # Spin the executor to run both nodes
@@ -306,7 +308,7 @@ def main(args=None):
         executor.shutdown()
         transformer_node.destroy_node()
         checker_node.destroy_node()
-        visualizer_node.destroy_node()
+        # visualizer_node.destroy_node()
         rclpy.shutdown()
 
 if __name__ == '__main__':

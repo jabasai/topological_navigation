@@ -45,6 +45,7 @@ set(msg_files
   "msg/CurrentEdge.msg"
   "msg/NavStatistics.msg"
   "msg/TopologicalRoute.msg"
+  "msg/TopologicalOccupiedNode.msg"
   "msg/AddEdgeReq.msg"
   "msg/AddNodeReq.msg"
   "msg/SetInfluenceZoneReq.msg"
