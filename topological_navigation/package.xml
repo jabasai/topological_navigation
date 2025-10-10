@@ -30,6 +30,7 @@
   <depend>actionlib_msgs</depend>
   <depend>visualization_msgs</depend>
   <depend>topological_navigation_msgs</depend>
+  <depend>nav2_msgs</depend> <export>
 
   <depend>tf_transformations</depend>
   <depend>launch_pytest</depend>
