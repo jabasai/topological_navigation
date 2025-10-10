@@ -83,11 +83,11 @@ class ActionsType:
         self.status_mapping[5] = "STATUS_CANCELED"
         self.status_mapping[6] = "STATUS_ABORTED"
 
-        self.goal_cancle_error_codes = {} 
-        self.goal_cancle_error_codes[0] = "ERROR_NONE"
-        self.goal_cancle_error_codes[1] = "ERROR_REJECTED"
-        self.goal_cancle_error_codes[2] = "ERROR_UNKNOWN_GOAL_ID"
-        self.goal_cancle_error_codes[3] = "ERROR_GOAL_TERMINATED"
+        self.goal_cancel_error_codes = {} 
+        self.goal_cancel_error_codes[0] = "ERROR_NONE"
+        self.goal_cancel_error_codes[1] = "ERROR_REJECTED"
+        self.goal_cancel_error_codes[2] = "ERROR_UNKNOWN_GOAL_ID"
+        self.goal_cancel_error_codes[3] = "ERROR_GOAL_TERMINATED"
 
         self.planner_with_goal_checker_config = {
             "dwb_core::DWBLocalPlanner": {

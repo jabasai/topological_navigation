@@ -79,11 +79,11 @@ class TopoMap2Vis(rclpy.node.Node):
         self.status_mapping[4] = "STATUS_SUCCEEDED"
         self.status_mapping[5] = "STATUS_CANCELED"
         self.status_mapping[6] = "STATUS_ABORTED"
-        self.goal_cancle_error_codes = {} 
-        self.goal_cancle_error_codes[0] = "ERROR_NONE"
-        self.goal_cancle_error_codes[1] = "ERROR_REJECTED"
-        self.goal_cancle_error_codes[2] = "ERROR_UNKNOWN_GOAL_ID"
-        self.goal_cancle_error_codes[3] = "ERROR_GOAL_TERMINATED"
+        self.goal_cancel_error_codes = {} 
+        self.goal_cancel_error_codes[0] = "ERROR_NONE"
+        self.goal_cancel_error_codes[1] = "ERROR_REJECTED"
+        self.goal_cancel_error_codes[2] = "ERROR_UNKNOWN_GOAL_ID"
+        self.goal_cancel_error_codes[3] = "ERROR_GOAL_TERMINATED"
 
         rclpy.get_default_context().on_shutdown(self._on_node_shutdown)
 
@@ -131,8 +131,7 @@ class TopoMap2Vis(rclpy.node.Node):
                     self.get_logger().info("End generating map...")
                 break 
 
-        self.topo_route_sub = self.create_subscription(TopologicalRoute, "topological_navigation/Route"
-                                                        , self.route_cb, qos_profile=self.latching_qos, callback_group=self.callback_goto_subs)
+        # self.topo_route_sub = self.create_subscription(TopologicalRoute, "topological_navigation/Route", self.route_cb, qos_profile=self.latching_qos, callback_group=self.callback_goto_subs)
         self.get_logger().info("All Done ...")
 
     def topo_map_cb(self, msg):
@@ -141,52 +140,55 @@ class TopoMap2Vis(rclpy.node.Node):
         self._map_received = True  
         self.create_map_marker()
 
-    def route_cb(self, msg):
-        self.clear_route() # clear the last route
-        self.route_marker = MarkerArray()
-        self.route_marker.markers=[]
-        idn = 0
-        if self.topological_map is not None:
-            for i in range(1,len(msg.nodes)):
-                marker = self.get_route_marker(msg.nodes[i-1], msg.nodes[i], idn)
-                self.route_marker.markers.append(marker)
-                idn+=1
-            self.routevis_pub.publish(self.route_marker)
+    # def route_cb(self, msg):
+    #     self.get_logger().error("[route_cb] - NEW ROUTE RECEIVED")
+    #     self.clear_route() # clear the last route
+    #     self.route_marker = MarkerArray()
+    #     self.route_marker.markers=[]
+    #     idn = 0
+    #     if self.topological_map is not None:
+    #         for i in range(1,len(msg.nodes)):
+    #             marker = self.get_route_marker(msg.nodes[i-1], msg.nodes[i], idn)
+    #             self.route_marker.markers.append(marker)
+    #             idn+=1
+    #         self.routevis_pub.publish(self.route_marker)
+    #     self.get_logger().error("[route_cb] - ✅ DONE!")
 
-    def clear_route(self):
-        self.route_marker = MarkerArray()
-        self.route_marker.markers=[]
-        marker = Marker()
-        marker.action = marker.DELETEALL
-        self.route_marker.markers.append(marker)
-        self.routevis_pub.publish(self.route_marker) 
+    # def clear_route(self):
+    #     self.route_marker = MarkerArray()
+    #     self.route_marker.markers=[]
+    #     marker = Marker()
+    #     marker.action = marker.DELETEALL
+    #     self.route_marker.markers.append(marker)
+    #     self.routevis_pub.publish(self.route_marker) 
 
-    def get_route_marker(self, origin, end, idn):
-        marker = Marker()
-        marker.id = idn
-        marker.header.frame_id = 'topo_map'
-        marker.type = marker.ARROW
-        V1=Point()
-        V2=Point()
-        origin_node = get_node(self.topological_map['nodes'], origin)
-        end_node = get_node(self.topological_map['nodes'], end)
-        V1=self.node2pose(origin_node['pose']).position
-        V1.z += 0.25
-        V2=self.node2pose(end_node['pose']).position
-        V2.z += 0.25
-        marker.pose.orientation.w= 1.0
-        marker.scale.x = 0.2
-        marker.scale.y = 0.2
-        marker.scale.z = 0.4
-        marker.color.a = 0.5
-        marker.color.r = 0.33
-        marker.color.g = 0.99
-        marker.color.b = 0.55
-        marker.points.append(V1)
-        marker.points.append(V2)
-        # marker.lifetime.sec = 2 
-        marker.ns='/route_pathg'
-        return marker
+    # def get_route_marker(self, origin, end, idn):
+    #     marker = Marker()
+    #     marker.id = idn
+    #     marker.header.frame_id = 'topo_map'
+    #     marker.type = marker.ARROW
+    #     V1=Point()
+    #     V2=Point()
+    #     origin_node = get_node(self.topological_map['nodes'], origin)
+    #     end_node = get_node(self.topological_map['nodes'], end)
+    #     V1=self.node2pose(origin_node['pose']).position
+    #     V1.z += 0.25
+    #     V2=self.node2pose(end_node['pose']).position
+    #     V2.z += 0.25
+    #     marker.pose.orientation.w= 1.0
+    #     marker.scale.x = 0.2
+    #     marker.scale.y = 0.2
+    #     marker.scale.z = 0.4
+    #     marker.color.a = 1.0
+    #     # marker.color.a = 0.5
+    #     marker.color.r = 0.33
+    #     marker.color.g = 0.99
+    #     marker.color.b = 0.55
+    #     marker.points.append(V1)
+    #     marker.points.append(V2)
+    #     # marker.lifetime.sec = 2 
+    #     marker.ns='/route_pathg'
+    #     return marker
 
 
     def create_map_marker(self):
@@ -288,19 +290,19 @@ class TopoMap2Vis(rclpy.node.Node):
                     # rclpy.spin_until_future_complete(self, cancel_future, executor=self.executor_goto_client, timeout_sec=2.0)
                     if cancel_future.done() and self.goal_get_result_future.done():
                         self.action_status = self.goal_get_result_future.result().status
-                        self.get_logger().info("The goal cancel error code {} ".format(self.get_goal_cancle_error_msg(cancel_future.result().return_code)))
+                        self.get_logger().info("The goal cancel error code {} ".format(self.get_goal_cancel_error_msg(cancel_future.result().return_code)))
                         return True 
                 except Exception as e:
                     # self.goal_handle = None
                     self.get_logger().error("Edge Action Manager: error while canceling the previous action")
                     return False 
 
-    def get_goal_cancle_error_msg(self, status_code):
+    def get_goal_cancel_error_msg(self, status_code):
         try:
-            return self.goal_cancle_error_codes[status_code]
+            return self.goal_cancel_error_codes[status_code]
         except Exception as e:
-            self.get_logger().error("Goal cancle code {}".format(status_code))
-            return self.goal_cancle_error_codes[0]
+            self.get_logger().error("Goal cancel code {}".format(status_code))
+            return self.goal_cancel_error_codes[0]
 
     def go_to_node_task(self, ):
         self.preempt_action()
@@ -536,7 +538,7 @@ class TopoMap2Vis(rclpy.node.Node):
     def _on_node_shutdown(self):
         """
         """
-        self.clear_route()
+        # self.clear_route()
         self.killall=True
         self.get_logger().info("See you later")
 
