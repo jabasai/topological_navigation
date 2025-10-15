@@ -132,24 +132,7 @@ class TopoMap2Vis(rclpy.node.Node):
                     self.get_logger().info("End generating map...")
                 break 
 
-        # 1. Define a QoS profile that matches the publisher's settings
-        qos_profile = QoSProfile(
-            reliability=QoSReliabilityPolicy.BEST_EFFORT,
-            durability=QoSDurabilityPolicy.VOLATILE,
-            history=QoSHistoryPolicy.KEEP_LAST,
-            depth=10  # Match the publisher's depth
-        )
-
-        # 2. Create the subscriber with the new QoS profile
-        self.topo_route_sub = self.create_subscription(
-            TopologicalRoute,
-            'topological_navigation/Route',
-            self.route_cb,
-            qos_profile  # Pass the matching QoS profile here
-        )
-
-        # self.topo_route_sub = self.create_subscription(TopologicalRoute, "topological_navigation/Route"
-                                                        # , self.route_cb, qos_profile=self.latching_qos, callback_group=self.callback_goto_subs)
+        # self.topo_route_sub = self.create_subscription(TopologicalRoute, "topological_navigation/Route", self.route_cb, qos_profile=self.latching_qos, callback_group=self.callback_goto_subs)
         self.get_logger().info("All Done ...")
 
     def topo_map_cb(self, msg):
@@ -158,52 +141,55 @@ class TopoMap2Vis(rclpy.node.Node):
         self._map_received = True  
         self.create_map_marker()
 
-    def route_cb(self, msg):
-        self.clear_route() # clear the last route
-        self.route_marker = MarkerArray()
-        self.route_marker.markers=[]
-        idn = 0
-        if self.topological_map is not None:
-            for i in range(1,len(msg.nodes)):
-                marker = self.get_route_marker(msg.nodes[i-1], msg.nodes[i], idn)
-                self.route_marker.markers.append(marker)
-                idn+=1
-            self.routevis_pub.publish(self.route_marker)
+    # def route_cb(self, msg):
+    #     self.get_logger().error("[route_cb] - NEW ROUTE RECEIVED")
+    #     self.clear_route() # clear the last route
+    #     self.route_marker = MarkerArray()
+    #     self.route_marker.markers=[]
+    #     idn = 0
+    #     if self.topological_map is not None:
+    #         for i in range(1,len(msg.nodes)):
+    #             marker = self.get_route_marker(msg.nodes[i-1], msg.nodes[i], idn)
+    #             self.route_marker.markers.append(marker)
+    #             idn+=1
+    #         self.routevis_pub.publish(self.route_marker)
+    #     self.get_logger().error("[route_cb] - ✅ DONE!")
 
-    def clear_route(self):
-        self.route_marker = MarkerArray()
-        self.route_marker.markers=[]
-        marker = Marker()
-        marker.action = marker.DELETEALL
-        self.route_marker.markers.append(marker)
-        self.routevis_pub.publish(self.route_marker) 
+    # def clear_route(self):
+    #     self.route_marker = MarkerArray()
+    #     self.route_marker.markers=[]
+    #     marker = Marker()
+    #     marker.action = marker.DELETEALL
+    #     self.route_marker.markers.append(marker)
+    #     self.routevis_pub.publish(self.route_marker) 
 
-    def get_route_marker(self, origin, end, idn):
-        marker = Marker()
-        marker.id = idn
-        marker.header.frame_id = 'topo_map'
-        marker.type = marker.ARROW
-        V1=Point()
-        V2=Point()
-        origin_node = get_node(self.topological_map['nodes'], origin)
-        end_node = get_node(self.topological_map['nodes'], end)
-        V1=self.node2pose(origin_node['pose']).position
-        V1.z += 0.25
-        V2=self.node2pose(end_node['pose']).position
-        V2.z += 0.25
-        marker.pose.orientation.w= 1.0
-        marker.scale.x = 0.2
-        marker.scale.y = 0.2
-        marker.scale.z = 0.4
-        marker.color.a = 0.5
-        marker.color.r = 0.33
-        marker.color.g = 0.99
-        marker.color.b = 0.55
-        marker.points.append(V1)
-        marker.points.append(V2)
-        # marker.lifetime.sec = 2 
-        marker.ns='/route_pathg'
-        return marker
+    # def get_route_marker(self, origin, end, idn):
+    #     marker = Marker()
+    #     marker.id = idn
+    #     marker.header.frame_id = 'topo_map'
+    #     marker.type = marker.ARROW
+    #     V1=Point()
+    #     V2=Point()
+    #     origin_node = get_node(self.topological_map['nodes'], origin)
+    #     end_node = get_node(self.topological_map['nodes'], end)
+    #     V1=self.node2pose(origin_node['pose']).position
+    #     V1.z += 0.25
+    #     V2=self.node2pose(end_node['pose']).position
+    #     V2.z += 0.25
+    #     marker.pose.orientation.w= 1.0
+    #     marker.scale.x = 0.2
+    #     marker.scale.y = 0.2
+    #     marker.scale.z = 0.4
+    #     marker.color.a = 1.0
+    #     # marker.color.a = 0.5
+    #     marker.color.r = 0.33
+    #     marker.color.g = 0.99
+    #     marker.color.b = 0.55
+    #     marker.points.append(V1)
+    #     marker.points.append(V2)
+    #     # marker.lifetime.sec = 2 
+    #     marker.ns='/route_pathg'
+    #     return marker
 
 
     def create_map_marker(self):
@@ -553,7 +539,7 @@ class TopoMap2Vis(rclpy.node.Node):
     def _on_node_shutdown(self):
         """
         """
-        self.clear_route()
+        # self.clear_route()
         self.killall=True
         self.get_logger().info("See you later")
 

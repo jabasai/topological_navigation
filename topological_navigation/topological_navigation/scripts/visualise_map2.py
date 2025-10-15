@@ -65,6 +65,7 @@ class TopoMap2Vis(object):
 
     def route_cb(self, msg):
         self.clear_route() # clear the last route
+        self.logger()
         self.route_marker = MarkerArray()
         self.route_marker.markers=[]
         idn=0
