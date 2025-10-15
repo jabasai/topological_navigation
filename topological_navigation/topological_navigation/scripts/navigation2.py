@@ -19,7 +19,7 @@ from topological_navigation.route_search2 import RouteChecker, TopologicalRouteS
 from topological_navigation.navigation_stats import nav_stats
 from topological_navigation.scripts.param_processing import ParameterUpdaterNode
 from topological_navigation.tmap_utils import *
-from rclpy.qos import QoSProfile, HistoryPolicy, ReliabilityPolicy, DurabilityPolicy, QoSDurabilityPolicy
+from rclpy.qos import QoSProfile, HistoryPolicy, ReliabilityPolicy, DurabilityPolicy, QoSDurabilityPolicy, QoSHistoryPolicy
 from rclpy.action import ActionServer
 from rclpy import Parameter 
 from topological_navigation.edge_action_manager2 import EdgeActionManager
@@ -75,6 +75,9 @@ class TopologicalNavServer(rclpy.node.Node):
         self.fluid_navigation = True
         self.final_goal = False
         self.update_params_control_server = update_params_control_server
+        
+        self.route = None
+        self.target = None
 
         self.current_node = "Unknown"
         self.closest_node = "Unknown"
@@ -168,9 +171,12 @@ class TopologicalNavServer(rclpy.node.Node):
             self.navigation_actions.append(self.navigation_action_name)
         
         self.latching_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self.keep_history_qos = QoSProfile(reliability = ReliabilityPolicy.BEST_EFFORT, history=QoSHistoryPolicy.KEEP_LAST, depth=10, )
         self.stat = None 
         self.stats_pub = self.create_publisher(NavStatistics, "topological_navigation/Statistics", qos_profile=self.latching_qos)
-        self.route_pub = self.create_publisher(TopologicalRoute, "topological_navigation/Route", qos_profile=self.latching_qos)
+        self.route_pub = self.create_publisher(TopologicalRoute, "topological_navigation/Route", qos_profile= self.keep_history_qos)
+        self.route_pub_timer = self.create_timer( 2.0 , self.router_pub_timer_callback)
+        self.stroute = None
         self.cur_edge = self.create_publisher(String, "current_edge", qos_profile=self.latching_qos)
         self.move_act_pub =  self.create_publisher(String, "topological_navigation/move_action_status", qos_profile=self.latching_qos)
         self._map_received = False
@@ -811,7 +817,8 @@ class TopologicalNavServer(rclpy.node.Node):
                     route = self.enforce_navigable_route(route, target)
                     if route.source:
                         self.get_logger().info("Navigating Case 1: Following route")
-                        self.get_logger().warn("[navigate] - publishing route")
+                        self.route = route
+                        self.target = target
                         self.publish_route(route, target)
                         if(self.use_nav2_follow_route):
                             result, inc, status = self.navigate_to_poses(route, target, 0)
@@ -1010,8 +1017,13 @@ class TopologicalNavServer(rclpy.node.Node):
         for i in route.source:
             stroute.nodes.append(i)
         stroute.nodes.append(target)
+        self.stroute = stroute
         self.route_pub.publish(stroute)
+    
+    def router_pub_timer_callback(self):
         
+        if (self.stroute is not None and self.stroute.nodes):
+            self.route_pub.publish(self.stroute)   
         
     def publish_stats(self):
         pubst = NavStatistics()
