@@ -155,10 +155,12 @@ class EdgeActionManager(rclpy.node.Node):
 
         self.update_params_control_server = update_params_control_server
         self.current_robot_pose = None 
+        self.is_inside_tunnel = False
         self.odom_sub = self.create_subscription(Odometry, '/odometry/global', self.odom_callback,
                                 QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT))
         self.get_current_node_sub = self.create_subscription(String, 'closest_node', self.set_current_pose
                                 , QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT))
+        self.robot_nav_area_sub = self.create_subscription(String, '/robot_navigation_area', self.nav_area_callback, 10)
        
         self.boundary_publisher = self.create_publisher(Path, '/boundary_checker', qos_profile=self.latching_qos)
         self.robot_current_status_pub = self.create_publisher(String, '/robot_operation_current_status', qos_profile=self.latching_qos)
@@ -177,7 +179,12 @@ class EdgeActionManager(rclpy.node.Node):
 
     def odom_callback(self, msg):
         self.current_robot_pose = msg.pose
-    
+
+
+    def nav_area_callback(self, msg):
+        self.nav_area = msg.data
+        self.is_inside_tunnel = (self.nav_area == 'INSIDE_POLYTUNNEL')
+
     
     def get_nav_action_server_status(self, ):
         return self.ACTIONS.status_mapping 
@@ -346,17 +353,19 @@ class EdgeActionManager(rclpy.node.Node):
             if len(next_edge_ids) == 2:
                 next_goal_stage = next_edge_ids[1].split("-")
                 if len(next_goal_stage) == 2:
-                    if (next_goal_stage[1] in self.ACTIONS.GOAL_ALIGN_INDEX) or (next_goal_stage[1] not in self.ACTIONS.GOAL_ALIGN_GOAL):
+                    if (next_goal_stage[1] in self.ACTIONS.GOAL_ALIGN_INDEX) or \
+                    (next_goal_stage[1] not in self.ACTIONS.GOAL_ALIGN_GOAL):
                         return current_action
                 elif len(next_goal_stage) == 1:
-                    if(current_action == self.ACTIONS.ROW_TRAVERSAL):
+                    if current_action == self.ACTIONS.ROW_TRAVERSAL:
                         return current_action
         if len(edges) == 2:
             goal = edges[1]
             goal_stage = goal.split("-")
             if len(goal_stage) == 2:
-                if goal_stage[1] in self.ACTIONS.GOAL_ALIGN_INDEX:
-                    return self.ACTIONS.GOAL_ALIGN 
+                if goal_stage[1] in self.ACTIONS.GOAL_ALIGN_INDEX and not self.is_inside_tunnel:
+                    return self.ACTIONS.GOAL_ALIGN
+
         return current_action
 
 
