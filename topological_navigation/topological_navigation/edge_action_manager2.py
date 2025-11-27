@@ -165,7 +165,8 @@ class EdgeActionManager(rclpy.node.Node):
         self.boundary_publisher = self.create_publisher(Path, '/boundary_checker', qos_profile=self.latching_qos)
         self.robot_current_status_pub = self.create_publisher(String, '/robot_operation_current_status', qos_profile=self.latching_qos)
         self.current_dest = self.create_publisher(String, '/topological_navigation/current_destination', qos_profile=self.latching_qos)
-
+        self.target_edge_path_pub = self.create_publisher(Path, "/target_edge_path", qos_profile=self.latching_qos)
+        
         self.robot_current_behavior_pub = None
         self.current_node = None 
         self.action_status = 0
@@ -515,6 +516,63 @@ class EdgeActionManager(rclpy.node.Node):
     def extract_number(self, s):
         return float(s.split('-')[0][1:])
                 
+    def publish_target_edges_as_path(self, selected_edges_dict):
+        """
+        Convert selected edges dictionary to a ROS Path and publish.
+        Safely handles placeholder values like '$node.pose' by substituting
+        with actual node pose from selected_edges_dict['node']['pose'].
+        """
+        path_msg = Path()
+        node_info = selected_edges_dict.get("node", {})
+        node_pose = node_info.get("pose", {})
+        parent_frame = node_info.get("parent_frame", "map")  # fallback to 'map'
+
+        path_msg.header.frame_id = parent_frame
+        path_msg.header.stamp = self.get_clock().now().to_msg()
+
+        if not node_pose:
+            self.get_logger().warn("Node pose missing, cannot publish path")
+            return
+
+        valid_poses_count = 0
+
+        for edge in node_info.get("edges", []):
+            target_pose_data = edge.get("goal", {}).get("target_pose", {})
+
+            # Check if pose is placeholder
+            if target_pose_data.get("pose") == "$node.pose":
+                pose_source = node_pose
+            elif isinstance(target_pose_data.get("pose"), dict):
+                pose_source = target_pose_data["pose"]
+            else:
+                self.get_logger().warn(
+                    f"Skipping edge {edge.get('edge_id')} due to invalid target_pose"
+                )
+                continue
+
+            # Create PoseStamped
+            try:
+                pose_msg = PoseStamped()
+                pose_msg.header.frame_id = parent_frame
+                pose_msg.header.stamp = self.get_clock().now().to_msg()
+                pose_msg.pose.position.x = pose_source["position"]["x"]
+                pose_msg.pose.position.y = pose_source["position"]["y"]
+                pose_msg.pose.position.z = pose_source["position"]["z"]
+                pose_msg.pose.orientation.x = pose_source["orientation"]["x"]
+                pose_msg.pose.orientation.y = pose_source["orientation"]["y"]
+                pose_msg.pose.orientation.z = pose_source["orientation"]["z"]
+                pose_msg.pose.orientation.w = pose_source["orientation"]["w"]
+            except KeyError as e:
+                self.get_logger().warn(
+                    f"Skipping edge {edge.get('edge_id')} due to missing key: {e}"
+                )
+                continue
+
+            path_msg.poses.append(pose_msg)
+            valid_poses_count += 1
+
+        self.get_logger().info(f"Publishing Path with {valid_poses_count} poses")
+        self.target_edge_path_pub.publish(path_msg)
 
     def get_navigate_through_poses_goal(self, poses, actions, edge_ids, is_execpolicy=False):
         
@@ -527,6 +585,8 @@ class EdgeActionManager(rclpy.node.Node):
             self.get_logger().info("Action in_row_operation ")
             self.get_logger().info("Edge id and tag id  {} {}".format(self.target_row_edge_id, tag_id))
             cen =  self.route_search.get_node_from_tmap2(self.target_row_edge_id)
+            self.publish_target_edges_as_path(cen)
+            
             children = self.route_search.get_connected_nodes_tmap2(cen)
             selected_row_edge_nodes = {}
             for next_edge in children:
