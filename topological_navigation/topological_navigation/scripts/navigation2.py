@@ -7,7 +7,7 @@ Created on Tue Nov 5 22:02:24 2023
 
 import rclpy, json, yaml
 
-
+import math
 from topological_navigation_msgs.msg import NavStatistics, CurrentEdge, ClosestEdges, TopologicalRoute, GotoNodeFeedback, ExecutePolicyModeFeedback
 from topological_navigation_msgs.srv import EvaluateEdge, EvaluateNode
 from topological_navigation_msgs.action import GotoNode, ExecutePolicyMode
@@ -116,6 +116,9 @@ class TopologicalNavServer(rclpy.node.Node):
         self.declare_parameter(self.ACTIONS.BT_GOAL_ALIGN, Parameter.Type.STRING)
         self.declare_parameter(self.ACTIONS.BT_IN_ROW_OPERATION, Parameter.Type.STRING)
         self.declare_parameter(self.ACTIONS.BT_IN_ROW_RECOVERY, Parameter.Type.STRING)
+        
+        self.declare_parameter("allow_intermediate_orientation_override", Parameter.Type.BOOL)
+        self.allow_intermediate_orientation_override = self.get_parameter_or("allow_intermediate_orientation_override", Parameter('bool', Parameter.Type.BOOL, False)).value
 
         self.navigation_action_name = self.get_parameter_or("navigation_action_name", Parameter('str', Parameter.Type.STRING, self.ACTIONS.NAVIGATE_TO_POSE)).value
         self.navigation_actions = self.get_parameter_or("navigation_actions", Parameter('str', Parameter.Type.STRING_ARRAY, self.ACTIONS.navigation_actions)).value
@@ -752,6 +755,50 @@ class TopologicalNavServer(rclpy.node.Node):
             rindex = rindex + 1
 
         self.get_logger().info(" ========== Action list {} ".format(route_actions_list))
+        
+        if self.allow_intermediate_orientation_override:
+            # ======================================================================
+            # ## NEW LOGIC START: Realign Orientations for Continuous Flow
+            # ======================================================================
+            # We iterate through all destinations except the very last one.
+            # We point each node to look at the NEXT node.
+            
+            for i in range(len(route_dests) - 1):
+                curr_node = route_dests[i]
+                next_node = route_dests[i+1]
+                
+                # 1. Get positions
+                # Note: Adjust keys ["pose"]["position"] if your dictionary structure is different
+                cx = curr_node["node"]["pose"]["position"]["x"]
+                cy = curr_node["node"]["pose"]["position"]["y"]
+                nx = next_node["node"]["pose"]["position"]["x"]
+                ny = next_node["node"]["pose"]["position"]["y"]
+
+                # 2. Calculate the specific angle (Yaw) to the next node
+                dx = nx - cx
+                dy = ny - cy
+                yaw = math.atan2(dy, dx)
+
+                # 3. Convert Yaw to Quaternion manually (to avoid extra dependencies)
+                # Formula for Z-axis rotation
+                qz = math.sin(yaw * 0.5)
+                qw = math.cos(yaw * 0.5)
+
+                # 4. Overwrite the orientation of the intermediate node
+                # Now the planner thinks this node is "facing" the path, so it won't stop to turn.
+                curr_node["node"]["pose"]["orientation"]["x"] = 0.0
+                curr_node["node"]["pose"]["orientation"]["y"] = 0.0
+                curr_node["node"]["pose"]["orientation"]["z"] = qz
+                curr_node["node"]["pose"]["orientation"]["w"] = qw
+                
+                self.get_logger().info(f"Realigned node {i} to yaw: {yaw:.2f}")
+
+            # The LAST node (route_dests[-1]) is left untouched so it keeps 
+            # the final desired docking/goal orientation.
+            # ======================================================================
+            # ## NEW LOGIC END
+            # ======================================================================
+        
         nav_ok, inc, status  = self.execute_actions(route_edges, route_dests, route_origins, 
                                                     action_name=self.ACTIONS.NAVIGATE_THROUGH_POSES, is_execpolicy=exec_policy)
 
