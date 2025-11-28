@@ -194,6 +194,7 @@ max_width = safety_props.get("width")
 2. **Keep core navigation properties at root level**: For backwards compatibility, standard navigation properties like `xy_goal_tolerance` can remain at the root level.
 3. **Document your namespaces**: If you introduce a new namespace, document its purpose and expected properties.
 4. **Avoid deep nesting**: One level of namespace nesting is usually sufficient. Avoid creating deeply nested structures.
+5. By convention, ROS packages should use their package name as the namespace. E.g. a package called "topfleets_coordinator" should use this as the namespace for properties it uses.
 
 ### Type Flexibility
 
