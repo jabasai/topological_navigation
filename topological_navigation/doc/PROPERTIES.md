@@ -101,6 +101,100 @@ When properties are not specified:
 - Use descriptive, domain-appropriate names
 - Avoid abbreviations unless they are widely understood
 
+### Using Namespaces for Properties
+
+To organise properties by functional area or application, use **namespaces**. A namespace is simply a nested dictionary that groups related properties together. This approach:
+
+- Prevents naming conflicts between different systems
+- Makes it clear which application or module owns each property
+- Improves readability and maintainability
+
+#### Namespace Structure
+
+```yaml
+properties:
+  namespace_name:
+    property1: value1
+    property2: value2
+```
+
+#### Common Namespace Examples
+
+| Namespace | Purpose |
+|-----------|---------|
+| `navigation` | Core navigation parameters (tolerances, speeds) |
+| `fleet_management` | Multi-robot coordination properties |
+| `logistics` | Warehouse/delivery application properties |
+| `agriculture` | Agricultural robotics properties |
+| `safety` | Safety-related constraints and limits |
+| `semantics` | Semantic labels and classifications |
+
+#### Namespaced Node Properties Example
+
+```yaml
+node:
+  name: ChargingStation1
+  properties:
+    navigation:
+      xy_goal_tolerance: 0.3
+      yaw_goal_tolerance: 0.1
+    fleet_management:
+      capacity: 2
+      priority_zone: true
+      queue_enabled: true
+    semantics:
+      type: "charging_station"
+      zone: "A"
+    logistics:
+      pickup_point: false
+      dropoff_point: false
+```
+
+#### Namespaced Edge Properties Example
+
+```yaml
+edges:
+- edge_id: ChargingStation1_WayPoint2
+  node: WayPoint2
+  properties:
+    navigation:
+      max_speed: 0.5
+      bidirectional: true
+    safety:
+      width: 1.2
+      restricted_hours: ["22:00-06:00"]
+    logistics:
+      priority: 10
+      surface_type: "concrete"
+```
+
+#### Accessing Namespaced Properties in Code
+
+```python
+# Safe access to namespaced node properties
+node_props = node["node"].get("properties", {})
+
+# Access fleet_management namespace
+fleet_props = node_props.get("fleet_management", {})
+capacity = fleet_props.get("capacity", 1)
+
+# Access navigation namespace
+nav_props = node_props.get("navigation", {})
+xy_tolerance = nav_props.get("xy_goal_tolerance", 0.3)
+
+# Access namespaced edge properties
+edge_props = edge.get("properties", {})
+safety_props = edge_props.get("safety", {})
+max_width = safety_props.get("width")
+```
+
+#### Guidelines for Namespace Usage
+
+1. **Use namespaces for application-specific properties**: If your properties are only used by a specific application or module, group them under a namespace.
+2. **Keep core navigation properties at root level**: For backwards compatibility, standard navigation properties like `xy_goal_tolerance` can remain at the root level.
+3. **Document your namespaces**: If you introduce a new namespace, document its purpose and expected properties.
+4. **Avoid deep nesting**: One level of namespace nesting is usually sufficient. Avoid creating deeply nested structures.
+
 ### Type Flexibility
 
 Properties support various data types:
@@ -149,6 +243,27 @@ properties:
   additionalProperties: true
   description: Flexible dictionary of application-specific edge properties
 ```
+
+## Validating Topological Maps
+
+The `validate_map.py` script can be used to validate topological map YAML files against the schema:
+
+```bash
+# Basic validation
+ros2 run topological_navigation validate_map.py my_map.tmap2.yaml
+
+# With verbose output
+ros2 run topological_navigation validate_map.py my_map.tmap2.yaml -v
+
+# With custom schema file
+ros2 run topological_navigation validate_map.py my_map.tmap2.yaml --schema custom_schema.yaml
+```
+
+The validator will:
+- Check the map structure against the JSON schema
+- Report any missing required fields
+- Warn about duplicate node names
+- Warn about edges pointing to non-existent nodes
 
 ## Related Resources
 
