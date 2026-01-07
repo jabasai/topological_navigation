@@ -845,6 +845,7 @@ class TopologicalNavServer(rclpy.node.Node):
             
             self.max_dist_to_closest_edge = self.get_parameter_or("max_dist_to_closest_edge",  Parameter('double', Parameter.Type.DOUBLE, 1.0)).value 
           
+            # if we are nowhere near an edge or not at a node, then do a node plan
             if self.closest_edges.distances and (self.closest_edges.distances[0] > self.max_dist_to_closest_edge or self.current_node != "none"):
                 self.nav_from_closest_edge = False
                 o_node = self.rsearch.get_node_from_tmap2(self.closest_node)
@@ -852,6 +853,9 @@ class TopologicalNavServer(rclpy.node.Node):
             else:
                 self.nav_from_closest_edge = True
                 o_node, the_edge = self.orig_node_from_closest_edge(g_node)
+                # This creates essentially a fake "previous node" to address the edge case when navigating over a single edge and the closest node is on the edge but the current node isnt. (otherwise it will mark as complete without navigation).
+                if o_node == target:
+                    o_node, the_edge = self.orig_node_from_closest_edge(g_node, flip=True)
                 self.get_logger().info("Planning from the closest EDGE: {}".format(the_edge["edge_id"]))
                 
             self.get_logger().info("Navigating From Origin {} to Target {} ".format(o_node["node"]["name"], target))
@@ -945,7 +949,7 @@ class TopologicalNavServer(rclpy.node.Node):
         self._as_exec_policy_action_feedback_pub.publish(self._feedback_exec_policy)
         
         
-    def orig_node_from_closest_edge(self, g_node):
+    def orig_node_from_closest_edge(self, g_node, flip=False):
         
         name_1, _ = get_node_names_from_edge_id_2(self.lnodes, self.closest_edges.edge_ids[0])
         name_2, _ = get_node_names_from_edge_id_2(self.lnodes, self.closest_edges.edge_ids[1])
@@ -965,11 +969,18 @@ class TopologicalNavServer(rclpy.node.Node):
             d2 = get_route_distance(self.lnodes, o_node_2, g_node)
         else: # Use the destination node of the closest edge.
             d1 = 0; d2 = 1
-        if d1 <= d2:
-            return o_node_1, edge_1
+        if flip:
+            if d1 <= d2:
+                return o_node_1, edge_1
+            else:
+                return o_node_2, edge_2
         else:
-            return o_node_2, edge_2
-        
+            o_node_1b = self.rsearch.get_node_from_tmap2(name_1)
+            o_node_2b = self.rsearch.get_node_from_tmap2(name_2)
+            if d1 <= d2:
+                return o_node_1b, edge_1
+            else:
+                return o_node_2b, edge_2
         
     def to_goal_node(self, g_node, the_edge=None):
         self.get_logger().info("Target and Origin Nodes are the same")
