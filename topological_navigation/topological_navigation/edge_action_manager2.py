@@ -610,19 +610,21 @@ class EdgeActionManager(rclpy.node.Node):
         Returns: (center_node, tag_id, target_row_edge_id) or (None, None, None) on failure.
         """
         try:
-            target_row_edge_id_raw = edge_id.split("_")[0]
-            tag_id = target_row_edge_id_raw.split("-")[1]
-            # print trget_row_edge_id_raw, tag_id
+            # edge_id = r7.5-c20_r7.5-c19
+            target_row_edge_id_raw = edge_id.split("_")[0] # e.g. 'r7.5-c20'
+            tag_id = target_row_edge_id_raw.split("-")[1] # e.g. 'c20'
+            # print trget_row_edge_id_raw, tag_id 
             self.get_logger().info(f"[_get_row_center_node] Parsed edge_id='{edge_id}' to target_row_edge_id_raw='{target_row_edge_id_raw}', tag_id='{tag_id}'")
             # Force ROW_START_INDEX by replacing the last character
-            target_row_edge_id = target_row_edge_id_raw[:-1] + self.ACTIONS.ROW_START_INDEX
-            tag_id = tag_id[:-1] + self.ACTIONS.ROW_START_INDEX
+            # e.g. 'r7.5-c20' -> 'r7.5-c2a' if ROW_START_INDEX='a'
+            target_row_edge_id =  target_row_edge_id_raw.split("c", 1)[0] + "c" + self.ACTIONS.ROW_START_INDEX # target_row_edge_id_raw[:-1] + self.ACTIONS.ROW_START_INDEX
+            tag_id = tag_id[0] + self.ACTIONS.ROW_START_INDEX
             #print target_row_edge_id, tag_id
             self.get_logger().info(f"[_get_row_center_node] Adjusted to target_row_edge_id='{target_row_edge_id}', tag_id='{tag_id}'")
         except Exception as e:
             self.get_logger().error(f"[_get_row_center_node] Failed to parse edge_id='{edge_id}': {e}")
             return None, None, None
-
+            
         cen = self.route_search.get_node_from_tmap2(target_row_edge_id)
         if not cen or "node" not in cen or "pose" not in cen["node"]:
             self.get_logger().error(f"[_get_row_center_node] Could not resolve '{target_row_edge_id}'")
