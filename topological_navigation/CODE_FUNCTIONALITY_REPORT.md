@@ -87,6 +87,187 @@ Topological Navigation provides a ROS 2 (and legacy ROS 1) framework for navigat
 
 ---
 
+## ROS 2 Usage Note (Entry Points, Topics, Actions, Services)
+This note describes **ROS 2** nodes and utilities in this package. ROS 1 components are covered separately under Legacy Components.
+
+### ROS 2 Entry Points (console scripts)
+The following entry points are rclpy-based:
+
+- **get_simple_policy2.py** – Route service for generating simple policies over a tmap2 map.
+- **localisation2.py** – Topological localisation for ROS 2.
+- **map_manager2.py** – Map loading/publishing and map services for tmap2.
+- **navigation2.py** – Topological navigation action server.
+- **topological_transform_publisher.py** – Publishes the static transform defined in tmap2.
+- **manual_topomapping.py** – Manual topological map creation using joystick/odometry.
+- **occupancy_checker.py** – Node pair for plan TF conversion and occupied-node detection.
+- **topological_visual.py** – Visualizers for route and occupied nodes.
+- **visualise_map_ros2.py** – RViz interactive marker visualization for tmap2.
+
+> Other entry points listed in setup.py are ROS 1 or legacy utilities.
+
+### ROS 2 Node Interfaces (Topics, Services, Actions)
+
+#### map_manager2 (map_manager_2)
+**Publishes**
+- /topological_map_2 (std_msgs/String)
+- /topological_map (topological_navigation_msgs/TopologicalMap) – legacy bridge if enabled
+
+**Services (selected; all are in /topological_map_manager2/...)**
+- get_topological_map (std_srvs/Trigger)
+- get_tagged_nodes, get_tags, get_node_tags, get_edges_between_nodes
+- write_topological_map, switch_topological_map
+- add_topological_node, remove_topological_node, add_edges_between_nodes, remove_edge
+- update_node_name, update_node_pose, update_node_tolerance
+- modify_node_tags, add_tag_to_node, rm_tag_from_node
+- update_edge, update_action
+- update_node_restrictions, update_edge_restrictions
+- update_fail_policy, set_node_influence_zone
+- clear_topological_nodes
+- *Multi-operations*: add_topological_node_multi, add_edges_between_nodes_multi, add_param_to_edge_config_multi, set_node_influence_zone_multi
+
+#### localisation2 (TopologicalNavLoc)
+**Publishes**
+- closest_node (std_msgs/String)
+- closest_node_distance (std_msgs/Float32)
+- current_node (std_msgs/String)
+- closest_edges (topological_navigation_msgs/ClosestEdges)
+- current_node/tag (std_msgs/String)
+- robot_navigation_area (std_msgs/String)
+
+**Subscribes**
+- /topological_map_2 (std_msgs/String)
+- TF between tmap frame and base frame
+
+**Services**
+- /topological_localisation/get_nodes_with_tag (topological_navigation_msgs/GetTaggedNodes)
+- /topological_localisation/localise_pose (topological_navigation_msgs/LocalisePose)
+
+#### navigation2 (TopologicalNavServer)
+**Publishes**
+- topological_navigation/Statistics (topological_navigation_msgs/NavStatistics)
+- topological_navigation/Route (topological_navigation_msgs/TopologicalRoute)
+- current_edge (std_msgs/String)
+- topological_navigation/move_action_status (std_msgs/String)
+
+**Subscribes**
+- /topological_map_2 (std_msgs/String)
+- closest_node (std_msgs/String)
+- closest_edges (topological_navigation_msgs/ClosestEdges)
+- current_node (std_msgs/String)
+
+**Actions (servers)**
+- /topological_navigation (topological_navigation_msgs/GotoNode)
+- /topological_navigation/execute_policy_mode (topological_navigation_msgs/ExecutePolicyMode)
+
+**Services (clients)**
+- /restrictions_manager/evaluate_edge (topological_navigation_msgs/EvaluateEdge)
+- /restrictions_manager/evaluate_node (topological_navigation_msgs/EvaluateNode)
+
+#### edge_action_manager2 (EdgeActionManager)
+**Publishes**
+- /boundary_checker (nav_msgs/Path)
+- /robot_operation_current_status (std_msgs/String)
+- /topological_navigation/current_destination (std_msgs/String)
+- /target_edge_path (nav_msgs/Path)
+- /center_node/pose (geometry_msgs/PoseStamped)
+- /robot_current_behavior (robot_behavior_msg/RobotBehavior) – optional
+
+**Subscribes**
+- /odometry/global (nav_msgs/Odometry)
+- closest_node (std_msgs/String)
+- /robot_navigation_area (std_msgs/String)
+
+**Actions (clients)**
+- Nav2 action servers resolved from action name (e.g., navigate_to_pose, navigate_through_poses, follow_waypoints, compute_path_to_pose, compute_path_through_poses)
+
+#### get_simple_policy2 (SearchPolicyServer)
+**Subscribes**
+- /topological_map_2 (std_msgs/String)
+- closest_node (std_msgs/String)
+
+**Services**
+- get_simple_policy/get_route_to (topological_navigation_msgs/GetRouteTo)
+- get_simple_policy/get_route_between (topological_navigation_msgs/GetRouteBetween)
+
+#### topological_transform_publisher (TopologicalTransformPublisher)
+**Subscribes**
+- /topological_map_2 (std_msgs/String)
+
+**Publishes**
+- Static TF transform defined by tmap2 transformation block
+
+#### manual_topomapping (RobotTmapping)
+**Publishes**
+- /tmapping_nodes (visualization_msgs/MarkerArray)
+
+**Subscribes**
+- /joy (sensor_msgs/Joy) – configurable
+- /gps_base/odometry (nav_msgs/Odometry) – configurable
+- /gps_base/yaw (sensor_msgs/Imu) – configurable
+
+**Services**
+- /tmapping_robot/save_waypoints (std_srvs/Trigger)
+- /tmapping_robot/save_map (std_srvs/Trigger)
+
+#### occupancy_checker
+This script launches two nodes:
+
+**PoseTransformerNode**
+- Publishes: /plan_in_map_frame (geometry_msgs/PoseArray)
+- Subscribes: /rownav_teb_poses (geometry_msgs/PoseArray)
+
+**OccupancyCheckerNode**
+- Publishes: /topological_navigation/occupied_node (topological_navigation_msgs/TopologicalOccupiedNode)
+- Subscribes: /plan_in_map_frame (geometry_msgs/PoseArray)
+- Subscribes: /topological_navigation/current_destination (std_msgs/String)
+
+#### topological_visual
+**RouteVisualiserNode**
+- Publishes: topological_route_visualisation (visualization_msgs/MarkerArray)
+- Subscribes: topological_navigation/Route (topological_navigation_msgs/TopologicalRoute)
+
+**OccupancyVisualiserNode**
+- Publishes: /topological_navigation/visual/occupied_node (visualization_msgs/MarkerArray)
+- Subscribes: /topological_navigation/occupied_node (topological_navigation_msgs/TopologicalOccupiedNode)
+
+#### visualise_map_ros2
+**Publishes**
+- topological_map_visualisation (visualization_msgs/MarkerArray)
+- topological_route_visualisation (visualization_msgs/MarkerArray)
+
+**Subscribes**
+- /topological_map_2 (std_msgs/String)
+
+**Actions (clients)**
+- /topological_navigation (topological_navigation_msgs/GotoNode)
+
+### ROS 2 Interaction Diagram (Simplified)
+
+```
+           +---------------------+
+           |  map_manager2       |
+           |  (map services)     |
+           +----------+----------+
+                  |
+                  | /topological_map_2
+                  v
+  +----------------+   +----+-----+   +---------------------+
+  | localisation2  |-->| navigation2|-->| edge_action_manager2|
+  | (closest/current)  | (actions) |   | (Nav2 action clients)
+  +----+-----------+   +----+-----+   +----------+----------+
+     |                    |                    |
+     | closest_node        | action servers     | navigate_to_pose, etc.
+     v                    v                    v
+  get_simple_policy2   visualise_map_ros2      Nav2 action servers
+
+  topological_transform_publisher -> TF static transform
+  occupancy_checker -> occupied_node -> topological_visual
+```
+
+---
+
+---
+
 ## Legacy Components (ROS 1)
 These are maintained for compatibility but rely on rospy, mongodb_store, and ROS 1 conventions:
 - scripts/localisation.py
