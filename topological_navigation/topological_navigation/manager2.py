@@ -38,21 +38,8 @@ class NoAliasDumper(yaml.SafeDumper):
 #########################################################################################################
 
 
-# this ensures that all the poses and translates 
-# are float-type and not int-type as there is an 
-# assertion in ros2 messages (vector3, pose etc.) 
-# for float-type [x,y,z,w] keys.
-class CustomSafeLoader(yaml.SafeLoader):
-    def construct_mapping(self, node, deep=False):
-        mapping = super().construct_mapping(node, deep=deep)
-
-        # this can be extended to test the validity of the tmap2 
-        # as well at load time (or add missing keys)
-        for key in ['x', 'y', 'z', 'w', 'yaw_goal_tolerance', 'xy_goal_tolerance']:
-            if key in mapping and isinstance(mapping[key], int):
-                mapping[key] = float(mapping[key])
-        
-        return mapping
+# Import shared YAML loader
+from topological_navigation.map_types import CustomSafeLoader
 
 
 #########################################################################################################
@@ -194,13 +181,8 @@ class map_manager_2(rclpy.node.Node):
         self.broadcaster = tf2_ros.transform_broadcaster.TransformBroadcaster(self)
         self.broadcast_transform()
 
-        self.convert_to_legacy = self.get_parameter_or("~convert_to_legacy", Parameter('bool', Parameter.Type.BOOL, True)).get_parameter_value()
+        self.convert_to_legacy = self.get_parameter_or("~convert_to_legacy", Parameter('bool', Parameter.Type.BOOL, False)).get_parameter_value()
         
-        if self.tmap2 and self.convert_to_legacy:
-            self.points_pub = self.create_publisher(topological_navigation_msgs.msg.TopologicalMap, '/topological_map', qos)
-            self.tmap2_to_tmap()
-            self.points_pub.publish(self.points)
-
         # self.create_timer(10.0, self.topnav_map_pub_callback)
 
 
@@ -1478,61 +1460,4 @@ class map_manager_2(rclpy.node.Node):
                     self.get_logger().warn("Edge with id '{}' has a destination '{}' equal to its origin".format(edge["edge_id"], edge["node"]))
                     self.map_ok = False
 
-
-    def tmap2_to_tmap(self):
-        self.points = map_manager_2.convert_tmap2_to_tmap(self.tmap2, self.pointset, self.metric_map)
-
-
-    @classmethod
-    def convert_tmap2_to_tmap(cls, tmap2, pointset, metric_map):
-        points = topological_navigation_msgs.msg.TopologicalMap()
-
-        try:
-            point_set = pointset
-            points.name = point_set
-            points.pointset = point_set
-            points.map = metric_map
-
-            for node in tmap2["nodes"]:
-                msg = topological_navigation_msgs.msg.TopologicalNode()
-                msg.name = node["node"]["name"]
-                msg.map = metric_map
-                msg.pointset = point_set
-
-                msg.pose = Pose()
-                rosidl_runtime_py.set_message_fields(msg.pose, node["node"]["pose"])
-
-                msg.yaw_goal_tolerance = node["node"]["properties"]["yaw_goal_tolerance"]
-                msg.xy_goal_tolerance = node["node"]["properties"]["xy_goal_tolerance"]
-
-                msgs_verts = []
-                for v in node["node"]["verts"]:
-                    msg_v = topological_navigation_msgs.msg.Vertex()
-                    msg_v.x = v["x"]
-                    msg_v.y = v["y"]
-                    msgs_verts.append(msg_v)
-                msg.verts = msgs_verts
-
-                msgs_edges = []
-                for e in node["node"]["edges"]:
-                    msg_e = topological_navigation_msgs.msg.Edge()
-                    msg_e.edge_id = e["edge_id"]
-                    msg_e.node = e["node"]
-                    msg_e.action = e["action"]
-                    msg_e.top_vel = 0.55
-                    msg_e.map_2d = metric_map
-                    msg_e.inflation_radius = 0.0
-                    msg_e.recovery_behaviours_config = e["recovery_behaviours_config"]
-                    msgs_edges.append(msg_e)
-                msg.edges = msgs_edges
-
-                msg.localise_by_topic = node["node"]["localise_by_topic"]
-                points.nodes.append(msg)
-
-        except Exception as e:
-            print(traceback.format_exc())
-            print("Cannot convert map to the legacy format. The conversion requires all fields of the legacy map to be set.")
-            points = topological_navigation_msgs.msg.TopologicalMap()
-
-        return points
 #########################################################################################################

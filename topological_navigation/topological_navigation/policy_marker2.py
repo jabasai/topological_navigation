@@ -2,6 +2,7 @@
 
 import math
 import yaml
+from topological_navigation.map_types import CustomSafeLoader
 import rclpy, json 
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, DurabilityPolicy
@@ -21,17 +22,7 @@ from std_msgs.msg import String
 # are float-type and not int-type as there is an 
 # assertion in ros2 messages (vector3, pose etc.) 
 # for float-type [x,y,z,w] keys.
-class CustomSafeLoader(yaml.SafeLoader):
-    def construct_mapping(self, node, deep=False):
-        mapping = super().construct_mapping(node, deep=deep)
-
-        # this can be extended to test the validity of the tmap2 
-        # as well at load time (or add missing keys)
-        for key in ['x', 'y', 'z', 'w']:
-            if key in mapping and isinstance(mapping[key], int):
-                mapping[key] = float(mapping[key])
-        
-        return mapping
+# CustomSafeLoader now imported from map_types
 
 
 class PoliciesVis(Node):
