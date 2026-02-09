@@ -1,0 +1,17 @@
+# Example parameter configuration for topological_map_manager_2
+
+topological_map_manager_2:
+  ros__parameters:
+    # Cache topological maps to local directory
+    cache_topological_maps: false
+    
+    # Automatically write map changes to file
+    auto_write_topological_maps: false
+    
+    # Navigation goal configuration file
+    nav_config: ""  # Leave empty to use default
+    
+    # Topological map information (set at runtime)
+    topological_map2_name: ""
+    topological_map2_filename: ""
+    topological_map2_path: ""
