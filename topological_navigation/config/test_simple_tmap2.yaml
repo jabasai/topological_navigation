@@ -1,0 +1,294 @@
+meta:
+  last_updated: 08-02-2026_12-00-00
+  origin:
+    latitude: 53.268642038
+    longitude: -0.524509505881
+    altitude: 0
+
+metric_map: test_map
+name: test_map
+pointset: test_map
+
+transformation:
+  child: test_map
+  parent: map
+  rotation:
+    w: 1.0
+    x: 0.0
+    y: 0.0
+    z: 0.0
+  translation:
+    x: 10.0
+    y: 20.0
+    z: 0.0
+
+nodes:
+  - meta:
+      map: test_map
+      node: node0
+      pointset: test_map
+    node:
+      edges:
+        - action: row_traversal
+          action_type: geometry_msgs/PoseStamped
+          config: []
+          edge_id: node0_node1
+          fail_policy: fail
+          fluid_navigation: true
+          goal:
+            target_pose:
+              header:
+                frame_id: $node.parent_frame
+              pose: $node.pose
+          node: node1
+          recovery_behaviours_config: ''
+          restrictions_planning: none
+          restrictions_runtime: none
+      localise_by_topic: ''
+      name: node0
+      parent_frame: map
+      pose:
+        orientation:
+          w: 1.0
+          x: 0.0
+          y: 0.0
+          z: 0.0
+        position:
+          x: 0.0
+          y: 0.0
+          z: 0.0
+      properties:
+        xy_goal_tolerance: 0.3
+        yaw_goal_tolerance: 6.28
+      restrictions_planning: none
+      restrictions_runtime: none
+      verts:
+        - x: 0.3839717361251064
+          y: -0.6411198818013286
+        - x: 0.5264215248037732
+          y: -0.212953957097135
+        - x: 0.4432315207951729
+          y: 0.3549856737865013
+        - x: 0.1839678947585299
+          y: 0.724309885809929
+        - x: -0.3839717361251064
+          y: 0.6411198818013286
+        - x: -0.5264215248037732
+          y: 0.212953957097135
+        - x: -0.4432315207951729
+          y: -0.3549856737865013
+        - x: -0.1839678947585299
+          y: -0.724309885809929
+
+  - meta:
+      map: test_map
+      node: node1
+      pointset: test_map
+    node:
+      edges:
+        - action: row_traversal
+          action_type: geometry_msgs/PoseStamped
+          config: []
+          edge_id: node1_node2
+          fail_policy: fail
+          fluid_navigation: true
+          goal:
+            target_pose:
+              header:
+                frame_id: $node.parent_frame
+              pose: $node.pose
+          node: node2
+          recovery_behaviours_config: ''
+          restrictions_planning: none
+          restrictions_runtime: none
+      localise_by_topic: ''
+      name: node1
+      parent_frame: map
+      pose:
+        orientation:
+          w: 1.0
+          x: 0.0
+          y: 0.0
+          z: 0.0
+        position:
+          x: 2.0
+          y: 0.0
+          z: 0.0
+      properties:
+        xy_goal_tolerance: 0.3
+        yaw_goal_tolerance: 6.28
+      restrictions_planning: none
+      restrictions_runtime: none      
+      verts:
+        - x: 0.3839717361251064
+          y: -0.6411198818013286
+        - x: 0.5264215248037732
+          y: -0.212953957097135
+        - x: 0.4432315207951729
+          y: 0.3549856737865013
+        - x: 0.1839678947585299
+          y: 0.724309885809929
+        - x: -0.3839717361251064
+          y: 0.6411198818013286
+        - x: -0.5264215248037732
+          y: 0.212953957097135
+        - x: -0.4432315207951729
+          y: -0.3549856737865013
+        - x: -0.1839678947585299
+          y: -0.724309885809929      
+
+  - meta:
+      map: test_map
+      node: node2
+      pointset: test_map
+    node:
+      edges:
+        - action: row_traversal
+          action_type: geometry_msgs/PoseStamped
+          config: []
+          edge_id: node2_node3
+          fail_policy: fail
+          fluid_navigation: true
+          goal:
+            target_pose:
+              header:
+                frame_id: $node.parent_frame
+              pose: $node.pose
+          node: node3
+          recovery_behaviours_config: ''
+          restrictions_planning: none
+          restrictions_runtime: none
+      localise_by_topic: ''
+      name: node2
+      parent_frame: map
+      pose:
+        orientation:
+          w: 1.0
+          x: 0.0
+          y: 0.0
+          z: 0.0
+        position:
+          x: 4.0
+          y: 0.0
+          z: 0.0
+      properties:
+        xy_goal_tolerance: 0.3
+        yaw_goal_tolerance: 6.28
+      restrictions_planning: none
+      restrictions_runtime: none
+      verts:
+        - x: 0.3839717361251064
+          y: -0.6411198818013286
+        - x: 0.5264215248037732
+          y: -0.212953957097135
+        - x: 0.4432315207951729
+          y: 0.3549856737865013
+        - x: 0.1839678947585299
+          y: 0.724309885809929
+        - x: -0.3839717361251064
+          y: 0.6411198818013286
+        - x: -0.5264215248037732
+          y: 0.212953957097135
+        - x: -0.4432315207951729
+          y: -0.3549856737865013
+        - x: -0.1839678947585299
+          y: -0.724309885809929
+
+  - meta:
+      map: test_map
+      node: node3
+      pointset: test_map
+    node:
+      edges:
+        - action: row_traversal
+          action_type: geometry_msgs/PoseStamped
+          config: []
+          edge_id: node3_node4
+          fail_policy: fail
+          fluid_navigation: true
+          goal:
+            target_pose:
+              header:
+                frame_id: $node.parent_frame
+              pose: $node.pose
+          node: node4
+          recovery_behaviours_config: ''
+          restrictions_planning: none
+          restrictions_runtime: none
+      localise_by_topic: ''
+      name: node3
+      parent_frame: map
+      pose:
+        orientation:
+          w: 1.0
+          x: 0.0
+          y: 0.0
+          z: 0.0
+        position:
+          x: 6.0
+          y: 0.0
+          z: 0.0
+      properties:
+        xy_goal_tolerance: 0.3
+        yaw_goal_tolerance: 6.28
+      restrictions_planning: none
+      restrictions_runtime: none
+      verts:
+        - x: 0.3839717361251064
+          y: -0.6411198818013286
+        - x: 0.5264215248037732
+          y: -0.212953957097135
+        - x: 0.4432315207951729
+          y: 0.3549856737865013
+        - x: 0.1839678947585299
+          y: 0.724309885809929
+        - x: -0.3839717361251064
+          y: 0.6411198818013286
+        - x: -0.5264215248037732
+          y: 0.212953957097135
+        - x: -0.4432315207951729
+          y: -0.3549856737865013
+        - x: -0.1839678947585299
+          y: -0.724309885809929
+
+  - meta:
+      map: test_map
+      node: node4
+      pointset: test_map
+    node:
+      edges: []
+      localise_by_topic: ''
+      name: node4
+      parent_frame: map
+      pose:
+        orientation:
+          w: 1.0
+          x: 0.0
+          y: 0.0
+          z: 0.0
+        position:
+          x: 8.0
+          y: 0.0
+          z: 0.0
+      properties:
+        xy_goal_tolerance: 0.3
+        yaw_goal_tolerance: 6.28
+      restrictions_planning: none
+      restrictions_runtime: none
+      verts:
+        - x: 0.3839717361251064
+          y: -0.6411198818013286
+        - x: 0.5264215248037732
+          y: -0.212953957097135
+        - x: 0.4432315207951729
+          y: 0.3549856737865013
+        - x: 0.1839678947585299
+          y: 0.724309885809929
+        - x: -0.3839717361251064
+          y: 0.6411198818013286
+        - x: -0.5264215248037732
+          y: 0.212953957097135
+        - x: -0.4432315207951729
+          y: -0.3549856737865013
+        - x: -0.1839678947585299
+          y: -0.724309885809929
