@@ -1,6 +1,40 @@
 Topological Navigation
 ======================
 
+> **⚠️ IMPORTANT: ROS2 Version**  
+> This is the ROS2 version of topological navigation (v4.0.0+). All ROS1 code has been removed.  
+> For ROS1 support, use version 3.x or earlier.
+
+## Quick Links
+
+- **[Interactive Map Editor](doc/INTERACTIVE_MAP_EDITOR.md)** - Edit maps visually in RViz2
+- **[Properties System](doc/PROPERTIES.md)** - Flexible node/edge metadata
+- **[Quick Start](QUICK_START_INTERACTIVE_EDITOR.md)** - Get started with the interactive editor
+
+## Interactive Map Editor (NEW in v4.0.0)
+
+A Python-based tool for editing topological maps visually in RViz2:
+
+```bash
+# Launch the editor
+ros2 launch topological_navigation interactive_map_editor.launch.py \
+    map_file:=/path/to/your/map.tmap2.yaml
+
+# Open RViz2 and add Interactive Markers display
+rviz2
+```
+
+Features:
+- ✅ Move node positions by dragging markers
+- ✅ Rotate node orientations using rotation controls
+- ✅ Real-time visual feedback
+- ✅ Save changes back to YAML files
+- ✅ Auto-save option
+
+See [QUICK_START_INTERACTIVE_EDITOR.md](QUICK_START_INTERACTIVE_EDITOR.md) for details.
+
+---
+
 **These instructions are intended for the legacy branch of topological navigation. Instructions for the master branch (topological navigation 2) are to do.**
 
 This package provides support for topological navigation, originally devised for the STRANDS system.

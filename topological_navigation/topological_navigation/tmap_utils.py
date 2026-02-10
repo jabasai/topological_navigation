@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
+"""
+Topological map utility functions.
+Provides helper functions for distance calculations and node access.
+"""
 import math
+from typing import Optional, Dict, Any
 
 
 def get_node(top_map, node_name):
