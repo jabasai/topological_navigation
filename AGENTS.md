@@ -798,6 +798,17 @@ colcon test --packages-select topological_navigation
 4. **Follow existing patterns**: Don't introduce new patterns without discussion
 5. **Consider agricultural use cases**: Changes impact real-world robot operations
 
+### When Creating Documentation
+1. **Location**: Place all new documentation files in the `doc/` folder
+2. **Track documentation**: Maintain a list of documentation files when creating new ones
+3. **Keep synchronized**: When updating script or function functionalities:
+   - Update corresponding documentation in `doc/` folder
+   - Update references in AGENTS.md, README.md, and other relevant docs
+   - Ensure examples and code snippets reflect current implementation
+4. **Naming convention**: Use descriptive names (e.g., `EDGE_ACTIONS.md`, `ROUTING_ALGORITHM.md`)
+5. **Cross-reference**: Link related documentation files for easy navigation
+6. **Version updates**: Update the "Last Updated" date at the bottom of modified documentation
+
 ### When Debugging
 1. **Start with logs**: Check ROS 2 logs for errors/warnings
 2. **Verify map structure**: Ensure YAML maps are valid
@@ -807,6 +818,6 @@ colcon test --packages-select topological_navigation
 
 ---
 
-**Last Updated**: 2026-01-27
+**Last Updated**: 2026-02-15
 **Branch**: agent_prep
 **Maintainer**: AI Coding Agents
