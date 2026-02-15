@@ -68,3 +68,6 @@ coverage.xml
 **/*.*~
 **/*.*.swp
 .DS_Store
+
+install/*
+log/*
