@@ -447,7 +447,8 @@ Examples:
     parser.add_argument('-v', '--verbose', action='store_true',
                         help='Enable verbose logging')
 
-    args = parser.parse_args()
+    # Use parse_known_args to ignore ROS2 --ros-args passed by launch files
+    args, _ = parser.parse_known_args()
 
     if args.test or (args.map_file is None and not args.new):
         try:
