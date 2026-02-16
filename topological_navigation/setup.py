@@ -29,21 +29,15 @@ setup(
             'localisation2.py = topological_navigation.scripts.localisation2:main',
             'map_manager2.py = topological_navigation.scripts.map_manager2:main',
             'get_simple_policy2.py = topological_navigation.scripts.get_simple_policy2:main',
-            
-            # Visualization Tools
-            'visualise_map_ros2.py = topological_navigation.scripts.visualise_map_ros2:main',
-            'topomap_marker2.py = topological_navigation.topomap_marker2:main',
-            'topological_visual.py = topological_navigation.scripts.topological_visual:main',
-            'policy_marker2.py = topological_navigation.policy_marker2:main',
-            
+
             # Supporting Utilities
             'occupancy_checker.py = topological_navigation.scripts.occupancy_checker:main',
             'topological_transform_publisher.py = topological_navigation.scripts.topological_transform_publisher:main',
             'manual_topomapping.py = topological_navigation.scripts.manual_topomapping:main',
             'validate_map.py = topological_navigation.scripts.validate_map:main',
-            
-            # Interactive Map Editor
-            'interactive_map_editor.py = topological_navigation.scripts.interactive_map_editor:main',
+
+            # Networkx
+            'networkx_utils.py = topological_navigation.scripts.networkx_utils:main',
         ],
     },
 
