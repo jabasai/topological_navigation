@@ -1,0 +1,402 @@
+meta:
+  last_updated: 01-01-2026_00-00-00
+  origin:
+    latitude: 0.0
+    longitude: 0.0
+    altitude: 0.0
+
+metric_map: complex_test_map
+name: complex_test_map
+pointset: complex_test_map
+
+transformation:
+  child: complex_test_map
+  parent: map
+  rotation:
+    w: 1.0
+    x: 0.0
+    y: 0.0
+    z: 0.0
+  translation:
+    x: 0.0
+    y: 0.0
+    z: 0.0
+
+nodes:
+  - meta:
+      map: complex_test_map
+      node: Entry
+      pointset: complex_test_map
+      tag: ['entry_point']
+    node:
+      edges:
+        - action: NavigateToPose
+          action_type: nav2_msgs/action/NavigateToPose
+          edge_id: Entry_Junction1
+          node: Junction1
+          properties:
+            max_speed: 0.8
+        - action: NavigateToPose
+          action_type: nav2_msgs/action/NavigateToPose
+          edge_id: Entry_Row1Start
+          node: Row1Start
+      localise_by_topic: ''
+      name: Entry
+      parent_frame: map
+      pose:
+        orientation:
+          w: 1.0
+          x: 0.0
+          y: 0.0
+          z: 0.0
+        position:
+          x: 0.0
+          y: 0.0
+          z: 0.0
+      properties:
+        xy_goal_tolerance: 0.3
+        yaw_goal_tolerance: 0.1
+        semantics: entry
+      verts:
+        - x: -1.0
+          y: -1.0
+        - x: 1.0
+          y: -1.0
+        - x: 1.0
+          y: 1.0
+        - x: -1.0
+          y: 1.0
+
+  - meta:
+      map: complex_test_map
+      node: Junction1
+      pointset: complex_test_map
+    node:
+      edges:
+        - action: NavigateToPose
+          action_type: nav2_msgs/action/NavigateToPose
+          edge_id: Junction1_Row1Start
+          node: Row1Start
+        - action: NavigateToPose
+          action_type: nav2_msgs/action/NavigateToPose
+          edge_id: Junction1_Row2Start
+          node: Row2Start
+        - action: NavigateToPose
+          action_type: nav2_msgs/action/NavigateToPose
+          edge_id: Junction1_Exit
+          node: Exit
+      localise_by_topic: ''
+      name: Junction1
+      parent_frame: map
+      pose:
+        orientation:
+          w: 1.0
+          x: 0.0
+          y: 0.0
+          z: 0.0
+        position:
+          x: 5.0
+          y: 0.0
+          z: 0.0
+      properties:
+        xy_goal_tolerance: 0.5
+      verts:
+        - x: -1.5
+          y: -1.5
+        - x: 1.5
+          y: -1.5
+        - x: 1.5
+          y: 1.5
+        - x: -1.5
+          y: 1.5
+
+  - meta:
+      map: complex_test_map
+      node: Row1Start
+      pointset: complex_test_map
+      tag: ['row_entry']
+    node:
+      edges:
+        - action: RowOperation
+          action_type: nav2_msgs/action/NavigateToPose
+          edge_id: Row1Start_Row1End
+          node: Row1End
+          properties:
+            max_speed: 0.3
+            row_type: vineyard
+            roboflow:
+              enabled: true
+              confidence: 0.7
+      localise_by_topic: ''
+      name: Row1Start
+      parent_frame: map
+      pose:
+        orientation:
+          w: 0.707
+          x: 0.0
+          y: 0.0
+          z: 0.707
+        position:
+          x: 5.0
+          y: 5.0
+          z: 0.0
+      properties:
+        xy_goal_tolerance: 0.2
+        yaw_goal_tolerance: 0.05
+        semantics: row_entry
+      verts:
+        - x: -0.5
+          y: -0.5
+        - x: 0.5
+          y: -0.5
+        - x: 0.5
+          y: 0.5
+        - x: -0.5
+          y: 0.5
+
+  - meta:
+      map: complex_test_map
+      node: Row1End
+      pointset: complex_test_map
+      tag: ['row_exit']
+    node:
+      edges:
+        - action: NavigateToPose
+          action_type: nav2_msgs/action/NavigateToPose
+          edge_id: Row1End_Junction2
+          node: Junction2
+      localise_by_topic: ''
+      name: Row1End
+      parent_frame: map
+      pose:
+        orientation:
+          w: 0.707
+          x: 0.0
+          y: 0.0
+          z: 0.707
+        position:
+          x: 15.0
+          y: 5.0
+          z: 0.0
+      properties:
+        xy_goal_tolerance: 0.2
+        semantics: row_exit
+      verts:
+        - x: -0.5
+          y: -0.5
+        - x: 0.5
+          y: -0.5
+        - x: 0.5
+          y: 0.5
+        - x: -0.5
+          y: 0.5
+
+  - meta:
+      map: complex_test_map
+      node: Row2Start
+      pointset: complex_test_map
+      tag: ['row_entry']
+    node:
+      edges:
+        - action: RowOperation
+          action_type: nav2_msgs/action/NavigateToPose
+          edge_id: Row2Start_Row2End
+          node: Row2End
+          properties:
+            max_speed: 0.3
+            row_type: vineyard
+      localise_by_topic: ''
+      name: Row2Start
+      parent_frame: map
+      pose:
+        orientation:
+          w: 0.707
+          x: 0.0
+          y: 0.0
+          z: 0.707
+        position:
+          x: 5.0
+          y: -5.0
+          z: 0.0
+      properties:
+        xy_goal_tolerance: 0.2
+        yaw_goal_tolerance: 0.05
+        semantics: row_entry
+      verts:
+        - x: -0.5
+          y: -0.5
+        - x: 0.5
+          y: -0.5
+        - x: 0.5
+          y: 0.5
+        - x: -0.5
+          y: 0.5
+
+  - meta:
+      map: complex_test_map
+      node: Row2End
+      pointset: complex_test_map
+      tag: ['row_exit']
+    node:
+      edges:
+        - action: NavigateToPose
+          action_type: nav2_msgs/action/NavigateToPose
+          edge_id: Row2End_Junction2
+          node: Junction2
+      localise_by_topic: ''
+      name: Row2End
+      parent_frame: map
+      pose:
+        orientation:
+          w: 0.707
+          x: 0.0
+          y: 0.0
+          z: 0.707
+        position:
+          x: 15.0
+          y: -5.0
+          z: 0.0
+      properties:
+        xy_goal_tolerance: 0.2
+        semantics: row_exit
+      verts:
+        - x: -0.5
+          y: -0.5
+        - x: 0.5
+          y: -0.5
+        - x: 0.5
+          y: 0.5
+        - x: -0.5
+          y: 0.5
+
+  - meta:
+      map: complex_test_map
+      node: Junction2
+      pointset: complex_test_map
+    node:
+      edges:
+        - action: NavigateToPose
+          action_type: nav2_msgs/action/NavigateToPose
+          edge_id: Junction2_Exit
+          node: Exit
+      localise_by_topic: ''
+      name: Junction2
+      parent_frame: map
+      pose:
+        orientation:
+          w: 1.0
+          x: 0.0
+          y: 0.0
+          z: 0.0
+        position:
+          x: 20.0
+          y: 0.0
+          z: 0.0
+      properties:
+        xy_goal_tolerance: 0.5
+      verts:
+        - x: -1.5
+          y: -1.5
+        - x: 1.5
+          y: -1.5
+        - x: 1.5
+          y: 1.5
+        - x: -1.5
+          y: 1.5
+
+  - meta:
+      map: complex_test_map
+      node: Exit
+      pointset: complex_test_map
+      tag: ['exit_point']
+    node:
+      edges: []
+      localise_by_topic: ''
+      name: Exit
+      parent_frame: map
+      pose:
+        orientation:
+          w: 1.0
+          x: 0.0
+          y: 0.0
+          z: 0.0
+        position:
+          x: 25.0
+          y: 0.0
+          z: 0.0
+      properties:
+        xy_goal_tolerance: 0.3
+        semantics: exit
+      verts:
+        - x: -1.0
+          y: -1.0
+        - x: 1.0
+          y: -1.0
+        - x: 1.0
+          y: 1.0
+        - x: -1.0
+          y: 1.0
+
+  - meta:
+      map: complex_test_map
+      node: NoGoZone
+      pointset: complex_test_map
+      tag: ['no_go']
+    node:
+      edges: []
+      localise_by_topic: ''
+      name: NoGoZone
+      parent_frame: map
+      pose:
+        orientation:
+          w: 1.0
+          x: 0.0
+          y: 0.0
+          z: 0.0
+        position:
+          x: 10.0
+          y: 10.0
+          z: 0.0
+      properties:
+        xy_goal_tolerance: 0.3
+        no_go: true
+      verts:
+        - x: -0.5
+          y: -0.5
+        - x: 0.5
+          y: -0.5
+        - x: 0.5
+          y: 0.5
+        - x: -0.5
+          y: 0.5
+
+  - meta:
+      map: complex_test_map
+      node: TopicLocaliseNode
+      pointset: complex_test_map
+    node:
+      edges: []
+      localise_by_topic: '{"topic": "/special_zone", "field": "data", "val": "active", "localise_anywhere": true, "persistency": 5}'
+      name: TopicLocaliseNode
+      parent_frame: map
+      pose:
+        orientation:
+          w: 1.0
+          x: 0.0
+          y: 0.0
+          z: 0.0
+        position:
+          x: 10.0
+          y: -10.0
+          z: 0.0
+      properties:
+        xy_goal_tolerance: 0.3
+      verts:
+        - x: -0.5
+          y: -0.5
+        - x: 0.5
+          y: -0.5
+        - x: 0.5
+          y: 0.5
+        - x: -0.5
+          y: 0.5

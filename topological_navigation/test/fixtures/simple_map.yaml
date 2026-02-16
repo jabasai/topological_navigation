@@ -1,0 +1,93 @@
+meta:
+  last_updated: 01-01-2026_00-00-00
+  origin:
+    latitude: 0.0
+    longitude: 0.0
+    altitude: 0.0
+
+metric_map: simple_test_map
+name: simple_test_map
+pointset: simple_test_map
+
+transformation:
+  child: simple_test_map
+  parent: map
+  rotation:
+    w: 1.0
+    x: 0.0
+    y: 0.0
+    z: 0.0
+  translation:
+    x: 0.0
+    y: 0.0
+    z: 0.0
+
+nodes:
+  - meta:
+      map: simple_test_map
+      node: WP1
+      pointset: simple_test_map
+    node:
+      edges:
+        - action: NavigateToPose
+          action_type: nav2_msgs/action/NavigateToPose
+          edge_id: WP1_WP2
+          node: WP2
+          properties:
+            max_speed: 0.5
+      localise_by_topic: ''
+      name: WP1
+      parent_frame: map
+      pose:
+        orientation:
+          w: 1.0
+          x: 0.0
+          y: 0.0
+          z: 0.0
+        position:
+          x: 0.0
+          y: 0.0
+          z: 0.0
+      properties:
+        xy_goal_tolerance: 0.3
+        yaw_goal_tolerance: 0.1
+      verts:
+        - x: -1.0
+          y: -1.0
+        - x: 1.0
+          y: -1.0
+        - x: 1.0
+          y: 1.0
+        - x: -1.0
+          y: 1.0
+
+  - meta:
+      map: simple_test_map
+      node: WP2
+      pointset: simple_test_map
+    node:
+      edges: []
+      localise_by_topic: ''
+      name: WP2
+      parent_frame: map
+      pose:
+        orientation:
+          w: 0.707
+          x: 0.0
+          y: 0.0
+          z: 0.707
+        position:
+          x: 5.0
+          y: 0.0
+          z: 0.0
+      properties:
+        xy_goal_tolerance: 0.5
+      verts:
+        - x: -0.5
+          y: -0.5
+        - x: 0.5
+          y: -0.5
+        - x: 0.5
+          y: 0.5
+        - x: -0.5
+          y: 0.5
