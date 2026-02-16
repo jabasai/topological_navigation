@@ -8,6 +8,7 @@
 
   <maintainer email="marc@hanheide.net">Marc Hanheide</maintainer>
   <maintainer email="jheselden@lincoln.ac.uk">James R Heselden</maintainer>
+  <maintainer email="ihroob@lincoln.ac.uk">Ibrahim Hroob</maintainer>
 
   <author email="jpulidofentanes@lincoln.ac.uk">Jaime Pulido Fentanes</author>
   <author email="abinch@sagarobotics.com">Adam Binch</author>
@@ -19,9 +20,15 @@
   <test_depend>ament_flake8</test_depend>
   <test_depend>ament_pep257</test_depend>
   <test_depend>python3-pytest</test_depend>
+  <test_depend>python3-pytest-cov</test_depend>
+  <test_depend>python3-pytest-mock</test_depend>
   <test_depend>launch_pytest</test_depend>
+  <test_depend>python3-hypothesis</test_depend>
 
   <depend>ament_cmake</depend>
+  <depend>python3-networkx</depend>
+  <depend>python3-scipy</depend>
+  <depend>python3-numpy</depend>
 
   <depend>geometry_msgs</depend>
   <depend>std_msgs</depend>
