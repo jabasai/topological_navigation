@@ -8,13 +8,9 @@ Tested functionality:
 - Import / module syntax
 - Static message helpers (_make_string_msg, _make_float32_msg)
 - _get_node_tag
-- get_distances_to_pose
 - get_edge_distances_to_pose
-- _build_edge_vectors
 - _publish_topics (latched vs non-latched)
-- point_in_poly
 - _map_callback graph/KD-tree construction
-- topic_localise_callback
 - localise_pose_cb
 - _pose_callback throttle logic
 """
@@ -116,12 +112,9 @@ def _make_loc_node(simple_map_data, simple_graph, simple_kdtree):
     loc._kdtree_node_names = names
     loc.nogos = []
     loc.names_by_topic = []
-    loc.nodes_by_topic = []
     loc.loc_by_topic = []
-    loc.persist = {}
     loc.force_check = True
     loc.current_pose = _make_pose()
-    loc.previous_pose = _make_pose(1000.0, 0.0)
 
     # Latched-mode state
     loc.only_latched = True
@@ -226,42 +219,6 @@ class TestGetNodeTag:
 
 
 # ---------------------------------------------------------------------------
-# Test: get_distances_to_pose
-# ---------------------------------------------------------------------------
-
-class TestGetDistancesToPose:
-    """Test get_distances_to_pose returns sorted distances."""
-
-    def test_returns_sorted(self, simple_map_data, simple_graph, simple_kdtree):
-        loc = _make_loc_node(simple_map_data, simple_graph, simple_kdtree)
-        pose = _make_pose(1.0, 0.0)
-        result = loc.get_distances_to_pose(pose)
-
-        assert len(result) == 2
-        # WP1 is closer (dist ~1) than WP2 (dist ~4)
-        assert result[0]['dist'] < result[1]['dist']
-        assert result[0]['node']['node']['name'] == 'WP1'
-        assert result[1]['node']['node']['name'] == 'WP2'
-
-    def test_empty_when_no_kdtree(self, simple_map_data, simple_graph, simple_kdtree):
-        loc = _make_loc_node(simple_map_data, simple_graph, simple_kdtree)
-        loc._kdtree = None
-        assert loc.get_distances_to_pose(_make_pose()) == []
-
-    def test_empty_when_no_names(self, simple_map_data, simple_graph, simple_kdtree):
-        loc = _make_loc_node(simple_map_data, simple_graph, simple_kdtree)
-        loc._kdtree_node_names = []
-        assert loc.get_distances_to_pose(_make_pose()) == []
-
-    def test_at_origin(self, simple_map_data, simple_graph, simple_kdtree):
-        loc = _make_loc_node(simple_map_data, simple_graph, simple_kdtree)
-        pose = _make_pose(0.0, 0.0)
-        result = loc.get_distances_to_pose(pose)
-        # WP1 is at origin => dist == 0
-        assert abs(result[0]['dist']) < 1e-9
-
-
-# ---------------------------------------------------------------------------
 # Test: get_edge_distances_to_pose
 # ---------------------------------------------------------------------------
 
@@ -281,72 +238,6 @@ class TestGetEdgeDistancesToPose:
         edge_ids, dists = loc.get_edge_distances_to_pose(_make_pose())
         assert edge_ids == []
         assert len(dists) == 0
-
-
-# ---------------------------------------------------------------------------
-# Test: _build_edge_vectors
-# ---------------------------------------------------------------------------
-
-class TestBuildEdgeVectors:
-    """Test the _build_edge_vectors backward-compat helper."""
-
-    def test_vectors_shape(self, simple_map_data, simple_graph, simple_kdtree):
-        loc = _make_loc_node(simple_map_data, simple_graph, simple_kdtree)
-        loc._build_edge_vectors()
-
-        # simple_map has 1 edge: WP1 -> WP2
-        assert len(loc.dist_edge_ids) == 1
-        assert loc.dist_edge_ids[0] == 'WP1_WP2'
-        assert loc.vectors_start.shape == (1, 3)
-        assert loc.vectors_end.shape == (1, 3)
-
-    def test_self_loop_skipped(self, simple_map_data, simple_graph, simple_kdtree):
-        """Edges where source == target should be skipped with an error log."""
-        loc = _make_loc_node(simple_map_data, simple_graph, simple_kdtree)
-
-        # Inject a self-loop edge
-        loc.tmap['nodes'][0]['node']['edges'].append({
-            'action': 'NavigateToPose',
-            'action_type': 'nav2_msgs/action/NavigateToPose',
-            'edge_id': 'WP1_WP1',
-            'node': 'WP1',
-        })
-        loc._build_edge_vectors()
-
-        # Self-loop is skipped
-        assert 'WP1_WP1' not in loc.dist_edge_ids
-        assert len(loc.dist_edge_ids) == 1  # only WP1_WP2
-
-
-# ---------------------------------------------------------------------------
-# Test: point_in_poly
-# ---------------------------------------------------------------------------
-
-class TestPointInPoly:
-    """Test the point_in_poly backward-compat wrapper."""
-
-    def test_inside(self, simple_map_data, simple_graph, simple_kdtree):
-        loc = _make_loc_node(simple_map_data, simple_graph, simple_kdtree)
-        node_data = simple_map_data['nodes'][0]  # WP1 at (0,0), verts ±1
-        pose = _make_pose(0.5, 0.5)
-        assert loc.point_in_poly(node_data, pose) is True
-
-    def test_outside(self, simple_map_data, simple_graph, simple_kdtree):
-        loc = _make_loc_node(simple_map_data, simple_graph, simple_kdtree)
-        node_data = simple_map_data['nodes'][0]
-        pose = _make_pose(10.0, 10.0)
-        assert loc.point_in_poly(node_data, pose) is False
-
-    def test_invalid_node_format(self, simple_map_data, simple_graph, simple_kdtree):
-        loc = _make_loc_node(simple_map_data, simple_graph, simple_kdtree)
-        assert loc.point_in_poly({}, _make_pose()) is False
-        assert loc.point_in_poly("not_a_dict", _make_pose()) is False
-
-    def test_no_graph(self, simple_map_data, simple_graph, simple_kdtree):
-        loc = _make_loc_node(simple_map_data, simple_graph, simple_kdtree)
-        loc._graph = None
-        node_data = simple_map_data['nodes'][0]
-        assert loc.point_in_poly(node_data, _make_pose()) is False
 
 
 # ---------------------------------------------------------------------------
@@ -470,71 +361,6 @@ class TestMapCallback:
 
         # Should not set rec_map because graph build returned None (empty nodes)
         assert loc.rec_map is False
-
-
-# ---------------------------------------------------------------------------
-# Test: topic_localise_callback
-# ---------------------------------------------------------------------------
-
-class TestTopicLocaliseCallback:
-    """Test topic_localise_callback logic."""
-
-    def test_adds_item_on_match(self, simple_map_data, simple_graph, simple_kdtree):
-        loc = _make_loc_node(simple_map_data, simple_graph, simple_kdtree)
-        loc.force_check = True
-
-        item = {
-            'name': 'WP1',
-            'field': 'data',
-            'val': True,
-            'persistency': 10,
-        }
-        msg = MagicMock()
-        msg.data = True
-
-        loc.topic_localise_callback(msg, item)
-        assert any(x['name'] == 'WP1' for x in loc.loc_by_topic)
-
-    def test_removes_item_on_mismatch(self, simple_map_data, simple_graph, simple_kdtree):
-        loc = _make_loc_node(simple_map_data, simple_graph, simple_kdtree)
-        loc.force_check = True
-
-        item = {
-            'name': 'WP1',
-            'field': 'data',
-            'val': True,
-            'persistency': 10,
-        }
-        # Add first
-        loc.loc_by_topic.append(item)
-        loc.persist['WP1'] = 5
-
-        # Mismatch → removes
-        msg = MagicMock()
-        msg.data = False
-        loc.topic_localise_callback(msg, item)
-
-        assert not any(x['name'] == 'WP1' for x in loc.loc_by_topic)
-        assert 'WP1' not in loc.persist
-
-    def test_skips_when_robot_has_not_moved(self, simple_map_data, simple_graph, simple_kdtree):
-        loc = _make_loc_node(simple_map_data, simple_graph, simple_kdtree)
-        loc.force_check = False
-        loc.current_pose = _make_pose(0.0, 0.0)
-        loc.previous_pose = _make_pose(0.0, 0.0)
-
-        item = {
-            'name': 'WP1',
-            'field': 'data',
-            'val': True,
-            'persistency': 10,
-        }
-        msg = MagicMock()
-        msg.data = True
-
-        loc.topic_localise_callback(msg, item)
-        # Should not add because distance < 0.10
-        assert len(loc.loc_by_topic) == 0
 
 
 # ---------------------------------------------------------------------------

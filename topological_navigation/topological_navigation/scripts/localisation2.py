@@ -47,11 +47,8 @@ from topological_navigation.networkx_utils import (
     determine_closest_node,
     determine_current_node,
     get_edge_distances_nx,
-    point_in_poly_nx,
-    query_nearest_nodes,
     update_loc_by_topic_nx,
 )
-from topological_navigation.tmap_utils import get_distance, get_node_from_tmap2
 from topological_navigation_msgs.msg import ClosestEdges
 from topological_navigation_msgs.srv import LocalisePose
 
@@ -79,7 +76,7 @@ class TopologicalNavLoc(rclpy.node.Node):
 
         self.throttle_val = self.get_parameter_or(
             "LocalisationThrottle",
-            Parameter('int', Parameter.Type.INTEGER, 3),
+            Parameter('int', Parameter.Type.INTEGER, 1),
         ).value
         self.only_latched = self.get_parameter_or(
             "OnlyLatched",
@@ -98,7 +95,6 @@ class TopologicalNavLoc(rclpy.node.Node):
         self.nodetag = "Unknown"
         self.closest_edge_ids: list = []
         self.closest_edge_dists: list = []
-        self.current_closest_node_name = ""
 
         # NetworkX graph and KD-tree data structures
         self._graph = None
@@ -123,15 +119,11 @@ class TopologicalNavLoc(rclpy.node.Node):
         self.tag_pub = self.create_publisher(String, 'current_node/tag', qos_profile=self.qos)
 
         # -- Localisation state -----------------------------------------------
-        self.force_check = True
         self.rec_map = False
         self.set_nogos = False
         self.loc_by_topic: list = []
-        self.persist: dict = {}
 
         self.current_pose = Pose()
-        self.previous_pose = Pose()
-        self.previous_pose.position.x = 1000.0  # large initial value to trigger first check
 
         # -- Callback groups --------------------------------------------------
         self._cb_group_localise = ReentrantCallbackGroup()
@@ -177,40 +169,13 @@ class TopologicalNavLoc(rclpy.node.Node):
         self.listener = TransformListener(self.tf_buffer, self)
         self.create_timer(1.0, self._pose_callback)
 
-    # -----------------------------------------------------------------
-    # Distance helpers
-    # -----------------------------------------------------------------
-
-    def get_distances_to_pose(self, pose: Pose) -> list:
-        """Return distance from every waypoint to *pose*, sorted nearest-first.
-
-        Uses the KD-tree for O(log n) spatial queries.
-
-        Returns:
-            List of dicts ``{'node': <node_dict>, 'dist': <float>}``.
-        """
-        if self._kdtree is None or not self._kdtree_node_names:
-            return []
-
-        k = len(self._kdtree_node_names)
-        nearest_nodes = query_nearest_nodes(
-            self._kdtree, self._kdtree_node_names, pose, k=k,
-        )
-
-        distances = []
-        for info in nearest_nodes:
-            node_data = get_node_from_tmap2(self.tmap, info['node'])
-            if node_data:
-                distances.append({'node': node_data, 'dist': info['dist']})
-        return distances
-
     def get_edge_distances_to_pose(self, pose: Pose):
         """Return edge-ID list and distance array for all edges relative to *pose*.
 
         Uses the NetworkX graph for vectorised edge distance calculations.
 
         Returns:
-            Tuple ``(edge_ids, distances)`` – both may be empty if the graph
+            Tuple ``(edge_ids, distances)`` - both may be empty if the graph
             is unavailable.
         """
         if self._graph is None:
@@ -220,7 +185,6 @@ class TopologicalNavLoc(rclpy.node.Node):
             return [], np.array([])
 
         return get_edge_distances_nx(self._graph, pose, logger=self.get_logger())
-        
 
     # -----------------------------------------------------------------
     # Periodic TF-based localisation
@@ -259,12 +223,6 @@ class TopologicalNavLoc(rclpy.node.Node):
             self.throttle += 1
             return
 
-        # Closest edges
-        closest_edges, edge_dists = self.get_edge_distances_to_pose(msg)
-        if len(closest_edges) > 1:
-            closest_edges = closest_edges[:2]
-            edge_dists = edge_dists[:2]
-
         # Current node (inside influence zone)
         currentstr = determine_current_node(
             self._graph, self._kdtree, self._kdtree_node_names,
@@ -277,12 +235,11 @@ class TopologicalNavLoc(rclpy.node.Node):
             currentstr, self.nogos, self.names_by_topic, msg,
         )
 
-        # Update force_check flag
-        if currentstr != 'none':
-            self.current_closest_node_name = currentstr
-            self.force_check = False
-        else:
-            self.force_check = True
+        # Closest edges (computed from the *current* pose)
+        closest_edges, edge_dists = self.get_edge_distances_to_pose(msg)
+        if len(closest_edges) > 1:
+            closest_edges = closest_edges[:2]
+            edge_dists = edge_dists[:2]
 
         # Resolve node tag
         nodetag = self._get_node_tag(closeststr)
@@ -301,15 +258,16 @@ class TopologicalNavLoc(rclpy.node.Node):
     # -----------------------------------------------------------------
 
     def _get_node_tag(self, node_name: str) -> str:
-        """Return the first tag string for *node_name*, or ``'Unknown'``."""
-        node = get_node_from_tmap2(self.tmap, node_name)
-        if node is None:
-            self.get_logger().warning(
-                f"Node '{node_name}' not found in the topological map"
-            )
+        """Return the first tag string for *node_name*, or ``'Unknown'``.
+
+        Uses the NetworkX graph ``meta`` attribute instead of a linear
+        YAML lookup.
+        """
+        if self._graph is None or node_name not in self._graph.nodes:
             return 'Unknown'
+        meta = self._graph.nodes[node_name].get('meta', {})
         try:
-            return node['meta']['tag'][0]
+            return meta['tag'][0]
         except (KeyError, IndexError, TypeError):
             return 'Unknown'
 
@@ -378,20 +336,21 @@ class TopologicalNavLoc(rclpy.node.Node):
         self.nodetag = nodetag
         self.closest_edge_ids = closest_edge_ids
         self.closest_edge_dists = closest_edge_dists
-        
 
+        self.get_logger().info(
+            f"Published: closest_node='{wpstr}', closest_dist={closest_dist}, "
+            f"current_node='{cnstr}', nodetag='{nodetag}', "
+            f"closest_edges={closest_edge_ids} (dists: {closest_edge_dists})"
+        )
 
-# -----------------------------------------------------------------
+    # -----------------------------------------------------------------
     # Map reception
     # -----------------------------------------------------------------
 
     def _map_callback(self, msg):
-        """Handle incoming topological map – build graph and KD-tree."""
-        if self.rec_map:
-            return  # already processed
+        """Handle incoming topological map - build graph and KD-tree."""
 
         self.names_by_topic: list = []
-        self.nodes_by_topic: list = []
         self.nogos: list = []
 
         self.tmap = yaml.load(msg.data, Loader=CustomSafeLoader)
@@ -420,86 +379,11 @@ class TopologicalNavLoc(rclpy.node.Node):
         )
 
         # Topic-based localisation config
-        self.nodes_by_topic, self.names_by_topic = update_loc_by_topic_nx(
+        _, self.names_by_topic = update_loc_by_topic_nx(
             self._graph, logger=self.get_logger(),
         )
 
-        # Edge vectors (kept for backward compatibility)
-        self._build_edge_vectors()
-
         self.rec_map = True
-
-    # -----------------------------------------------------------------
-    # Edge vectors  (backward-compatible helper)
-    # -----------------------------------------------------------------
-
-    def _build_edge_vectors(self):
-        """Pre-compute start/end vectors for every edge (used by legacy code)."""
-        node_poses = {
-            n["node"]["name"]: n["node"]["pose"] for n in self.tmap["nodes"]
-        }
-        self.dist_edge_ids: list = []
-        vectors_start: list = []
-        vectors_end: list = []
-
-        for node in self.tmap["nodes"]:
-            name = node["node"]["name"]
-            orig = node_poses[name]
-            start = [orig["position"]["x"], orig["position"]["y"], 0]
-
-            for edge in node["node"]["edges"]:
-                if name == edge["node"]:
-                    self.get_logger().error(
-                        f"Self-referencing edge '{edge['edge_id']}' on node '{name}'"
-                    )
-                    continue
-                dest = node_poses[edge["node"]]
-                self.dist_edge_ids.append(edge["edge_id"])
-                vectors_start.append(start)
-                vectors_end.append([dest["position"]["x"], dest["position"]["y"], 0])
-
-        self.vectors_start = np.array(vectors_start)
-        self.vectors_end = np.array(vectors_end)
-
-    # -----------------------------------------------------------------
-    # Topic-based localisation callback
-    # -----------------------------------------------------------------
-
-    def topic_localise_callback(self, msg, item):
-        """Update ``loc_by_topic`` when a subscribed topic fires.
-
-        Only re-evaluates when the robot has moved more than 0.10 m since
-        the last detection.
-        """
-        if self.force_check:
-            dist = 1.0
-        else:
-            dist = get_distance(self.current_pose, self.previous_pose)
-
-        if dist <= 0.10:
-            return
-
-        val = getattr(msg, item['field'])
-
-        if val == item['val']:
-            if item['name'] in self.persist:
-                if self.persist[item['name']] < item['persistency']:
-                    self.persist[item['name']] += 1
-            else:
-                self.persist[item['name']] = 0
-
-            active_names = [x['name'] for x in self.loc_by_topic]
-            if (item['name'] not in active_names
-                    and self.persist[item['name']] < item['persistency']):
-                self.loc_by_topic.append(item)
-                self.previous_pose = self.current_pose
-        else:
-            self.persist.pop(item['name'], None)
-            active = [x for x in self.loc_by_topic if x['name'] == item['name']]
-            for entry in active:
-                self.loc_by_topic.remove(entry)
-            if active:
-                self.previous_pose = self.current_pose
 
     # -----------------------------------------------------------------
     # Localise-pose service
@@ -559,30 +443,6 @@ class TopologicalNavLoc(rclpy.node.Node):
         future = cli.call_async(GetTaggedNodes.Request())
         rclpy.spin_until_future_complete(self, future)
         return list(future.result().nodes)
-
-    # -----------------------------------------------------------------
-    # Point-in-polygon (backward-compatible wrapper)
-    # -----------------------------------------------------------------
-
-    def point_in_poly(self, node, pose) -> bool:
-        """Check whether *pose* lies inside *node*'s influence zone.
-
-        Args:
-            node: Node data dictionary from the tmap (``{'node': {'name': ...}}``)
-            pose: ``geometry_msgs.msg.Pose``
-
-        Returns:
-            ``True`` if inside the influence zone, ``False`` otherwise.
-        """
-        if isinstance(node, dict) and 'node' in node and 'name' in node['node']:
-            node_name = node['node']['name']
-        else:
-            return False
-
-        if self._graph is None:
-            return False
-
-        return point_in_poly_nx(self._graph, node_name, pose)
 
 
 # =====================================================================

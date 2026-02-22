@@ -1,10 +1,10 @@
 # Topological Localisation (localisation2.py) - Technical Documentation
 
-**Version**: 2.0  
-**Date**: 2026-02-15  
+**Version**: 2.1  
+**Date**: 2026-02-21  
 **Module**: `topological_navigation.scripts.localisation2`  
-**Lines of Code**: ~610  
-**Test Coverage**: 35 unit tests (`test/test_localisation2.py`)
+**Lines of Code**: ~475  
+**Test Coverage**: 22 unit tests (`test/test_localisation2.py`)
 
 ---
 
@@ -82,8 +82,7 @@ TopologicalNavLoc
 ├── _map_callback()
 │   ├── build_graph_from_tmap()     ← networkx_utils
 │   ├── build_kdtree_from_graph()   ← networkx_utils
-│   ├── update_loc_by_topic_nx()    ← networkx_utils
-│   └── _build_edge_vectors()       ← legacy compat
+│   └── update_loc_by_topic_nx()    ← networkx_utils
 │
 ├── _pose_callback()                ← timer (1 Hz)
 │   ├── TF lookup (map → base_link)
@@ -97,8 +96,6 @@ TopologicalNavLoc
 ├── localise_pose_cb()              ← service handler
 │   ├── determine_current_node()
 │   └── determine_closest_node()
-│
-├── topic_localise_callback()       ← external sensor topics
 │
 └── _get_no_go_nodes()              ← GetTaggedNodes service
 ```
@@ -132,10 +129,7 @@ The constructor:
 
 | Method | Signature | Description |
 |--------|-----------|-------------|
-| `get_distances_to_pose` | `(pose: Pose) → list[dict]` | Sorted list of `{'node': …, 'dist': …}` for all nodes |
 | `get_edge_distances_to_pose` | `(pose: Pose) → tuple[list, ndarray]` | `(edge_ids, distances)` for all edges |
-| `point_in_poly` | `(node: dict, pose: Pose) → bool` | Whether `pose` is inside `node`'s influence zone |
-| `topic_localise_callback` | `(msg, item: dict) → None` | Callback for topic-based localisation |
 | `localise_pose_cb` | `(req, res) → res` | Service handler for one-shot localisation |
 
 #### Private Methods
@@ -146,7 +140,6 @@ The constructor:
 | `_pose_callback` | Periodic (1 Hz) TF-based localisation loop |
 | `_publish_topics` | Publishes all localisation topics (with optional latching) |
 | `_get_node_tag` | Returns the first tag string for a node, or `'Unknown'` |
-| `_build_edge_vectors` | Pre-computes edge start/end vectors (backward compat) |
 | `_get_no_go_nodes` | Queries `GetTaggedNodes` service for restricted nodes |
 | `_make_string_msg` | *(static)* Creates a `std_msgs/String` message |
 | `_make_float32_msg` | *(static)* Creates a `std_msgs/Float32` message |
@@ -339,8 +332,7 @@ The node expects a valid TF chain from the topological map's
    b. build_graph_from_tmap() → self._graph (NetworkX DiGraph)
    c. build_kdtree_from_graph() → self._kdtree, self._kdtree_node_names
    d. update_loc_by_topic_nx() → topic subscriber config
-   e. _build_edge_vectors() → legacy edge arrays
-   f. self.rec_map = True
+   e. self.rec_map = True
 6. _get_no_go_nodes() → self.nogos (via GetTaggedNodes service)
 7. TF listener + 1 Hz timer created
 8. Normal operation begins
@@ -383,8 +375,8 @@ Timer tick (1 Hz)
 
 | Module | Functions Used |
 |--------|----------------|
-| `networkx_utils` | `build_graph_from_tmap`, `build_kdtree_from_graph`, `determine_current_node`, `determine_closest_node`, `get_edge_distances_nx`, `point_in_poly_nx`, `query_nearest_nodes`, `update_loc_by_topic_nx` |
-| `tmap_utils` | `get_distance`, `get_node_from_tmap2` |
+| `networkx_utils` | `build_graph_from_tmap`, `build_kdtree_from_graph`, `determine_current_node`, `determine_closest_node`, `get_edge_distances_nx`, `update_loc_by_topic_nx` |
+| `tmap_utils` | `get_node_from_tmap2` |
 | `map_types` | `CustomSafeLoader` |
 
 ### Optional Dependencies
@@ -399,23 +391,19 @@ Timer tick (1 Hz)
 
 ### Test File
 
-`test/test_localisation2.py` — 35 unit tests across 10 test classes.
+`test/test_localisation2.py` — 22 unit tests across 7 test classes.
 
 ### Test Classes
 
 | Class | Tests | Description |
 |-------|-------|-------------|
-| `TestImports` | 2 | Module importability and class existence |
-| `TestMakeStringMsg` | 3 | `_make_string_msg` static method |
-| `TestMakeFloat32Msg` | 2 | `_make_float32_msg` static method |
-| `TestGetNodeTag` | 4 | `_get_node_tag` tag extraction logic |
-| `TestGetDistancesToPose` | 4 | `get_distances_to_pose` with KD-tree |
-| `TestGetEdgeDistancesToPose` | 3 | `get_edge_distances_to_pose` delegates to `networkx_utils` |
-| `TestBuildEdgeVectors` | 3 | `_build_edge_vectors` pre-computation |
-| `TestPublishTopics` | 5 | Latched vs. unconditional publishing |
-| `TestPointInPoly` | 4 | Influence zone membership checks |
+| `TestImport` | 3 | Module importability and class existence |
+| `TestMessageHelpers` | 4 | `_make_string_msg` and `_make_float32_msg` static methods |
+| `TestGetNodeTag` | 3 | `_get_node_tag` tag extraction logic |
+| `TestGetEdgeDistancesToPose` | 2 | `get_edge_distances_to_pose` delegates to `networkx_utils` |
+| `TestPublishTopics` | 4 | Latched vs. unconditional publishing |
 | `TestMapCallback` | 3 | Map reception and graph/KD-tree construction |
-| `TestTopicLocaliseCallback` | 2 | Topic-based localisation hysteresis |
+| `TestLocalisePoseCb` | 3 | `localise_pose_cb` service handler |
 
 ### Running Tests
 
@@ -519,6 +507,32 @@ Tests use **mocked ROS 2 infrastructure** (no `rclpy.init()` required):
 - Added type hints to all method signatures
 - Added 35 unit tests (`test/test_localisation2.py`)
 
+### v2.1 (2026-02-21) — Dead Code Removal
+
+**Removed unused methods** (no production callers):
+- `get_distances_to_pose()` – never called outside tests; `query_nearest_nodes`
+  from `networkx_utils` covers the same need
+- `_build_edge_vectors()` – legacy backward-compat helper whose outputs
+  (`self.vectors_start`, `self.vectors_end`, `self.dist_edge_ids`) were never
+  read; edge distances now computed by `get_edge_distances_nx`
+- `point_in_poly()` – backward-compat wrapper never called by production code;
+  `point_in_poly_nx` is used directly inside `networkx_utils`
+- `topic_localise_callback()` – never wired to any ROS subscription
+
+**Removed unused imports**:
+- `get_distance` from `tmap_utils`
+- `point_in_poly_nx`, `query_nearest_nodes` from `networkx_utils`
+
+**Removed unused state attributes**:
+- `self.persist` (only used by `topic_localise_callback`)
+- `self.previous_pose` (only used by `topic_localise_callback`)
+- `self.nodes_by_topic` (set but never read)
+
+**Tests updated**:
+- Removed 4 test classes (13 tests) covering deleted methods
+- Updated `_make_loc_node` helper to match trimmed attribute set
+- 22 tests remaining, all passing
+
 ---
 
-**Last Updated**: 2026-02-15
+**Last Updated**: 2026-02-21
