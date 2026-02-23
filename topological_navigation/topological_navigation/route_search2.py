@@ -1,4 +1,9 @@
 #!/usr/bin/env python
+"""Topological route planning and validation helpers for tmap2 maps.
+
+Provides a lightweight A* search over the map graph, a simple route validator,
+and a route distance helper used by higher-level navigation logic.
+"""
 #########################################################################################################
 import rclpy
 from topological_navigation.tmap_utils import *
@@ -6,8 +11,7 @@ from topological_navigation_msgs.msg import NavRoute
 from rclpy.node import Node
 
 class NodeToExpand(object):
-    
-    
+    """Internal A* bookkeeping structure used by TopologicalRouteSearch2."""
     def __init__(self, name, father, current_distance, dist_to_target):
         
         self.name = name
@@ -25,6 +29,7 @@ class NodeToExpand(object):
 
 #########################################################################################################
 class TopologicalRouteSearch2(object):
+    """A* route search on a tmap2 dictionary map."""
     def __init__(self, top_map) :
 
         self.top_map = top_map
@@ -164,6 +169,7 @@ class TopologicalRouteSearch2(object):
     
     
     def get_node_from_tmap2(self, node_name):
+        """Return the node dict for a node name, or None if missing."""
         
         try:
             node = self.nodes[node_name]
@@ -173,6 +179,7 @@ class TopologicalRouteSearch2(object):
     
     
     def get_edges_between_tmap2(self, nodea, nodeb):
+        """Return edge dicts that connect nodea to nodeb."""
         
         ab = []
         noda = self.get_node_from_tmap2(nodea)
@@ -183,12 +190,14 @@ class TopologicalRouteSearch2(object):
     
     
     def get_connected_nodes_tmap2(self, node):
+        """Return a list of neighbor node names for a given node dict."""
         
         items = self.children[node["node"]["name"]]
         return [item["name"] for item in items]
     
     
     def get_distance_to_node_tmap2(self, nodea, nodeb):
+        """Return precomputed edge distance between two connected nodes."""
         
         items = self.children[nodea["node"]["name"]]
         for item in items:
@@ -199,6 +208,7 @@ class TopologicalRouteSearch2(object):
 
 #########################################################################################################
 class RouteChecker(Node):
+    """Validate a NavRoute against a tmap2 map."""
     def __init__(self, tmap):
         super().__init__("route_checker")
         self.edge_dict = {}
@@ -209,6 +219,7 @@ class RouteChecker(Node):
                 self.edge_dict[node["node"]["name"]].append(item)
                 
     def check_route(self, route):
+        """Return True if the route is valid in the current map."""
         self.get_logger().info("Checking Route...")
         N = len(route.source)
         if N < 1 or N != len(route.edge_id):
@@ -256,6 +267,7 @@ class RouteChecker(Node):
         
 #########################################################################################################    
 def get_route_distance(tmap, node_a, node_b):
+    """Compute route distance between two nodes using A* on the tmap2 map."""
     
     if node_a is None or node_b is None:
         return 10e5-1

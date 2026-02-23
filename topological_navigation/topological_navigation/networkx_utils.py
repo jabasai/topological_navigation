@@ -23,10 +23,10 @@ Dependencies:
 - numpy (>=1.19): Numerical operations
 """
 
-import networkx as nx
-import numpy as np
-from scipy.spatial import KDTree
 import json
+import numpy as np
+import networkx as nx
+from scipy.spatial import KDTree
 from typing import Dict, Any, Optional, Tuple, List
 
 
@@ -1740,8 +1740,294 @@ def determine_closest_node(kdtree: Optional[KDTree], node_names: List[str],
     
     return 'none', float('inf')
 
-def main():
-    pass
+def draw_topological_graph(
+    graph: Optional[nx.DiGraph],
+    highlight_nodes: Optional[List[str]] = None,
+    highlight_edges: Optional[List[Tuple[str, str]]] = None,
+    title: str = "Topological Map",
+    save_path: Optional[str] = None,
+    figsize: Tuple[float, float] = (14, 10),
+    logger=None,
+) -> None:
+    """Draw the topological map graph for visual debugging.
 
-if __name__  == '__main__':
+    Uses ``matplotlib`` and ``nx.draw_networkx_*`` to render the graph with
+    real-world (x, y) positions stored on the nodes.  Optionally highlights
+    a subset of nodes/edges (e.g. a planned route) and can save the figure
+    to disk instead of showing it interactively.
+
+    Args:
+        graph: NetworkX DiGraph built by :func:`build_graph_from_tmap`.
+               If *None* or empty the call is a no-op.
+        highlight_nodes: Node names to draw in a distinct colour (default
+               colour: orange).  Useful for marking the current node, goal,
+               or route waypoints.
+        highlight_edges: Edge tuples ``(source, target)`` to draw in a
+               distinct colour (default: red).  Useful for showing a planned
+               route.
+        title: Figure title.
+        save_path: If given, the figure is saved to this path (e.g.
+               ``'/tmp/topo_map.png'``) instead of calling ``plt.show()``.
+        figsize: Matplotlib figure size in inches ``(width, height)``.
+        logger: Optional ROS 2 logger for error messages.
+
+    Returns:
+        None.  A matplotlib figure is either displayed or saved.
+
+    Example:
+        >>> graph = build_graph_from_tmap(tmap_data)
+        >>> # Show full map
+        >>> draw_topological_graph(graph)
+        >>> # Highlight a route
+        >>> route_nodes = ['WP1', 'WP2', 'WP3']
+        >>> route_edges = [('WP1', 'WP2'), ('WP2', 'WP3')]
+        >>> draw_topological_graph(
+        ...     graph,
+        ...     highlight_nodes=route_nodes,
+        ...     highlight_edges=route_edges,
+        ...     title='Planned route',
+        ...     save_path='/tmp/route.png',
+        ... )
+    """
+    try:
+        import matplotlib
+        matplotlib.use("Agg")  # non-interactive backend safe for headless
+        import matplotlib.pyplot as plt
+    except ImportError:
+        msg = (
+            "matplotlib is required for draw_topological_graph. "
+            "Install it with: pip install matplotlib"
+        )
+        if logger:
+            logger.error(msg)
+        else:
+            print(msg)
+        return
+
+    if graph is None or graph.number_of_nodes() == 0:
+        if logger:
+            logger.warning("draw_topological_graph: graph is None or empty")
+        return
+
+    highlight_nodes = set(highlight_nodes or [])
+    highlight_edges = set(highlight_edges or [])
+
+    # Build position dict from node attributes (x, y)
+    pos: Dict[str, Tuple[float, float]] = {}
+    for node_name in graph.nodes():
+        attrs = graph.nodes[node_name]
+        pos[node_name] = (attrs.get("x", 0.0), attrs.get("y", 0.0))
+
+    fig, ax = plt.subplots(figsize=figsize)
+    ax.set_title(title, fontsize=14)
+    ax.set_xlabel("x (m)")
+    ax.set_ylabel("y (m)")
+    ax.set_aspect("equal")
+    ax.grid(True, linestyle="--", alpha=0.4)
+
+    # --- edges -----------------------------------------------------------
+    normal_edges = [e for e in graph.edges() if e not in highlight_edges]
+    nx.draw_networkx_edges(
+        graph, pos, edgelist=normal_edges, ax=ax,
+        edge_color="grey", alpha=0.6, arrows=True,
+        arrowstyle="-|>", arrowsize=12, connectionstyle="arc3,rad=0.08",
+    )
+    if highlight_edges:
+        present = [e for e in highlight_edges if graph.has_edge(*e)]
+        if present:
+            nx.draw_networkx_edges(
+                graph, pos, edgelist=present, ax=ax,
+                edge_color="red", width=2.2, arrows=True,
+                arrowstyle="-|>", arrowsize=14,
+                connectionstyle="arc3,rad=0.08",
+            )
+
+    # --- nodes -----------------------------------------------------------
+    normal_nodes = [n for n in graph.nodes() if n not in highlight_nodes]
+    nx.draw_networkx_nodes(
+        graph, pos, nodelist=normal_nodes, ax=ax,
+        node_color="steelblue", node_size=200, alpha=0.85,
+    )
+    if highlight_nodes:
+        present = [n for n in highlight_nodes if n in graph.nodes()]
+        if present:
+            nx.draw_networkx_nodes(
+                graph, pos, nodelist=present, ax=ax,
+                node_color="orange", node_size=320, alpha=0.95,
+                edgecolors="red", linewidths=1.5,
+            )
+
+    # --- labels ----------------------------------------------------------
+    nx.draw_networkx_labels(
+        graph, pos, ax=ax, font_size=7, font_weight="bold",
+    )
+
+    plt.tight_layout()
+    if save_path:
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+        if logger:
+            logger.info(f"Topological map figure saved to {save_path}")
+        else:
+            print(f"Saved to {save_path}")
+    else:
+        plt.show()
+
+    plt.close(fig)
+
+
+def main():
+    """Load test fixture maps, build graphs, run basic queries, and visualise."""
+    import argparse
+    import os
+    import sys
+    import yaml
+
+    # ------------------------------------------------------------------
+    # CLI
+    # ------------------------------------------------------------------
+    parser = argparse.ArgumentParser(
+        description="Load a topological map, build a NetworkX graph, "
+                    "run basic spatial queries, and save a visualisation."
+    )
+    parser.add_argument(
+        "--map", "-m",
+        default=None,
+        help="Path to a .yaml topological map.  "
+             "If omitted, the test fixtures are used.",
+    )
+    parser.add_argument(
+        "--out-dir", "-o",
+        default="/tmp",
+        help="Directory for saved PNG figures (default: /tmp).",
+    )
+    args = parser.parse_args()
+
+    # ------------------------------------------------------------------
+    # Resolve map file(s)
+    # ------------------------------------------------------------------
+    this_dir = os.path.dirname(os.path.abspath(__file__))
+    fixture_dir = os.path.normpath(
+        os.path.join(this_dir, "..", "test", "fixtures")
+    )
+    config_dir = os.path.normpath(
+        os.path.join(this_dir, "..", "config")
+    )
+
+    if args.map:
+        map_files = [args.map]
+    else:
+        # Default: all fixture maps + the polytunnel config map
+        map_files = sorted(
+            os.path.join(fixture_dir, f)
+            for f in os.listdir(fixture_dir)
+            if f.endswith(".yaml") and not f.startswith("README")
+        )
+        polytunnel = os.path.join(config_dir, "strawberry_polytunnel.tmap2.yaml")
+        if os.path.isfile(polytunnel):
+            map_files.append(polytunnel)
+
+    if not map_files:
+        print("No map files found. Pass --map <path>.")
+        sys.exit(1)
+
+    os.makedirs(args.out_dir, exist_ok=True)
+
+    # ------------------------------------------------------------------
+    # Process each map
+    # ------------------------------------------------------------------
+    for map_path in map_files:
+        map_name = os.path.splitext(os.path.basename(map_path))[0]
+        print(f"\n{'=' * 60}")
+        print(f"Map: {map_name}  ({map_path})")
+        print("=" * 60)
+
+        # 1. Load YAML
+        with open(map_path) as f:
+            tmap_data = yaml.safe_load(f)
+
+        if tmap_data is None:
+            print("  [SKIP] empty YAML file")
+            continue
+
+        # 2. Build NetworkX graph
+        graph = build_graph_from_tmap(tmap_data)
+        if graph is None:
+            print("  [SKIP] build_graph_from_tmap returned None")
+            continue
+        print(f"  Nodes : {graph.number_of_nodes()}")
+        print(f"  Edges : {graph.number_of_edges()}")
+
+        # 3. Build KD-tree
+        kdtree, node_names = build_kdtree_from_graph(graph)
+        if kdtree is None:
+            print("  [SKIP] KD-tree build failed")
+            continue
+        print(f"  KD-tree built with {len(node_names)} points")
+
+        # 4. Pick a sample pose (first node's position)
+        sample_node = node_names[0]
+        sample_attrs = graph.nodes[sample_node]
+
+        class _FakePose:
+            """Minimal pose-like object for testing."""
+            class position:
+                x = sample_attrs.get("x", 0.0)
+                y = sample_attrs.get("y", 0.0)
+                z = sample_attrs.get("z", 0.0)
+
+        pose = _FakePose()
+        print(f"  Sample pose at node '{sample_node}': "
+              f"({pose.position.x:.2f}, {pose.position.y:.2f})")
+
+        # 5. Query nearest nodes
+        nearest = query_nearest_nodes(kdtree, node_names, pose, k=3)
+        print(f"  3-nearest nodes:")
+        for entry in nearest:
+            print(f"    {entry['node']:20s}  dist={entry['dist']:.3f}")
+
+        # 6. Point-in-polygon for sample node
+        inside = point_in_poly_nx(graph, sample_node, pose)
+        print(f"  Pose inside '{sample_node}' influence zone: {inside}")
+
+        # 7. Shortest path (first node -> last node)
+        if len(node_names) >= 2:
+            src, dst = node_names[0], node_names[-1]
+            path = compute_shortest_path(graph, src, dst)
+            if path:
+                length = compute_path_length(graph, src, dst)
+                print(f"  Shortest path {src} -> {dst}: "
+                      f"{' -> '.join(path)}  (length={length:.3f})")
+            else:
+                print(f"  No path from {src} to {dst}")
+
+        # 8. Connectivity check
+        if len(node_names) >= 2:
+            connected = check_connectivity(graph, node_names[0], node_names[-1])
+            print(f"  Connected {node_names[0]} -> {node_names[-1]}: {connected}")
+
+        # 9. Neighbours of first node
+        nbrs = get_neighbors(graph, sample_node)
+        print(f"  Neighbors of '{sample_node}': {nbrs}")
+
+        # 10. Visualise and save
+        png_path = os.path.join(args.out_dir, f"topo_{map_name}.png")
+
+        hl_nodes = [n['node'] for n in nearest] if nearest else []
+        hl_edges = []
+        if path and len(path) >= 2:
+            hl_edges = list(zip(path[:-1], path[1:]))
+
+        draw_topological_graph(
+            graph,
+            highlight_nodes=hl_nodes,
+            highlight_edges=hl_edges,
+            title=f"{map_name}  ({graph.number_of_nodes()} nodes, "
+                  f"{graph.number_of_edges()} edges)",
+            save_path=png_path,
+        )
+
+    print(f"\nDone.  Figures saved under {args.out_dir}/")
+
+
+if __name__ == '__main__':
     main()

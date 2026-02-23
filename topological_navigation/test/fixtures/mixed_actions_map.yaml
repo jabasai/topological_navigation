@@ -1,0 +1,280 @@
+meta:
+  last_updated: 01-01-2026_00-00-00
+  origin:
+    latitude: 0.0
+    longitude: 0.0
+    altitude: 0.0
+
+metric_map: mixed_test_map
+name: mixed_test_map
+pointset: mixed_test_map
+
+transformation:
+  child: mixed_test_map
+  parent: map
+  rotation:
+    w: 1.0
+    x: 0.0
+    y: 0.0
+    z: 0.0
+  translation:
+    x: 0.0
+    y: 0.0
+    z: 0.0
+
+nodes:
+  # N1 -- NavigateToPose --> N2 -- NavigateToPose --> N3
+  # N3 -- row_traversal  --> N4 -- row_traversal  --> N5
+  # N5 -- goal_align      --> N6
+
+  - meta:
+      map: mixed_test_map
+      node: N1
+      pointset: mixed_test_map
+    node:
+      edges:
+        - action: NavigateToPose
+          action_type: nav2_msgs/action/NavigateToPose
+          edge_id: N1_N2
+          node: N2
+          fail_policy: retry_2,fail
+          goal:
+            target_pose:
+              header:
+                frame_id: $node.parent_frame
+              pose: $node.pose
+          properties:
+            max_speed: 0.5
+      localise_by_topic: ''
+      name: N1
+      parent_frame: map
+      pose:
+        orientation:
+          w: 1.0
+          x: 0.0
+          y: 0.0
+          z: 0.0
+        position:
+          x: 0.0
+          y: 0.0
+          z: 0.0
+      properties:
+        xy_goal_tolerance: 0.3
+        yaw_goal_tolerance: 0.1
+      verts:
+        - x: -1.0
+          y: -1.0
+        - x: 1.0
+          y: -1.0
+        - x: 1.0
+          y: 1.0
+        - x: -1.0
+          y: 1.0
+
+  - meta:
+      map: mixed_test_map
+      node: N2
+      pointset: mixed_test_map
+    node:
+      edges:
+        - action: NavigateToPose
+          action_type: nav2_msgs/action/NavigateToPose
+          edge_id: N2_N3
+          node: N3
+          fail_policy: retry_1,fail
+          goal:
+            target_pose:
+              header:
+                frame_id: $node.parent_frame
+              pose: $node.pose
+          properties:
+            max_speed: 0.5
+      localise_by_topic: ''
+      name: N2
+      parent_frame: map
+      pose:
+        orientation:
+          w: 1.0
+          x: 0.0
+          y: 0.0
+          z: 0.0
+        position:
+          x: 3.0
+          y: 0.0
+          z: 0.0
+      properties:
+        xy_goal_tolerance: 0.3
+        yaw_goal_tolerance: 0.1
+      verts:
+        - x: -1.0
+          y: -1.0
+        - x: 1.0
+          y: -1.0
+        - x: 1.0
+          y: 1.0
+        - x: -1.0
+          y: 1.0
+
+  - meta:
+      map: mixed_test_map
+      node: N3
+      pointset: mixed_test_map
+    node:
+      edges:
+        - action: row_traversal
+          action_type: nav2_msgs/action/NavigateToPose
+          edge_id: N3_N4
+          node: N4
+          fail_policy: retry_2,replan,fail
+          goal:
+            target_pose:
+              header:
+                frame_id: $node.parent_frame
+              pose: $node.pose
+          properties:
+            boundary_left: 0.4
+            boundary_right: 0.6
+      localise_by_topic: ''
+      name: N3
+      parent_frame: map
+      pose:
+        orientation:
+          w: 1.0
+          x: 0.0
+          y: 0.0
+          z: 0.0
+        position:
+          x: 6.0
+          y: 0.0
+          z: 0.0
+      properties:
+        xy_goal_tolerance: 0.1
+        yaw_goal_tolerance: 0.05
+      verts:
+        - x: -0.5
+          y: -0.5
+        - x: 0.5
+          y: -0.5
+        - x: 0.5
+          y: 0.5
+        - x: -0.5
+          y: 0.5
+
+  - meta:
+      map: mixed_test_map
+      node: N4
+      pointset: mixed_test_map
+    node:
+      edges:
+        - action: row_traversal
+          action_type: nav2_msgs/action/NavigateToPose
+          edge_id: N4_N5
+          node: N5
+          fail_policy: retry_1,fail
+          goal:
+            target_pose:
+              header:
+                frame_id: $node.parent_frame
+              pose: $node.pose
+          properties: {}
+      localise_by_topic: ''
+      name: N4
+      parent_frame: map
+      pose:
+        orientation:
+          w: 1.0
+          x: 0.0
+          y: 0.0
+          z: 0.0
+        position:
+          x: 9.0
+          y: 0.0
+          z: 0.0
+      properties:
+        xy_goal_tolerance: 0.1
+        yaw_goal_tolerance: 0.05
+      verts:
+        - x: -0.5
+          y: -0.5
+        - x: 0.5
+          y: -0.5
+        - x: 0.5
+          y: 0.5
+        - x: -0.5
+          y: 0.5
+
+  - meta:
+      map: mixed_test_map
+      node: N5
+      pointset: mixed_test_map
+    node:
+      edges:
+        - action: goal_align
+          action_type: nav2_msgs/action/NavigateToPose
+          edge_id: N5_N6
+          node: N6
+          fail_policy: fail
+          goal:
+            target_pose:
+              header:
+                frame_id: $node.parent_frame
+              pose: $node.pose
+          properties:
+            precision: true
+      localise_by_topic: ''
+      name: N5
+      parent_frame: map
+      pose:
+        orientation:
+          w: 0.707
+          x: 0.0
+          y: 0.0
+          z: 0.707
+        position:
+          x: 12.0
+          y: 0.0
+          z: 0.0
+      properties:
+        xy_goal_tolerance: 0.05
+        yaw_goal_tolerance: 0.02
+      verts:
+        - x: -0.5
+          y: -0.5
+        - x: 0.5
+          y: -0.5
+        - x: 0.5
+          y: 0.5
+        - x: -0.5
+          y: 0.5
+
+  - meta:
+      map: mixed_test_map
+      node: N6
+      pointset: mixed_test_map
+    node:
+      edges: []
+      localise_by_topic: ''
+      name: N6
+      parent_frame: map
+      pose:
+        orientation:
+          w: 0.707
+          x: 0.0
+          y: 0.0
+          z: 0.707
+        position:
+          x: 15.0
+          y: 0.0
+          z: 0.0
+      properties:
+        xy_goal_tolerance: 0.05
+        yaw_goal_tolerance: 0.02
+      verts:
+        - x: -0.5
+          y: -0.5
+        - x: 0.5
+          y: -0.5
+        - x: 0.5
+          y: 0.5
+        - x: -0.5
+          y: 0.5
