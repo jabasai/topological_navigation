@@ -53,10 +53,13 @@ from visualization_msgs.msg import (
     Marker,
     MarkerArray,
 )
-from interactive_markers import InteractiveMarkerServer
+from rclpy.action import ActionClient
+from interactive_markers import InteractiveMarkerServer, MenuHandler
 
 from topological_navigation.map_types import CustomSafeLoader
 import topological_navigation.tmap_utils as tmap_utils
+from topological_navigation.route_search2 import TopologicalRouteSearch2
+from topological_navigation_msgs.action import GotoNode
 
 # ──────────────────────────────────────────────────────────────────
 #  Colour palette
@@ -113,15 +116,24 @@ class TopologicalMapVisualiser(Node):
         self.declare_parameter('auto_save', False)
         self.declare_parameter('marker_scale', 0.5)
         self.declare_parameter('edit_mode', True)
+        self.declare_parameter(
+            'nav_action_name', '/topological_navigation',
+        )
 
         self.map_file: str = self.get_parameter('map_file').value
         self.auto_save: bool = self.get_parameter('auto_save').value
         self.marker_scale: float = self.get_parameter('marker_scale').value
         self.edit_mode: bool = self.get_parameter('edit_mode').value
+        nav_action: str = self.get_parameter('nav_action_name').value
 
         # ── State ────────────────────────────────────────────────
         self.tmap = None
         self._map_dirty = False
+        self._navigating_to: str | None = None
+        self._current_node: str = 'none'
+        self._closest_node: str = 'none'
+        self._route_search = None
+        self._route_nodes: list = []  # ordered node names on active route
 
         # ── QoS ──────────────────────────────────────────────────
         self._latching_qos = QoSProfile(
@@ -140,10 +152,49 @@ class TopologicalMapVisualiser(Node):
             '/topological_map_2',
             qos_profile=self._latching_qos,
         )
+        self.route_marker_pub = self.create_publisher(
+            MarkerArray,
+            'topological_route_visualisation',
+            qos_profile=self._latching_qos,
+        )
 
         # ── Interactive-marker server (for dragging nodes) ──────
         self._im_server = InteractiveMarkerServer(
             self, 'topological_map_editor'
+        )
+
+        # ── GotoNode action client ──────────────────────────────
+        self._goto_client = ActionClient(
+            self,
+            GotoNode,
+            nav_action,
+            callback_group=self._cb_group,
+        )
+        self._goto_goal_handle = None
+
+        # ── Menu handler for right-click context menu ────────────
+        self._menu_handler = MenuHandler()
+        self._menu_nav_id = self._menu_handler.insert(
+            'Navigate Here', callback=self._menu_navigate_cb,
+        )
+        self._menu_cancel_id = self._menu_handler.insert(
+            'Cancel Navigation', callback=self._menu_cancel_cb,
+        )
+
+        # ── Subscribe to localisation topics ─────────────────────
+        self.create_subscription(
+            String,
+            '/current_node',
+            self._current_node_cb,
+            10,
+            callback_group=self._cb_group,
+        )
+        self.create_subscription(
+            String,
+            '/closest_node',
+            self._closest_node_cb,
+            10,
+            callback_group=self._cb_group,
         )
 
         # ── Load map from file or subscribe to topic ─────────────
@@ -194,6 +245,7 @@ class TopologicalMapVisualiser(Node):
         try:
             with open(self.map_file, 'r') as fh:
                 self.tmap = yaml.load(fh, Loader=CustomSafeLoader)
+            self._route_search = TopologicalRouteSearch2(self.tmap)
             self.get_logger().info(
                 f'Loaded map with {len(self.tmap.get("nodes", []))} nodes '
                 f'from {self.map_file}'
@@ -234,12 +286,21 @@ class TopologicalMapVisualiser(Node):
             return False
 
     # ── Callbacks ────────────────────────────────────────────────
+    def _current_node_cb(self, msg: String):
+        """Track the robot's current topological node."""
+        self._current_node = msg.data
+
+    def _closest_node_cb(self, msg: String):
+        """Track the robot's closest topological node."""
+        self._closest_node = msg.data
+
     def _map_topic_cb(self, msg: String):
         """Handle updates from the ``/topological_map_2`` topic."""
         incoming = yaml.load(msg.data, Loader=CustomSafeLoader)
         if incoming == self.tmap:
             return  # no change, avoid flicker
         self.tmap = incoming
+        self._route_search = TopologicalRouteSearch2(self.tmap)
         self.get_logger().info('Received updated map from topic')
         self._rebuild_visualisation()
 
@@ -255,6 +316,257 @@ class TopologicalMapVisualiser(Node):
         if self._map_dirty:
             self.get_logger().info('Auto-saving map…')
             self.save_map()
+
+    # ──────────────────────────────────────────────────────────────
+    #  GotoNode navigation helpers
+    # ──────────────────────────────────────────────────────────────
+    def _menu_navigate_cb(self, feedback: InteractiveMarkerFeedback):
+        """Context-menu callback: send GotoNode goal for this node."""
+        node_name = feedback.marker_name
+        self.get_logger().info(
+            f'Navigate request → {node_name}'
+        )
+        # Compute and highlight route before sending goal
+        self._compute_and_highlight_route(node_name)
+        self._send_goto_goal(node_name)
+
+    def _menu_cancel_cb(self, feedback: InteractiveMarkerFeedback):
+        """Context-menu callback: cancel the active GotoNode goal."""
+        self._cancel_navigation()
+
+    def _send_goto_goal(self, target: str):
+        """Send a ``GotoNode`` goal to the topological navigation server."""
+        if not self._goto_client.wait_for_server(timeout_sec=2.0):
+            self.get_logger().error(
+                'GotoNode action server not available — is navigation2 '
+                'running?'
+            )
+            return
+        goal = GotoNode.Goal()
+        goal.target = target
+        goal.no_orientation = False
+        self.get_logger().info(f'Sending GotoNode goal: target={target}')
+
+        future = self._goto_client.send_goal_async(
+            goal, feedback_callback=self._goto_feedback_cb,
+        )
+        future.add_done_callback(self._goto_response_cb)
+        self._navigating_to = target
+
+    def _goto_response_cb(self, future):
+        """Handle the goal acceptance / rejection response."""
+        goal_handle = future.result()
+        if not goal_handle.accepted:
+            self.get_logger().warn('GotoNode goal was rejected')
+            self._navigating_to = None
+            return
+        self.get_logger().info('GotoNode goal accepted')
+        self._goto_goal_handle = goal_handle
+        result_future = goal_handle.get_result_async()
+        result_future.add_done_callback(self._goto_result_cb)
+
+    def _goto_result_cb(self, future):
+        """Handle the final result of a GotoNode action."""
+        result = future.result().result
+        status = 'SUCCESS' if result.success else 'FAILURE'
+        self.get_logger().info(
+            f'GotoNode result: {status} (target={self._navigating_to})'
+        )
+        self._navigating_to = None
+        self._goto_goal_handle = None
+        self._clear_route_highlight()
+
+    def _goto_feedback_cb(self, feedback_msg):
+        """Log GotoNode action feedback."""
+        fb = feedback_msg.feedback
+        self.get_logger().debug(f'GotoNode feedback: route={fb.route}')
+
+    def _cancel_navigation(self):
+        """Cancel the currently active GotoNode goal, if any."""
+        if self._goto_goal_handle is not None:
+            self.get_logger().info('Cancelling active GotoNode goal')
+            self._goto_goal_handle.cancel_goal_async()
+            self._navigating_to = None
+            self._goto_goal_handle = None
+            self._clear_route_highlight()
+        else:
+            self.get_logger().info('No active navigation goal to cancel')
+
+    # ──────────────────────────────────────────────────────────────
+    #  Route highlighting
+    # ──────────────────────────────────────────────────────────────
+    def _get_source_node(self) -> str:
+        """Return the best available source node for route search."""
+        if self._current_node and self._current_node != 'none':
+            return self._current_node
+        if self._closest_node and self._closest_node != 'none':
+            return self._closest_node
+        return 'none'
+
+    def _compute_and_highlight_route(self, target: str):
+        """Compute route from current node to target and publish markers."""
+        source = self._get_source_node()
+        if source == 'none':
+            self.get_logger().warn(
+                'Cannot highlight route — current/closest node unknown'
+            )
+            return
+        if self._route_search is None:
+            if self.tmap is not None:
+                self._route_search = TopologicalRouteSearch2(self.tmap)
+            else:
+                self.get_logger().warn(
+                    'Cannot highlight route — no map loaded'
+                )
+                return
+
+        route = self._route_search.search_route(source, target)
+        if not route.source:
+            self.get_logger().warn(
+                f'No route found from {source} to {target}'
+            )
+            self._route_nodes = []
+            self._clear_route_highlight()
+            return
+
+        # Build ordered list of node names along the route
+        self._route_nodes = list(route.source) + [target]
+        self.get_logger().info(
+            f'Route highlighted: {" → ".join(self._route_nodes)}'
+        )
+        self._publish_route_markers()
+
+    def _publish_route_markers(self):
+        """Create and publish route highlight markers."""
+        if not self._route_nodes or self.tmap is None:
+            return
+
+        nodes = self.tmap.get('nodes', [])
+        marker_array = MarkerArray()
+        idn = 0
+        scale = self.marker_scale
+
+        # Highlight nodes on the route
+        for node_name in self._route_nodes:
+            node_data = _get_node(nodes, node_name)
+            if node_data is None:
+                continue
+            m = Marker()
+            m.id = idn
+            m.header.frame_id = node_data.get('parent_frame', 'map')
+            m.type = Marker.SPHERE
+            m.scale.x = scale * 0.7
+            m.scale.y = scale * 0.7
+            m.scale.z = scale * 0.7
+            m.color.a = 0.9
+            m.color.r = 0.0
+            m.color.g = 1.0
+            m.color.b = 0.0
+            m.pose = _node2pose(node_data['pose'])
+            m.pose.position.z += 0.15
+            m.ns = '/route_nodes'
+            marker_array.markers.append(m)
+            idn += 1
+
+        # Highlight edges along the route
+        for i in range(len(self._route_nodes) - 1):
+            src_name = self._route_nodes[i]
+            dst_name = self._route_nodes[i + 1]
+            src_data = _get_node(nodes, src_name)
+            dst_data = _get_node(nodes, dst_name)
+            if src_data is None or dst_data is None:
+                continue
+
+            m = Marker()
+            m.id = idn
+            m.header.frame_id = src_data.get('parent_frame', 'map')
+            m.type = Marker.LINE_STRIP
+            m.pose.orientation.w = 1.0
+            m.scale.x = scale * 0.45  # thicker than normal edges
+            m.color.a = 0.9
+            m.color.r = 0.0
+            m.color.g = 1.0
+            m.color.b = 0.0
+
+            v1 = _node2pose(src_data['pose']).position
+            v1.z += 0.15
+            v2 = _node2pose(dst_data['pose']).position
+            v2.z += 0.15
+            m.points.append(v1)
+            m.points.append(v2)
+            m.ns = '/route_edges'
+            marker_array.markers.append(m)
+            idn += 1
+
+        # Source node highlight (cyan)
+        src_data = _get_node(nodes, self._route_nodes[0])
+        if src_data is not None:
+            m = Marker()
+            m.id = idn
+            m.header.frame_id = src_data.get('parent_frame', 'map')
+            m.type = Marker.SPHERE
+            m.scale.x = scale * 0.9
+            m.scale.y = scale * 0.9
+            m.scale.z = scale * 0.9
+            m.color.a = 0.7
+            m.color.r = 0.0
+            m.color.g = 1.0
+            m.color.b = 1.0
+            m.pose = _node2pose(src_data['pose'])
+            m.pose.position.z += 0.2
+            m.ns = '/route_endpoints'
+            marker_array.markers.append(m)
+            idn += 1
+
+        # Target node highlight (yellow)
+        tgt_data = _get_node(nodes, self._route_nodes[-1])
+        if tgt_data is not None:
+            m = Marker()
+            m.id = idn
+            m.header.frame_id = tgt_data.get('parent_frame', 'map')
+            m.type = Marker.SPHERE
+            m.scale.x = scale * 0.9
+            m.scale.y = scale * 0.9
+            m.scale.z = scale * 0.9
+            m.color.a = 0.7
+            m.color.r = 1.0
+            m.color.g = 1.0
+            m.color.b = 0.0
+            m.pose = _node2pose(tgt_data['pose'])
+            m.pose.position.z += 0.2
+            m.ns = '/route_endpoints'
+            marker_array.markers.append(m)
+            idn += 1
+
+        # Route label
+        if tgt_data is not None:
+            m = Marker()
+            m.id = idn
+            m.header.frame_id = tgt_data.get('parent_frame', 'map')
+            m.type = Marker.TEXT_VIEW_FACING
+            m.text = f'Route: {self._route_nodes[0]} → {self._route_nodes[-1]}'
+            m.pose = _node2pose(tgt_data['pose'])
+            m.pose.position.z += 0.6
+            m.scale.z = scale * 0.35
+            m.color.a = 1.0
+            m.color.r = 0.0
+            m.color.g = 1.0
+            m.color.b = 0.0
+            m.ns = '/route_label'
+            marker_array.markers.append(m)
+            idn += 1
+
+        self.route_marker_pub.publish(marker_array)
+
+    def _clear_route_highlight(self):
+        """Remove route highlight markers from RViz."""
+        self._route_nodes = []
+        # Publish a DELETE_ALL marker to clear the route topic
+        marker_array = MarkerArray()
+        m = Marker()
+        m.action = Marker.DELETEALL
+        marker_array.markers.append(m)
+        self.route_marker_pub.publish(marker_array)
 
     # ──────────────────────────────────────────────────────────────
     #  Publishing helpers
@@ -339,6 +651,12 @@ class TopologicalMapVisualiser(Node):
         for entry in nodes:
             node = entry['node']
             self._create_edit_marker(node)
+
+        # Apply the right-click context menu to every marker
+        for entry in nodes:
+            self._menu_handler.apply(
+                self._im_server, entry['node']['name'],
+            )
 
         self._im_server.applyChanges()
 
@@ -432,6 +750,9 @@ class TopologicalMapVisualiser(Node):
 
     def _im_feedback(self, feedback: InteractiveMarkerFeedback):
         """Handle interactive-marker drag / rotate events."""
+        # Let MenuHandler process right-click menu selections
+        if feedback.event_type == InteractiveMarkerFeedback.MENU_SELECT:
+            return
         if feedback.event_type != InteractiveMarkerFeedback.POSE_UPDATE:
             self._im_server.applyChanges()
             return

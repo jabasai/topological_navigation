@@ -38,6 +38,10 @@ def generate_launch_description():
             'edit_mode', default_value='true',
             description='Enable interactive drag-and-drop editing.',
         ),
+        DeclareLaunchArgument(
+            'nav_action_name', default_value='/topological_navigation',
+            description='GotoNode action server name for click-to-navigate.',
+        ),
         Node(
             package='topological_navigation_visual',
             executable='topological_map_visualiser.py',
@@ -48,6 +52,7 @@ def generate_launch_description():
                 'auto_save': LaunchConfiguration('auto_save'),
                 'marker_scale': LaunchConfiguration('marker_scale'),
                 'edit_mode': LaunchConfiguration('edit_mode'),
+                'nav_action_name': LaunchConfiguration('nav_action_name'),
             }],
         ),
     ])
