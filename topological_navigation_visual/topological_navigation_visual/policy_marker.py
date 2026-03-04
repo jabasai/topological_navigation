@@ -19,7 +19,7 @@ from visualization_msgs.msg import Marker, MarkerArray
 from tf_transformations import quaternion_from_euler
 
 from topological_navigation.map_types import CustomSafeLoader
-from topological_navigation.route_search2 import TopologicalRouteSearch2
+from topological_navigation.networkx_utils import build_graph_from_tmap
 from topological_navigation.tmap_utils import get_edge_from_id_tmap2
 
 from topological_navigation_msgs.msg import NavRoute
@@ -31,7 +31,7 @@ class PoliciesVis(Node):
     def __init__(self):
         super().__init__('topological_policy_markers')
         self.lnodes = None
-        self.rsearch = None
+        self._graph = None
         self.policy = MarkerArray()
 
         self.marker_pub = self.create_publisher(MarkerArray, '~/vis', 10)
@@ -51,11 +51,13 @@ class PoliciesVis(Node):
 
     def _map_cb(self, msg: String):
         self.lnodes = yaml.load(msg.data, Loader=CustomSafeLoader)
-        self.rsearch = TopologicalRouteSearch2(self.lnodes)
+        self._graph = build_graph_from_tmap(
+            self.lnodes, logger=self.get_logger(),
+        )
         self.get_logger().info('Map received for policy visualisation')
 
     def _policy_cb(self, msg: NavRoute):
-        if self.lnodes is None:
+        if self.lnodes is None or self._graph is None:
             return
 
         self.policy = MarkerArray()
@@ -65,16 +67,34 @@ class PoliciesVis(Node):
             source = msg.source[i]
             edge_id = msg.edge_id[i]
 
-            ori = self.rsearch.get_node_from_tmap2(source)
+            if source not in self._graph:
+                continue
+            ori_attrs = self._graph.nodes[source]
+            ori_pose = {
+                'position': {
+                    'x': ori_attrs['x'],
+                    'y': ori_attrs['y'],
+                    'z': ori_attrs['z'],
+                },
+            }
+
             edge_data = get_edge_from_id_tmap2(
                 self.lnodes, source, edge_id
             )
             if edge_data is None:
                 continue
 
-            target = self.rsearch.get_node_from_tmap2(edge_data['node'])
-            if target is None:
+            tgt_name = edge_data['node']
+            if tgt_name not in self._graph:
                 continue
+            tgt_attrs = self._graph.nodes[tgt_name]
+            tgt_pose = {
+                'position': {
+                    'x': tgt_attrs['x'],
+                    'y': tgt_attrs['y'],
+                    'z': tgt_attrs['z'],
+                },
+            }
 
             added_sources.append(source)
             colour = (
@@ -84,7 +104,7 @@ class PoliciesVis(Node):
             )
             self.policy.markers.append(
                 self._arrow(
-                    ori['node']['pose'], target['node']['pose'], colour
+                    ori_pose, tgt_pose, colour
                 )
             )
 

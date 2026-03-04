@@ -354,7 +354,7 @@ class TopologicalNavLoc(rclpy.node.Node):
         self.nogos: list = []
 
         self.tmap = yaml.load(msg.data, Loader=CustomSafeLoader)
-        self.tmap_frame = self.tmap["transformation"]["child"]
+        self.tmap_frame = self.tmap["transformation"]["topological_frame_id"]
         self.get_logger().info("Received the topological map")
 
         # Build NetworkX graph

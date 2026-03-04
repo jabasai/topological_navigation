@@ -1,21 +1,31 @@
 #!/usr/bin/env python
-"""Topological Navigation Server -- Self-Contained Implementation.
+"""Map-Driven Topological Navigation Server.
 
-Reimplements the topological navigation server using:
-- **NetworkX** graph data structures for route planning (A*)
-- **Explicit state machine** for predictable navigation behaviour
-- **Action merging** of consecutive same-type edges into segments
-- **Multi-pose segment execution** via NavigateThroughPoses
-- **Intermediate orientation ignored** (identity quaternion for drive-through)
-- **Boundary polygon publishing** for row_traversal corridors
-- **Built-in Nav2 action execution** -- no external EdgeActionManager
+All navigation behaviour is defined by the topological map YAML file:
 
-Edge actions (read from the topomap, both naming conventions accepted):
-    NavigateToPose / navigate_to_pose  -- standard Nav2 point-to-point
-    GoalAlign      / goal_align        -- precision alignment at goal pose
-    RowTraversal   / row_traversal     -- agricultural row navigation
+- **definitions**: inline BT XML blobs, written to temp files for Nav2.
+- **actions**: maps edge action names to Nav2 action types, servers,
+  goal templates, and composability flags.
+- **edges**: reference action names in the ``actions`` section.
 
-ROS 2 interfaces:
+The map file is the single source of truth.  No BT file paths or
+action-type mappings are hard-coded in this script.
+
+Architecture
+~~~~~~~~~~~~
+1.  Map arrives on ``/topological_map_2`` -> parsed into a NetworkX
+    ``DiGraph`` and map-level ``definitions`` / ``actions`` dicts.
+2.  For every unique ``(action_type, action_server)`` pair an
+    ``ActionClient`` is created.
+3.  Route planning uses NetworkX shortest-path algorithms whose
+    parameters (algorithm, weight attribute) are exposed as ROS 2
+    parameters so they can be changed at launch time.
+4.  Consecutive composable edges are merged into multi-waypoint
+    segments; non-composable edges are dispatched individually.
+5.  Boundary polygons are published for ``row_traversal`` segments
+    using ``boundary_left`` / ``boundary_right`` edge properties.
+
+ROS 2 interfaces
     Action servers:
         /<node_name>                                     (GotoNode)
         /topological_navigation/execute_policy_mode      (ExecutePolicyMode)
@@ -26,12 +36,23 @@ ROS 2 interfaces:
         current_edge, /boundary_checker (PolygonStamped),
         /robot_operation_current_status (String),
         topological_navigation/move_action_status (String)
+    Parameters:
+        max_dist_to_closest_edge  (double)  -- origin heuristic
+        default_boundary_left     (double)  -- row corridor left
+        default_boundary_right    (double)  -- row corridor right
+        reconfigure_edges         (bool)    -- enable edge reconfig
+        reconfigure_edges_srv     (bool)    -- srv-based reconfig
+        route_algorithm           (string)  -- 'astar' | 'dijkstra'
+        route_weight_attr         (string)  -- edge attribute for cost
 
-Last Updated: 2026-02-21
+Last Updated: 2026-02-25
 """
 
 import json
 import os
+import tempfile
+import threading
+from datetime import datetime
 
 import yaml
 
@@ -39,7 +60,7 @@ import rclpy
 import rclpy.node
 from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import Point32, PolygonStamped, PoseStamped
-from nav2_msgs.action import NavigateThroughPoses
+from nav2_msgs.action import NavigateToPose, NavigateThroughPoses
 from rclpy import Parameter
 from rclpy.action import ActionClient, ActionServer
 from rclpy.callback_groups import (
@@ -55,8 +76,6 @@ from rclpy.qos import (
 )
 from std_msgs.msg import String
 
-from ament_index_python.packages import get_package_share_directory
-
 from topological_navigation.edge_reconfigure_manager2 import (
     EdgeReconfigureManager,
 )
@@ -68,10 +87,8 @@ from topological_navigation.navigation_graph import (
     get_route_distance,
     get_route_edges,
     merge_action_segments,
-    normalize_action_name,
     plan_route,
 )
-from topological_navigation.navigation_stats import nav_stats
 from topological_navigation.networkx_utils import build_graph_from_tmap
 from topological_navigation.tmap_utils import (
     get_edge_from_id_tmap2,
@@ -89,7 +106,17 @@ from topological_navigation_msgs.srv import EvaluateEdge, EvaluateNode
 
 
 # =====================================================================
-# Status mapping (GoalStatus int -> human-readable string)
+# Action-type string -> ROS 2 class mapping
+# =====================================================================
+
+_ACTION_TYPE_MAP = {
+    'nav2_msgs/NavigateToPose': NavigateToPose,
+    'nav2_msgs/NavigateThroughPoses': NavigateThroughPoses,
+}
+
+
+# =====================================================================
+# GoalStatus helpers
 # =====================================================================
 
 _STATUS_MAP = {
@@ -104,36 +131,92 @@ _STATUS_MAP = {
 
 
 def _status_str(code: int) -> str:
-    """Convert a GoalStatus integer to a readable string."""
     return _STATUS_MAP.get(code, "STATUS_UNKNOWN(%d)" % code)
 
 
 # =====================================================================
-# YAML Loader
+# YAML loader -- coerce pose ints to float
 # =====================================================================
-
 
 class _FloatSafeLoader(yaml.SafeLoader):
-    """YAML loader that coerces pose coordinate values to ``float``."""
-
     def construct_mapping(self, node, deep=False):
-        mapping = super().construct_mapping(node, deep=deep)
-        for key in ('x', 'y', 'z', 'w'):
-            if key in mapping and isinstance(mapping[key], int):
-                mapping[key] = float(mapping[key])
-        return mapping
+        m = super().construct_mapping(node, deep=deep)
+        for k in ('x', 'y', 'z', 'w'):
+            if k in m and isinstance(m[k], int):
+                m[k] = float(m[k])
+        return m
 
 
 # =====================================================================
-# Main Navigation Server
+# Navigation statistics
 # =====================================================================
 
+class nav_stats:
+    """Timing statistics for a single edge traversal."""
+
+    def __init__(self, origin, target, topol_map, edge_id):
+        self.status = "active"
+        self.origin = origin
+        self.target = target
+        self.topological_map = topol_map
+        self.edge_id = edge_id
+        self.set_start()
+
+    def set_start(self):
+        """Record navigation start time."""
+        self.date_started = datetime.now()
+        self.date_at_node = self.date_started
+
+    def set_ended(self, node):
+        """Record navigation end time and compute durations."""
+        self.final_node = node
+        self.date_finished = datetime.now()
+        self.get_operation_time()
+        self.get_time_to_wp()
+
+    def set_at_node(self):
+        """Record time of arrival at intermediate node."""
+        self.date_at_node = datetime.now()
+
+    def get_operation_time(self):
+        """Total seconds from start to finish."""
+        delta = self.date_finished - self.date_started
+        self.operation_time = delta.total_seconds()
+        return self.operation_time
+
+    def get_time_to_wp(self):
+        """Seconds from last intermediate node to finish."""
+        if self.date_at_node != self.date_started:
+            delta = self.date_finished - self.date_at_node
+            self.time_to_wp = delta.total_seconds()
+        else:
+            self.time_to_wp = 0
+        return self.time_to_wp
+
+    def get_start_time_str(self):
+        """Human-readable start timestamp."""
+        return self.date_started.strftime(
+            '%A, %B %d %Y, at %H:%M:%S hours',
+        )
+
+    def get_finish_time_str(self):
+        """Human-readable finish timestamp."""
+        return self.date_finished.strftime(
+            '%A, %B %d %Y, at %H:%M:%S hours',
+        )
+
+
+# =====================================================================
+# Topological Navigation Server
+# =====================================================================
 
 class TopologicalNavServer(rclpy.node.Node):
-    """Self-contained topological navigation server.
+    """Map-driven topological navigation server.
 
-    Owns its Nav2 ActionClient internally -- no external
-    EdgeActionManager node required.
+    All action clients, BT selection, and composability rules are
+    derived from the ``definitions`` and ``actions`` sections of the
+    topological map YAML.  NetworkX path-planning parameters are
+    exposed as ROS 2 parameters.
     """
 
     # -----------------------------------------------------------------
@@ -142,13 +225,13 @@ class TopologicalNavServer(rclpy.node.Node):
 
     def __init__(self, name):
         super().__init__(name)
-        rclpy.get_default_context().on_shutdown(self._on_node_shutdown)
+        rclpy.get_default_context().on_shutdown(self._on_shutdown)
 
-        # -- State machine -----------------------------------------------
+        # -- State machine -------------------------------------------
         self._sm = NavStateMachine(logger=self.get_logger())
         self._sm.transition(NavState.WAITING_FOR_MAP)
 
-        # -- Navigation runtime state ------------------------------------
+        # -- Runtime flags -------------------------------------------
         self._cancelled = False
         self._preempted = False
         self._goal_reached = False
@@ -157,103 +240,99 @@ class TopologicalNavServer(rclpy.node.Node):
         self._target = "none"
         self._current_target = "none"
 
-        # -- Map data ----------------------------------------------------
+        # -- Map data ------------------------------------------------
         self._tmap = None
         self._graph = None
         self._topol_map = ""
 
-        # -- Localisation ------------------------------------------------
+        # -- Deferred map update (thread-safe buffering) -------------
+        self._pending_map_msg = None
+        self._map_lock = threading.Lock()
+        self._map_updated_during_nav = False
+
+        # -- Map-driven config (populated by _load_map_config) -------
+        self._map_definitions = {}
+        self._map_actions = {}
+        self._bt_files = {}
+        self._action_clients = {}    # name -> {client, action_class, config}
+
+        # -- Localisation --------------------------------------------
         self._current_node = "Unknown"
         self._closest_node = "Unknown"
         self._closest_edges = ClosestEdges()
 
-        # -- Nav2 action client ------------------------------------------
+        # -- Nav2 infra ----------------------------------------------
         self._nav2_cb_group = MutuallyExclusiveCallbackGroup()
         self._nav2_executor = SingleThreadedExecutor()
-        self._nav2_client = ActionClient(
-            self,
-            NavigateThroughPoses,
-            '/navigate_through_poses',
-            callback_group=self._nav2_cb_group,
-        )
         self._goal_handle = None
         self._action_status = GoalStatus.STATUS_UNKNOWN
 
-        # -- Stats -------------------------------------------------------
+        # -- Stats ---------------------------------------------------
         self._stat = None
 
-        # -- Parameters --------------------------------------------------
+        # -- Parameters ----------------------------------------------
         self._declare_parameters()
         self._load_parameters()
-        self._load_bt_trees()
 
-        # -- QoS profiles ------------------------------------------------
-        self._latch_qos = QoSProfile(
+        # -- QoS -----------------------------------------------------
+        self._latch = QoSProfile(
             depth=1,
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
         )
-        self._best_qos = QoSProfile(
+        self._best = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
             history=QoSHistoryPolicy.KEEP_LAST,
             depth=10,
         )
 
-        # -- Publishers --------------------------------------------------
+        # -- Publishers ----------------------------------------------
         self._stats_pub = self.create_publisher(
-            NavStatistics,
-            "topological_navigation/Statistics",
-            qos_profile=self._latch_qos,
+            NavStatistics, "topological_navigation/Statistics",
+            qos_profile=self._latch,
         )
         self._route_pub = self.create_publisher(
-            TopologicalRoute,
-            "topological_navigation/Route",
-            qos_profile=self._best_qos,
+            TopologicalRoute, "topological_navigation/Route",
+            qos_profile=self._best,
         )
-        self._route_timer = self.create_timer(
-            2.0, self._route_pub_timer_cb,
-        )
+        self._route_timer = self.create_timer(2.0, self._route_pub_cb)
         self._stroute = None
         self._cur_edge_pub = self.create_publisher(
-            String, "current_edge", qos_profile=self._latch_qos,
+            String, "current_edge", qos_profile=self._latch,
         )
         self._move_status_pub = self.create_publisher(
-            String,
-            "topological_navigation/move_action_status",
-            qos_profile=self._latch_qos,
+            String, "topological_navigation/move_action_status",
+            qos_profile=self._latch,
         )
         self._boundary_pub = self.create_publisher(
-            PolygonStamped,
-            "/boundary_checker",
-            qos_profile=self._latch_qos,
+            PolygonStamped, "/boundary_checker",
+            qos_profile=self._latch,
         )
         self._status_pub = self.create_publisher(
-            String,
-            "/robot_operation_current_status",
-            qos_profile=self._latch_qos,
+            String, "/robot_operation_current_status",
+            qos_profile=self._latch,
         )
 
-        # -- Map subscription (blocking wait) ----------------------------
+        # -- Map subscription (blocking wait) ------------------------
         self._map_received = False
         self._loc_received = False
-        self._cb_group_map = ReentrantCallbackGroup()
+        self._cb_map = ReentrantCallbackGroup()
         self.create_subscription(
-            String,
-            '/topological_map_2',
-            self._map_callback,
-            callback_group=self._cb_group_map,
-            qos_profile=self._latch_qos,
+            String, '/topological_map_2', self._map_cb,
+            callback_group=self._cb_map, qos_profile=self._latch,
         )
 
         self.get_logger().info(
             "[INIT] Waiting for topological map on /topological_map_2 ...",
         )
         self._publish_status("WAITING_FOR_MAP")
-
         while rclpy.ok() and not self._map_received:
             rclpy.spin_once(self)
 
+        # Parse map-driven config (definitions, actions, clients)
+        self._load_map_config()
+
         self.get_logger().info(
-            "[INIT] Map received: '%s' -- %d nodes, %d edges"
+            "[INIT] Map '%s' -- %d nodes, %d edges"
             % (
                 self._topol_map,
                 self._graph.number_of_nodes(),
@@ -261,59 +340,44 @@ class TopologicalNavServer(rclpy.node.Node):
             ),
         )
 
-        # -- Edge reconfigure --------------------------------------------
-        self._edge_reconfigure_enabled = self.get_parameter_or(
+        # -- Edge reconfigure ----------------------------------------
+        self._edge_reconf_enabled = self.get_parameter_or(
             "reconfigure_edges",
             Parameter('b', Parameter.Type.BOOL, True),
         ).value
-        self._srv_edge_reconfigure = self.get_parameter_or(
+        self._srv_edge_reconf = self.get_parameter_or(
             "reconfigure_edges_srv",
             Parameter('b', Parameter.Type.BOOL, False),
         ).value
-        if self._edge_reconfigure_enabled:
+        if self._edge_reconf_enabled:
             self._edge_reconf_mgr = EdgeReconfigureManager()
         else:
             self._edge_reconf_mgr = None
-            self.get_logger().warning(
-                "[INIT] Edge reconfiguration is disabled",
-            )
 
-        # -- Localisation subscription (blocking wait) -------------------
+        # -- Localisation subscription (blocking wait) ---------------
         self._sm.transition(NavState.WAITING_FOR_LOCALISATION)
         self._publish_status("WAITING_FOR_LOCALISATION")
-
         self.create_subscription(
-            String,
-            'closest_node',
-            self._closest_node_cb,
-            qos_profile=self._latch_qos,
+            String, 'closest_node', self._closest_node_cb,
+            qos_profile=self._latch,
         )
-
-        self.get_logger().info(
-            "[INIT] Waiting for localisation on 'closest_node' ...",
-        )
+        self.get_logger().info("[INIT] Waiting for localisation ...")
         while rclpy.ok() and not self._loc_received:
             rclpy.spin_once(self)
-
         self.get_logger().info(
-            "[INIT] Localisation received. Closest node: %s"
-            % self._closest_node,
+            "[INIT] Localisation OK. Closest: %s" % self._closest_node,
         )
 
         self.create_subscription(
-            ClosestEdges,
-            'closest_edges',
-            self._closest_edges_cb,
-            qos_profile=self._latch_qos,
+            ClosestEdges, 'closest_edges', self._closest_edges_cb,
+            qos_profile=self._latch,
         )
         self.create_subscription(
-            String,
-            'current_node',
-            self._current_node_cb,
-            qos_profile=self._latch_qos,
+            String, 'current_node', self._current_node_cb,
+            qos_profile=self._latch,
         )
 
-        # -- Restrictions (optional, non-blocking) -----------------------
+        # -- Restrictions (optional) ---------------------------------
         self._using_restrictions = False
         try:
             self._eval_edge_srv = self.create_client(
@@ -324,68 +388,53 @@ class TopologicalNavServer(rclpy.node.Node):
                     EvaluateNode, '/restrictions_manager/evaluate_node',
                 )
                 self._using_restrictions = True
-                self.get_logger().info(
-                    "[INIT] Restrictions services available",
-                )
+                self.get_logger().info("[INIT] Restrictions services OK")
             else:
                 self.get_logger().warning(
-                    "[INIT] Restrictions services unavailable (timeout)",
+                    "[INIT] Restrictions services unavailable",
                 )
         except Exception as exc:
             self.get_logger().error(
-                "[INIT] Error probing restrictions services: %s" % exc,
+                "[INIT] Restrictions probe error: %s" % exc,
             )
 
-        # -- Fail-policy runtime state -----------------------------------
+        # -- Fail-policy state ---------------------------------------
         self._fail_policy_state = {}
 
-        # -- Action servers ----------------------------------------------
+        # -- Action servers ------------------------------------------
         self._sm.transition(NavState.READY)
         self._publish_status("READY")
 
         cb_goto = ReentrantCallbackGroup()
         cb_policy = ReentrantCallbackGroup()
 
-        self.get_logger().info("[INIT] Creating GotoNode action server ...")
         self._as_goto = ActionServer(
-            self,
-            GotoNode,
-            "/" + name,
-            execute_callback=self._execute_goto_cb,
+            self, GotoNode, "/" + name,
+            execute_callback=self._exec_goto_cb,
             cancel_callback=self._cancel_goto_cb,
             callback_group=cb_goto,
         )
         self._goto_fb_pub = self.create_publisher(
-            GotoNodeFeedback,
-            "/" + name + "/feedback",
-            qos_profile=self._latch_qos,
+            GotoNodeFeedback, "/" + name + "/feedback",
+            qos_profile=self._latch,
         )
 
-        self.get_logger().info(
-            "[INIT] Creating ExecutePolicyMode action server ...",
-        )
         self._as_policy = ActionServer(
-            self,
-            ExecutePolicyMode,
+            self, ExecutePolicyMode,
             "/topological_navigation/execute_policy_mode",
-            execute_callback=self._execute_policy_cb,
+            execute_callback=self._exec_policy_cb,
             cancel_callback=self._cancel_policy_cb,
             callback_group=cb_policy,
         )
         self._policy_fb_pub = self.create_publisher(
             ExecutePolicyModeFeedback,
             "topological_navigation/execute_policy_mode/feedback",
-            qos_profile=self._latch_qos,
+            qos_profile=self._latch,
         )
 
         self.get_logger().info(
-            "[INIT] Topological navigation server READY. "
-            "Map='%s', Nodes=%d, Edges=%d"
-            % (
-                self._topol_map,
-                self._graph.number_of_nodes(),
-                self._graph.number_of_edges(),
-            ),
+            "[INIT] Navigation server READY ('%s', algo=%s, weight=%s)"
+            % (self._topol_map, self._route_algorithm, self._route_weight),
         )
 
     # =================================================================
@@ -400,14 +449,14 @@ class TopologicalNavServer(rclpy.node.Node):
             ('reconfigure_edges_srv', Parameter.Type.BOOL),
             ('default_boundary_left', Parameter.Type.DOUBLE),
             ('default_boundary_right', Parameter.Type.DOUBLE),
-            ('bt_tree_default', Parameter.Type.STRING),
-            ('bt_tree_in_row', Parameter.Type.STRING),
-            ('bt_tree_goal_align', Parameter.Type.STRING),
+            # NetworkX path optimisation
+            ('route_algorithm', Parameter.Type.STRING),
+            ('route_weight_attr', Parameter.Type.STRING),
         ]:
             self.declare_parameter(name, ptype)
 
     def _load_parameters(self):
-        """Read parameter values with defaults."""
+        """Read parameter values with sensible defaults."""
 
         def _p(name, ptype, default):
             return self.get_parameter_or(
@@ -423,36 +472,132 @@ class TopologicalNavServer(rclpy.node.Node):
         self._default_boundary_right = _p(
             'default_boundary_right', Parameter.Type.DOUBLE, 0.5,
         )
-
-    def _load_bt_trees(self):
-        """Resolve behaviour-tree XML paths for each action type."""
-        cfg = os.path.join(
-            get_package_share_directory('topological_navigation'),
-            'config',
+        # 'astar' (with Euclidean heuristic) or 'dijkstra'
+        self._route_algorithm = _p(
+            'route_algorithm', Parameter.Type.STRING, 'astar',
+        )
+        # The edge attribute used as the cost for path planning
+        self._route_weight = _p(
+            'route_weight_attr', Parameter.Type.STRING, 'weight',
         )
 
-        bt_map = {
-            'NavigateToPose': ('bt_tree_default.xml', 'bt_tree_default'),
-            'row_traversal': ('bt_tree_in_row.xml', 'bt_tree_in_row'),
-            'goal_align': ('bt_tree_goal_align.xml', 'bt_tree_goal_align'),
-        }
-        self._bt_trees = {}
-        for action, (fname, param) in bt_map.items():
-            default = os.path.join(cfg, fname)
-            self._bt_trees[action] = self.get_parameter_or(
-                param, Parameter('s', Parameter.Type.STRING, default),
-            ).value
-            self.get_logger().info(
-                "[INIT] BT '%s': %s" % (action, self._bt_trees[action]),
+    # =================================================================
+    # Map-driven configuration
+    # =================================================================
+
+    def _load_map_config(self):
+        """Extract ``definitions`` and ``actions`` from the topomap.
+
+        1. Writes each BT definition to a temp file.
+        2. Resolves ``${definitions.<name>}`` template refs to paths.
+        3. Creates ``ActionClient`` instances for unique servers.
+        """
+        self._map_definitions = self._tmap.get('definitions', {})
+        self._map_actions = self._tmap.get('actions', {})
+
+        if not self._map_actions:
+            self.get_logger().warning(
+                "[MAP] No 'actions' section -- behaviour undefined",
             )
+            return
+
+        # -- Write BT definitions to temp files ----------------------
+        bt_dir = os.path.join(tempfile.gettempdir(), 'topo_nav_bt')
+        os.makedirs(bt_dir, exist_ok=True)
+
+        self._bt_files = {}
+        for name, content in self._map_definitions.items():
+            path = os.path.join(bt_dir, '%s.xml' % name)
+            with open(path, 'w') as fh:
+                fh.write(content)
+            self._bt_files[name] = path
+            self.get_logger().info(
+                "[MAP] BT '%s' -> %s" % (name, path),
+            )
+
+        # -- Resolve ${definitions.<key>} refs -----------------------
+        for act_name, act_cfg in self._map_actions.items():
+            tpl = act_cfg.get('action_goal_template', {})
+            bt_ref = tpl.get('behavior_tree', '')
+            if (
+                isinstance(bt_ref, str)
+                and bt_ref.startswith('${definitions.')
+                and bt_ref.endswith('}')
+            ):
+                key = bt_ref[len('${definitions.'):-1]
+                if key in self._bt_files:
+                    tpl['behavior_tree'] = self._bt_files[key]
+                else:
+                    self.get_logger().warning(
+                        "[MAP] '%s' ref not found for action '%s'"
+                        % (key, act_name),
+                    )
+
+            self.get_logger().info(
+                "[MAP] Action '%s': type=%s server=%s composable=%s"
+                % (
+                    act_name,
+                    act_cfg.get('action_type', '?'),
+                    act_cfg.get('action_server', '?'),
+                    act_cfg.get('composable', True),
+                ),
+            )
+
+        # -- Create action clients -----------------------------------
+        self._create_action_clients()
+
+    def _create_action_clients(self):
+        """Create ``ActionClient`` instances from the map ``actions``.
+
+        Clients are shared when multiple actions target the same
+        ``action_server``.
+        """
+        created = {}   # action_server -> (client, action_class)
+        self._action_clients = {}
+
+        for act_name, act_cfg in self._map_actions.items():
+            type_str = act_cfg.get('action_type', '')
+            server = act_cfg.get('action_server', '')
+            action_class = _ACTION_TYPE_MAP.get(type_str)
+
+            if action_class is None:
+                self.get_logger().warning(
+                    "[MAP] Unknown action_type '%s' for '%s'"
+                    % (type_str, act_name),
+                )
+                continue
+
+            if server in created:
+                client, existing = created[server]
+                if existing != action_class:
+                    self.get_logger().error(
+                        "[MAP] Conflicting types on '%s': %s vs %s"
+                        % (server, existing.__name__, action_class.__name__),
+                    )
+                    continue
+            else:
+                client = ActionClient(
+                    self, action_class, server,
+                    callback_group=self._nav2_cb_group,
+                )
+                created[server] = (client, action_class)
+                self.get_logger().info(
+                    "[MAP] Client: %s -> %s"
+                    % (action_class.__name__, server),
+                )
+
+            self._action_clients[act_name] = {
+                'client': client,
+                'action_class': action_class,
+                'config': act_cfg,
+            }
 
     # =================================================================
     # Lifecycle
     # =================================================================
 
-    def _on_node_shutdown(self):
-        """Graceful shutdown: cancel any active goal."""
-        self.get_logger().info("[SHUTDOWN] Tearing down navigation server")
+    def _on_shutdown(self):
+        self.get_logger().info("[SHUTDOWN] Tearing down")
         if self._navigation_activated:
             self._preempted = True
             self._cancel_nav2_goal(timeout_sec=2.0)
@@ -461,35 +606,104 @@ class TopologicalNavServer(rclpy.node.Node):
     # Topic callbacks
     # =================================================================
 
-    def _map_callback(self, msg):
-        """Handle ``/topological_map_2`` updates -- rebuild graph."""
-        try:
-            self._tmap = yaml.load(msg.data, Loader=_FloatSafeLoader)
-            self._topol_map = self._tmap.get("pointset", "unknown")
+    def _map_cb(self, msg):
+        """``/topological_map_2`` callback -- buffer map update.
 
-            self._graph = build_graph_from_tmap(
-                self._tmap, logger=self.get_logger(),
-            )
-            if self._graph is None:
-                self.get_logger().error(
-                    "[MAP] Failed to build graph from topomap",
-                )
+        The first map is applied immediately (needed for init).  All
+        subsequent maps received during active navigation are buffered
+        and applied at safe points between route segments.
+        """
+        with self._map_lock:
+            self._pending_map_msg = msg
+            if not self._map_received:
+                # First map: apply immediately so __init__ can proceed.
+                self._apply_pending_map()
                 return
 
+        if self._navigation_activated:
+            self.get_logger().info(
+                "[MAP] Update buffered (navigation active)",
+            )
+        else:
+            # Not navigating -- safe to apply immediately.
+            self._apply_pending_map()
+
+    def _apply_pending_map(self):
+        """Apply a buffered map update.  Thread-safe.
+
+        Returns ``True`` if a new map was applied, ``False`` if there
+        was nothing pending or the update failed.
+        """
+        with self._map_lock:
+            if self._pending_map_msg is None:
+                return False
+            msg = self._pending_map_msg
+            self._pending_map_msg = None
+
+        try:
+            tmap = yaml.load(msg.data, Loader=_FloatSafeLoader)
+            graph = build_graph_from_tmap(
+                tmap, logger=self.get_logger(),
+            )
+            if graph is None:
+                self.get_logger().error("[MAP] Graph build failed")
+                return False
+
+            self._tmap = tmap
+            self._graph = graph
+            self._topol_map = tmap.get("pointset", "unknown")
             self._map_received = True
+            self._load_map_config()
 
             self.get_logger().info(
-                "[MAP] Updated: '%s' -- %d nodes, %d edges"
+                "[MAP] Applied update '%s' -- %d nodes, %d edges"
                 % (
                     self._topol_map,
-                    self._graph.number_of_nodes(),
-                    self._graph.number_of_edges(),
+                    graph.number_of_nodes(),
+                    graph.number_of_edges(),
                 ),
             )
+            return True
         except Exception as exc:
-            self.get_logger().error(
-                "[MAP] Error processing topological map: %s" % exc,
-            )
+            self.get_logger().error("[MAP] Apply error: %s" % exc)
+            return False
+
+    def _validate_remaining_route(self, route_nodes, start_idx):
+        """Check that remaining nodes and edges still exist in the graph.
+
+        Parameters
+        ----------
+        route_nodes : list[str]
+            Full ordered list of node names in the route.
+        start_idx : int
+            Index into *route_nodes* of the segment about to execute
+            (i.e. remaining = route_nodes[start_idx:]).
+
+        Returns
+        -------
+        bool
+            ``True`` if every remaining node exists in ``self._graph``
+            and every consecutive pair is connected by an edge.
+        """
+        remaining = route_nodes[start_idx:]
+        for node_name in remaining:
+            if node_name not in self._graph:
+                self.get_logger().warning(
+                    "[MAP-CHECK] Node '%s' no longer in map"
+                    % node_name,
+                )
+                return False
+
+        for i in range(len(remaining) - 1):
+            src, tgt = remaining[i], remaining[i + 1]
+            if not self._graph.has_edge(src, tgt):
+                self.get_logger().warning(
+                    "[MAP-CHECK] Edge '%s' -> '%s' no longer in map"
+                    % (src, tgt),
+                )
+                return False
+
+        return True
 
     def _closest_node_cb(self, msg):
         self._loc_received = True
@@ -510,27 +724,24 @@ class TopologicalNavServer(rclpy.node.Node):
                     and self._current_node == self._current_target
                 ):
                     self.get_logger().info(
-                        "[LOC] Reached intermediate target: %s"
-                        % self._current_target,
+                        "[LOC] Reached target: %s" % self._current_target,
                     )
                     self._goal_reached = True
 
-    def _route_pub_timer_cb(self):
+    def _route_pub_cb(self):
         if self._stroute and self._stroute.nodes:
             self._route_pub.publish(self._stroute)
 
     # =================================================================
-    # Publishers
+    # Status publishers
     # =================================================================
 
     def _publish_status(self, state_str):
-        """Publish current state on ``/robot_operation_current_status``."""
         msg = String()
         msg.data = state_str
         self._status_pub.publish(msg)
 
     def _publish_boundary(self, polygon_pts, frame_id="map"):
-        """Publish ``PolygonStamped`` on ``/boundary_checker``."""
         msg = PolygonStamped()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = frame_id
@@ -542,7 +753,7 @@ class TopologicalNavServer(rclpy.node.Node):
             msg.polygon.points.append(pt)
         self._boundary_pub.publish(msg)
         self.get_logger().info(
-            "[BOUNDARY] Published %d-point polygon (frame=%s)"
+            "[BOUNDARY] %d-point polygon (frame=%s)"
             % (len(polygon_pts), frame_id),
         )
 
@@ -563,27 +774,26 @@ class TopologicalNavServer(rclpy.node.Node):
         if self._stat is None:
             return
         s = self._stat
-        pubst = NavStatistics()
-        pubst.edge_id = s.edge_id
-        pubst.status = s.status
-        pubst.origin = s.origin
-        pubst.target = s.target
-        pubst.topological_map = s.topological_map
-        pubst.time_to_waypoint = float(s.time_to_wp)
-        pubst.operation_time = s.operation_time
-        pubst.date_started = s.get_start_time_str()
-        pubst.date_at_node = s.date_at_node.strftime(
+        msg = NavStatistics()
+        msg.edge_id = s.edge_id
+        msg.status = s.status
+        msg.origin = s.origin
+        msg.target = s.target
+        msg.topological_map = s.topological_map
+        msg.time_to_waypoint = float(s.time_to_wp)
+        msg.operation_time = s.operation_time
+        msg.date_started = s.get_start_time_str()
+        msg.date_at_node = s.date_at_node.strftime(
             "%A, %B %d %Y, at %H:%M:%S hours",
         )
-        pubst.date_finished = s.get_finish_time_str()
-        self._stats_pub.publish(pubst)
+        msg.date_finished = s.get_finish_time_str()
+        self._stats_pub.publish(msg)
 
     def _publish_current_edge(self, edge_id):
         msg = String()
         msg.data = (
             "%s--%s" % (edge_id, self._topol_map)
-            if edge_id != "none"
-            else "none"
+            if edge_id != "none" else "none"
         )
         self._cur_edge_pub.publish(msg)
 
@@ -599,34 +809,26 @@ class TopologicalNavServer(rclpy.node.Node):
         self._move_status_pub.publish(msg)
 
     # =================================================================
-    # Nav2 Goal construction and execution
+    # Pose construction
     # =================================================================
 
+    def _nav_frame(self):
+        """Navigation frame from map ``transformation.parent``."""
+        return self._tmap.get(
+            'transformation', {},
+        ).get('parent', 'map')
+
     def _build_pose_stamped(self, node_dict, ignore_orientation=False):
-        """Build ``PoseStamped`` from a topomap node dict.
-
-        Args:
-            node_dict: A node entry from the topomap YAML,
-                e.g. ``get_node_from_tmap2(tmap, name)``.
-            ignore_orientation: If True, set identity quaternion
-                (0,0,0,1) so Nav2 does not enforce orientation at
-                this waypoint.
-
-        Returns:
-            ``PoseStamped`` with the node's pose and parent frame.
-        """
+        """Build ``PoseStamped`` from a raw topomap node dict."""
         nd = node_dict["node"]
         pose = nd["pose"]
         ps = PoseStamped()
         ps.header.stamp = self.get_clock().now().to_msg()
-        ps.header.frame_id = nd.get("parent_frame", "map")
+        ps.header.frame_id = nd.get("parent_frame", self._nav_frame())
         ps.pose.position.x = float(pose["position"]["x"])
         ps.pose.position.y = float(pose["position"]["y"])
         ps.pose.position.z = float(pose["position"]["z"])
         if ignore_orientation:
-            ps.pose.orientation.x = 0.0
-            ps.pose.orientation.y = 0.0
-            ps.pose.orientation.z = 0.0
             ps.pose.orientation.w = 1.0
         else:
             ps.pose.orientation.x = float(pose["orientation"]["x"])
@@ -636,145 +838,152 @@ class TopologicalNavServer(rclpy.node.Node):
         return ps
 
     def _build_pose_from_graph(self, node_name, ignore_orientation=False):
-        """Build ``PoseStamped`` from the NetworkX graph node attributes.
-
-        Uses the graph's node attributes directly (x, y, z,
-        orientation, parent_frame) rather than looking up from the
-        raw YAML dict.
-
-        Args:
-            node_name: Name of the node in the graph.
-            ignore_orientation: If True, set identity quaternion.
-
-        Returns:
-            ``PoseStamped`` or None if node not in graph.
-        """
+        """Build ``PoseStamped`` from NetworkX graph attributes."""
         if node_name not in self._graph:
             return None
         attrs = self._graph.nodes[node_name]
         ps = PoseStamped()
         ps.header.stamp = self.get_clock().now().to_msg()
-        ps.header.frame_id = attrs.get("parent_frame", "map")
-        ps.pose.position.x = float(attrs.get("x", 0.0))
-        ps.pose.position.y = float(attrs.get("y", 0.0))
-        ps.pose.position.z = float(attrs.get("z", 0.0))
+        ps.header.frame_id = attrs.get(
+            'parent_frame', self._nav_frame(),
+        )
+        ps.pose.position.x = float(attrs.get('x', 0.0))
+        ps.pose.position.y = float(attrs.get('y', 0.0))
+        ps.pose.position.z = float(attrs.get('z', 0.0))
         if ignore_orientation:
-            ps.pose.orientation.x = 0.0
-            ps.pose.orientation.y = 0.0
-            ps.pose.orientation.z = 0.0
             ps.pose.orientation.w = 1.0
         else:
             ori = attrs.get(
-                "orientation", {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0},
+                'orientation',
+                {'x': 0.0, 'y': 0.0, 'z': 0.0, 'w': 1.0},
             )
-            ps.pose.orientation.x = float(ori.get("x", 0.0))
-            ps.pose.orientation.y = float(ori.get("y", 0.0))
-            ps.pose.orientation.z = float(ori.get("z", 0.0))
-            ps.pose.orientation.w = float(ori.get("w", 1.0))
+            ps.pose.orientation.x = float(ori.get('x', 0.0))
+            ps.pose.orientation.y = float(ori.get('y', 0.0))
+            ps.pose.orientation.z = float(ori.get('z', 0.0))
+            ps.pose.orientation.w = float(ori.get('w', 1.0))
         return ps
 
+    def _pose_or_fallback(self, node_name, ignore_orientation=False):
+        """Build pose from graph, falling back to raw YAML."""
+        ps = self._build_pose_from_graph(node_name, ignore_orientation)
+        if ps is None:
+            nd = get_node_from_tmap2(self._tmap, node_name)
+            if nd:
+                ps = self._build_pose_stamped(nd, ignore_orientation)
+        return ps
+
+    # =================================================================
+    # Goal construction (map-driven)
+    # =================================================================
+
     def _build_segment_goal(self, segment, is_final_segment):
-        """Build a ``NavigateThroughPoses.Goal`` for an entire segment.
+        """Build a Nav2 goal from map ``actions`` configuration.
 
-        Collects all waypoints (target nodes) in the segment and sends
-        them as a single multi-pose goal to Nav2. Intermediate
-        waypoints use identity orientation so Nav2 does not enforce
-        heading at mid-route nodes; only the final waypoint keeps
-        the real orientation from the topological map.
-
-        Args:
-            segment: An ``ActionSegment`` containing one or more edges.
-            is_final_segment: True if this is the last segment in the
-                route (affects orientation of the final waypoint).
-
-        Returns:
-            ``NavigateThroughPoses.Goal``
+        Dispatches to ``NavigateToPose.Goal`` or
+        ``NavigateThroughPoses.Goal`` based on the action's
+        ``action_type``.
         """
         action = segment.action_type
-        goal = NavigateThroughPoses.Goal()
+        info = self._action_clients.get(action)
 
-        n_edges = segment.num_edges
-        for ei, edata in enumerate(segment.edge_data):
-            tgt = edata['target']
-            is_last = (ei == n_edges - 1)
-
-            # Intermediate waypoints: ignore orientation so the robot
-            # drives through without stopping to rotate.
-            # Final waypoint: keep orientation unless no_orientation
-            # was requested.
-            ignore_ori = not is_last or (
-                is_last and self._no_orientation and is_final_segment
+        if not info:
+            self.get_logger().warning(
+                "[GOAL] No config for '%s' -- fallback NTP" % action,
             )
+            return self._build_nttp_goal(segment, is_final_segment, '')
 
-            ps = self._build_pose_from_graph(tgt, ignore_orientation=ignore_ori)
-            if ps is None:
-                # Fallback to YAML lookup
-                dest_node = get_node_from_tmap2(self._tmap, tgt)
-                if dest_node:
-                    ps = self._build_pose_stamped(
-                        dest_node, ignore_orientation=ignore_ori,
-                    )
-            if ps is not None:
-                goal.poses.append(ps)
+        bt = info['config'].get(
+            'action_goal_template', {},
+        ).get('behavior_tree', '')
+        if isinstance(bt, str) and bt.startswith('${'):
+            bt = ''
 
-        # Select BT tree for this action type
-        bt = self._bt_trees.get(action) or self._bt_trees.get(
-            normalize_action_name(action), '',
-        )
+        if info['action_class'] == NavigateToPose:
+            return self._build_ntp_goal(segment, is_final_segment, bt)
+        return self._build_nttp_goal(segment, is_final_segment, bt)
+
+    def _build_ntp_goal(self, segment, is_final, bt):
+        """``NavigateToPose.Goal`` -- single target pose."""
+        goal = NavigateToPose.Goal()
+        tgt = segment.last_target
+        ignore = self._no_orientation and is_final
+        ps = self._pose_or_fallback(tgt, ignore_orientation=ignore)
+        if ps is not None:
+            goal.pose = ps
         if bt:
             goal.behavior_tree = bt
-
         self.get_logger().info(
-            "[GOAL] %s segment: %d poses, BT=%s"
-            % (action, len(goal.poses), bt or "default"),
+            "[GOAL] NTP -> '%s', BT=%s" % (tgt, bt or 'default'),
         )
         return goal
 
-    def _send_nav2_goal(self, goal):
-        """Send goal to Nav2 and block until result.
-
-        Returns:
-            ``GoalStatus`` integer.
-        """
-        if not self._nav2_client.server_is_ready():
-            self.get_logger().info(
-                "[NAV2] Waiting for /navigate_through_poses server ...",
+    def _build_nttp_goal(self, segment, is_final, bt):
+        """``NavigateThroughPoses.Goal`` -- multi-waypoint."""
+        goal = NavigateThroughPoses.Goal()
+        n = segment.num_edges
+        for i, ed in enumerate(segment.edge_data):
+            last = (i == n - 1)
+            ignore = not last or (
+                last and self._no_orientation and is_final
             )
-            if not self._nav2_client.wait_for_server(timeout_sec=5.0):
-                self.get_logger().error(
-                    "[NAV2] Action server not available",
-                )
+            ps = self._pose_or_fallback(
+                ed['target'], ignore_orientation=ignore,
+            )
+            if ps is not None:
+                goal.poses.append(ps)
+        if bt:
+            goal.behavior_tree = bt
+        self.get_logger().info(
+            "[GOAL] NTTP %d poses, BT=%s"
+            % (len(goal.poses), bt or 'default'),
+        )
+        return goal
+
+    # =================================================================
+    # Nav2 dispatch
+    # =================================================================
+
+    def _send_nav2_goal(self, goal, action_client=None):
+        """Send goal to Nav2. Blocks until result.
+
+        Returns ``GoalStatus`` integer.
+        """
+        if action_client is None:
+            for info in self._action_clients.values():
+                action_client = info['client']
+                break
+        if action_client is None:
+            self.get_logger().error("[NAV2] No action client available")
+            return GoalStatus.STATUS_ABORTED
+
+        if not action_client.server_is_ready():
+            self.get_logger().info("[NAV2] Waiting for server ...")
+            if not action_client.wait_for_server(timeout_sec=5.0):
+                self.get_logger().error("[NAV2] Server unavailable")
                 return GoalStatus.STATUS_ABORTED
 
-        # Send goal
-        send_future = self._nav2_client.send_goal_async(
-            goal, feedback_callback=self._nav2_feedback_cb,
+        future = action_client.send_goal_async(
+            goal, feedback_callback=self._nav2_fb_cb,
         )
 
-        # Wait for acceptance
         while rclpy.ok():
             try:
                 rclpy.spin_once(
                     self, executor=self._nav2_executor, timeout_sec=0.5,
                 )
-                if send_future.done():
+                if future.done():
                     break
             except Exception as exc:
-                self.get_logger().error(
-                    "[NAV2] send_goal_async error: %s" % exc,
-                )
+                self.get_logger().error("[NAV2] send error: %s" % exc)
                 return GoalStatus.STATUS_ABORTED
 
-        self._goal_handle = send_future.result()
+        self._goal_handle = future.result()
         if not self._goal_handle.accepted:
-            self.get_logger().error("[NAV2] Goal REJECTED by server")
+            self.get_logger().error("[NAV2] Goal REJECTED")
             return GoalStatus.STATUS_ABORTED
-
         self.get_logger().info("[NAV2] Goal ACCEPTED")
 
-        # Wait for result
         result_future = self._goal_handle.get_result_async()
-
         while rclpy.ok():
             if self._preempted or self._cancelled:
                 self._cancel_nav2_goal(timeout_sec=2.0)
@@ -784,39 +993,31 @@ class TopologicalNavServer(rclpy.node.Node):
                     self, executor=self._nav2_executor, timeout_sec=1.0,
                 )
                 if result_future.done():
-                    result = result_future.result()
-                    self._action_status = result.status
+                    res = result_future.result()
+                    self._action_status = res.status
                     self.get_logger().info(
-                        "[NAV2] Goal finished: %s"
-                        % _status_str(result.status),
+                        "[NAV2] Finished: %s" % _status_str(res.status),
                     )
-                    return result.status
+                    return res.status
             except Exception as exc:
-                self.get_logger().error(
-                    "[NAV2] processing error: %s" % exc,
-                )
+                self.get_logger().error("[NAV2] result error: %s" % exc)
                 return GoalStatus.STATUS_ABORTED
-
         return GoalStatus.STATUS_ABORTED
 
-    def _nav2_feedback_cb(self, feedback_msg):
-        """Handle Nav2 feedback (currently just updates status)."""
+    def _nav2_fb_cb(self, _feedback_msg):
         self._action_status = GoalStatus.STATUS_EXECUTING
 
     def _cancel_nav2_goal(self, timeout_sec=2.0):
-        """Cancel the current Nav2 goal if one is active."""
         if self._goal_handle is None:
             return
         try:
-            cancel_future = self._goal_handle.cancel_goal_async()
+            f = self._goal_handle.cancel_goal_async()
             rclpy.spin_until_future_complete(
-                self, cancel_future, timeout_sec=timeout_sec,
+                self, f, timeout_sec=timeout_sec,
             )
-            self.get_logger().info("[NAV2] Goal cancel sent")
+            self.get_logger().info("[NAV2] Cancel sent")
         except Exception as exc:
-            self.get_logger().error(
-                "[NAV2] Error cancelling goal: %s" % exc,
-            )
+            self.get_logger().error("[NAV2] Cancel error: %s" % exc)
         finally:
             self._goal_handle = None
 
@@ -824,17 +1025,14 @@ class TopologicalNavServer(rclpy.node.Node):
     # Action-server callbacks
     # =================================================================
 
-    def _execute_goto_cb(self, goal_handle):
-        """``GotoNode`` action callback -- plan and follow route."""
+    def _exec_goto_cb(self, goal_handle):
+        """``GotoNode`` action callback."""
         target = goal_handle.request.target
         self.get_logger().info(
-            "=" * 70
-            + "\n[GOTO] target='%s', no_orientation=%s"
+            "=" * 60 + "\n[GOTO] target='%s', no_ori=%s"
             % (target, goal_handle.request.no_orientation),
         )
-
-        self._cancel_current_navigation()
-
+        self._cancel_current_nav()
         self._navigation_activated = True
         self._cancelled = False
         self._preempted = False
@@ -846,56 +1044,38 @@ class TopologicalNavServer(rclpy.node.Node):
         self._goto_fb_pub.publish(fb)
 
         success = self._navigate(target)
-
         self._navigation_activated = False
+
         result = GotoNode.Result()
         result.success = success
-
         if success:
             goal_handle.succeed()
-            self.get_logger().info(
-                "[GOTO] Navigation to '%s' SUCCEEDED" % target,
-            )
+            self.get_logger().info("[GOTO] SUCCEEDED -> '%s'" % target)
         else:
             goal_handle.abort()
             self.get_logger().warning(
-                "[GOTO] Navigation to '%s' %s"
-                % (
-                    target,
-                    "CANCELLED" if self._preempted else "FAILED",
-                ),
+                "[GOTO] %s -> '%s'"
+                % ("CANCELLED" if self._preempted else "FAILED", target),
             )
-
         if self._sm.is_terminal():
             self._sm.reset()
-
         return result
 
-    def _execute_policy_cb(self, goal_handle):
-        """``ExecutePolicyMode`` action -- follow provided route."""
-        self.get_logger().info(
-            "=" * 70
-            + "\n[POLICY] Execute-policy goal received",
-        )
-
-        self._cancel_current_navigation()
-
+    def _exec_policy_cb(self, goal_handle):
+        """``ExecutePolicyMode`` action callback."""
+        self.get_logger().info("=" * 60 + "\n[POLICY] Goal received")
+        self._cancel_current_nav()
         self._navigation_activated = True
         self._cancelled = False
         self._preempted = False
         self._fail_policy_state = {}
 
         route = goal_handle.request.route
-
-        # Validate
         if (
             len(route.source) < 1
             or len(route.source) != len(route.edge_id)
         ):
-            self.get_logger().error(
-                "[POLICY] Invalid route: source/edge_id mismatch "
-                "(%d vs %d)" % (len(route.source), len(route.edge_id)),
-            )
+            self.get_logger().error("[POLICY] Invalid route data")
             self._navigation_activated = False
             goal_handle.succeed()
             return ExecutePolicyMode.Result(success=False)
@@ -905,104 +1085,93 @@ class TopologicalNavServer(rclpy.node.Node):
             and route.source[0] != self._closest_node
         ):
             self.get_logger().error(
-                "[POLICY] Route starts at '%s' but robot at '%s' "
-                "(closest: '%s')"
-                % (
-                    route.source[0],
-                    self._current_node,
-                    self._closest_node,
-                ),
+                "[POLICY] Route starts at '%s' but robot at '%s'"
+                % (route.source[0], self._current_node),
             )
             self._navigation_activated = False
             goal_handle.succeed()
             return ExecutePolicyMode.Result(success=False)
 
-        # Build route-node list
         route_nodes = list(route.source)
         if route.edge_id:
-            last_edge = get_edge_from_id_tmap2(
+            last_e = get_edge_from_id_tmap2(
                 self._tmap, route.source[-1], route.edge_id[-1],
             )
-            if last_edge:
-                final_target = last_edge["node"]
-                if not route_nodes or route_nodes[-1] != final_target:
-                    route_nodes.append(final_target)
+            if last_e:
+                ft = last_e["node"]
+                if not route_nodes or route_nodes[-1] != ft:
+                    route_nodes.append(ft)
 
         target = route_nodes[-1]
         self.get_logger().info(
             "[POLICY] Route: %s" % " -> ".join(route_nodes),
         )
         self._publish_route(route_nodes)
-
         success = self._execute_route(route_nodes, target)
 
         self._navigation_activated = False
         if self._sm.is_terminal():
             self._sm.reset()
-
         goal_handle.succeed()
         self.get_logger().info(
             "[POLICY] %s" % ("SUCCEEDED" if success else "FAILED"),
         )
         return ExecutePolicyMode.Result(success=success)
 
-    def _cancel_goto_cb(self, goal_handle):
+    def _cancel_goto_cb(self, _gh):
         self.get_logger().warning("[GOTO] Cancel requested")
         self._preempted = True
-        self._cancel_nav2_goal(timeout_sec=2.0)
+        self._cancel_nav2_goal()
 
-    def _cancel_policy_cb(self, goal_handle):
+    def _cancel_policy_cb(self, _gh):
         self.get_logger().warning("[POLICY] Cancel requested")
         self._preempted = True
-        self._cancel_nav2_goal(timeout_sec=2.0)
+        self._cancel_nav2_goal()
 
     # =================================================================
-    # Core navigation logic
+    # Core navigation
     # =================================================================
 
     def _navigate(self, target):
-        """Plan route from current position and execute.
-
-        Returns ``True`` on success.
-        """
+        """Plan route and execute.  Returns ``True`` on success."""
         if self._cancelled:
             return False
-
         self._sm.transition(NavState.PLANNING)
         self._publish_status("PLANNING")
         self._target = target
 
         if target not in self._graph:
-            self.get_logger().error(
-                "[NAV] Target '%s' not in map" % target,
-            )
+            self.get_logger().error("[NAV] '%s' not in map" % target)
             self._sm.transition(NavState.FAILED)
             self._publish_status("FAILED")
             return False
 
         origin = self._determine_origin(target)
         if origin is None:
-            self.get_logger().error("[NAV] Cannot determine origin node")
+            self.get_logger().error("[NAV] Cannot determine origin")
             self._sm.transition(NavState.FAILED)
             self._publish_status("FAILED")
             return False
 
         self.get_logger().info(
-            "[NAV] Route planning: '%s' -> '%s'" % (origin, target),
+            "[NAV] Planning '%s' -> '%s'" % (origin, target),
         )
 
         if origin == target:
-            self.get_logger().info("[NAV] Already at target node")
+            self.get_logger().info("[NAV] Already at target")
             self._sm.transition(NavState.SUCCEEDED)
             self._publish_status("SUCCEEDED")
             return True
 
         route_nodes = plan_route(
-            self._graph, origin, target, logger=self.get_logger(),
+            self._graph, origin, target,
+            logger=self.get_logger(),
+            algorithm=self._route_algorithm,
+            weight=self._route_weight,
         )
         if not route_nodes or len(route_nodes) < 2:
             self.get_logger().error(
-                "[NAV] No route from '%s' to '%s'" % (origin, target),
+                "[NAV] No route '%s' -> '%s'" % (origin, target),
             )
             self._sm.transition(NavState.FAILED)
             self._publish_status("FAILED")
@@ -1013,24 +1182,24 @@ class TopologicalNavServer(rclpy.node.Node):
             % (" -> ".join(route_nodes), len(route_nodes)),
         )
         self._publish_route(route_nodes)
-
         success = self._execute_route(route_nodes, target)
+
+        # If the map was updated mid-execution, replan from scratch.
+        if not success and self._map_updated_during_nav:
+            self._map_updated_during_nav = False
+            self.get_logger().info(
+                "[NAV] Replanning after mid-navigation map update",
+            )
+            return self._navigate(target)
 
         if not success and not self._cancelled and not self._preempted:
             self._sm.transition(NavState.FAILED)
             self._publish_status("FAILED")
-
         return success
 
     def _determine_origin(self, target):
-        """Determine best origin node.
-
-        Priority: current_node > closest-edge endpoint > closest_node.
-        """
+        """Best origin: current_node > closest-edge > closest_node."""
         if self._current_node not in ("none", "Unknown"):
-            self.get_logger().info(
-                "[NAV] Origin: current node '%s'" % self._current_node,
-            )
             return self._current_node
 
         if (
@@ -1038,30 +1207,18 @@ class TopologicalNavServer(rclpy.node.Node):
             and self._closest_edges.distances[0]
             <= self._max_dist_to_closest_edge
         ):
-            eids = self._closest_edges.edge_ids
-            origin = self._origin_from_closest_edge(
-                target,
-                eids[0] if eids else None,
-                eids[1] if len(eids) > 1 else None,
-            )
+            origin = self._origin_from_closest_edge(target)
             if origin:
-                self.get_logger().info(
-                    "[NAV] Origin: closest-edge endpoint '%s'" % origin,
-                )
                 return origin
 
         if self._closest_node != "Unknown":
-            self.get_logger().info(
-                "[NAV] Origin: closest node '%s'" % self._closest_node,
-            )
             return self._closest_node
-
         return None
 
-    def _origin_from_closest_edge(self, target, eid1, eid2):
-        """Pick origin from closest edge(s)."""
+    def _origin_from_closest_edge(self, target):
+        eids = self._closest_edges.edge_ids
 
-        def _src_of(eid):
+        def _src(eid):
             if not eid:
                 return None
             for u, _v, d in self._graph.edges(data=True):
@@ -1069,31 +1226,30 @@ class TopologicalNavServer(rclpy.node.Node):
                     return u
             return None
 
-        src1 = _src_of(eid1)
+        src1 = _src(eids[0] if eids else None)
         if src1 is None:
             return self._closest_node
 
-        if eid2 and len(self._closest_edges.distances) > 1:
-            src2 = _src_of(eid2)
+        if len(eids) > 1 and len(self._closest_edges.distances) > 1:
+            src2 = _src(eids[1])
             if (
                 src2
                 and self._closest_edges.distances[0]
                 == self._closest_edges.distances[1]
             ):
-                r1 = plan_route(self._graph, src1, target)
-                r2 = plan_route(self._graph, src2, target)
-                d1 = (
-                    get_route_distance(self._graph, r1)
-                    if r1
-                    else float('inf')
+                r1 = plan_route(
+                    self._graph, src1, target,
+                    algorithm=self._route_algorithm,
+                    weight=self._route_weight,
                 )
-                d2 = (
-                    get_route_distance(self._graph, r2)
-                    if r2
-                    else float('inf')
+                r2 = plan_route(
+                    self._graph, src2, target,
+                    algorithm=self._route_algorithm,
+                    weight=self._route_weight,
                 )
+                d1 = get_route_distance(self._graph, r1) if r1 else float('inf')
+                d2 = get_route_distance(self._graph, r2) if r2 else float('inf')
                 return src1 if d1 <= d2 else src2
-
         return src1
 
     # =================================================================
@@ -1101,21 +1257,24 @@ class TopologicalNavServer(rclpy.node.Node):
     # =================================================================
 
     def _execute_route(self, route_nodes, target):
-        """Execute a planned route, segment by segment.
+        """Execute a planned route segment by segment.
 
-        1. Extract route edges from the NetworkX graph.
-        2. Merge consecutive same-action-type edges into segments.
-        3. Execute each segment sequentially.
-        4. For row_traversal segments, publish the boundary polygon.
+        Between segments the method checks for buffered map updates.
+        If the map changed, the remaining route is validated; if any
+        node or edge is now missing the method signals a replan by
+        setting ``_map_updated_during_nav`` and returning ``False``.
         """
         self._navigation_activated = True
+        self._map_updated_during_nav = False
 
         route_edges = get_route_edges(self._graph, route_nodes)
         if not route_edges:
-            self.get_logger().error("[EXEC] No edges found along route")
+            self.get_logger().error("[EXEC] No edges in route")
             return False
 
-        segments = merge_action_segments(route_edges)
+        segments = merge_action_segments(
+            route_edges, map_actions=self._map_actions or None,
+        )
 
         self.get_logger().info(
             "[EXEC] %d edges -> %d segment(s):"
@@ -1123,194 +1282,244 @@ class TopologicalNavServer(rclpy.node.Node):
         )
         for i, seg in enumerate(segments):
             self.get_logger().info(
-                "  [%d] %s x%d: %s -> %s"
-                % (
-                    i,
-                    seg.action_type,
-                    seg.num_edges,
-                    seg.first_source,
-                    seg.last_target,
+                "  [%d] %s x%d: %s -> %s" % (
+                    i, seg.action_type, seg.num_edges,
+                    seg.first_source, seg.last_target,
                 ),
             )
 
-        for seg_idx, segment in enumerate(segments):
+        # Track which node index the current segment starts at so we
+        # can validate the *remaining* route after a map update.
+        node_idx = 0
+
+        for si, seg in enumerate(segments):
             if self._cancelled or self._preempted:
-                self.get_logger().warning("[EXEC] Cancelled/preempted")
                 self._sm.transition(NavState.CANCELLED)
                 self._publish_status("CANCELLED")
                 return False
 
-            is_final = seg_idx == len(segments) - 1
-            ok = self._execute_segment(
-                segment, is_final, seg_idx, len(segments),
-            )
+            # -- Safe point: apply any buffered map update -----------
+            if self._apply_pending_map():
+                self.get_logger().info(
+                    "[EXEC] Map updated between segments",
+                )
+                if not self._validate_remaining_route(
+                    route_nodes, node_idx,
+                ):
+                    self.get_logger().warning(
+                        "[EXEC] Remaining route invalid after map "
+                        "update -- requesting replan",
+                    )
+                    self._map_updated_during_nav = True
+                    return False
+                # Route still valid on new graph; re-derive segments
+                # from the remaining nodes so edge lookups use the
+                # updated ``self._tmap``.
+                remaining_nodes = route_nodes[node_idx:]
+                route_edges = get_route_edges(
+                    self._graph, remaining_nodes,
+                )
+                if not route_edges:
+                    self.get_logger().warning(
+                        "[EXEC] No edges after re-derive -- replan",
+                    )
+                    self._map_updated_during_nav = True
+                    return False
+                segments = merge_action_segments(
+                    route_edges,
+                    map_actions=self._map_actions or None,
+                )
+                # Restart the segment loop with updated segments
+                return self._execute_remaining_segments(
+                    segments, route_nodes[node_idx:], target,
+                )
 
+            is_final = si == len(segments) - 1
+            ok = self._execute_segment(seg, is_final, si, len(segments))
             if not ok:
                 if self._cancelled or self._preempted:
                     self._sm.transition(NavState.CANCELLED)
                     self._publish_status("CANCELLED")
                     return False
-
                 recovered = self._attempt_recovery(
-                    segment, route_nodes, target, seg_idx,
+                    seg, route_nodes, target, si,
                 )
                 if not recovered:
-                    self.get_logger().error(
-                        "[EXEC] Segment %d (%s) failed permanently"
-                        % (seg_idx, segment.action_type),
-                    )
                     return False
+
+            # Advance node_idx past the nodes consumed by this segment
+            node_idx += seg.num_edges
 
         self._sm.transition(NavState.SUCCEEDED)
         self._publish_status("SUCCEEDED")
-        self._publish_empty_boundary()
-        self.get_logger().info(
-            "[EXEC] Route to '%s' completed successfully" % target,
-        )
+        return True
+
+    def _execute_remaining_segments(
+        self, segments, route_nodes, target,
+    ):
+        """Continue segment execution after a mid-route map update.
+
+        This is factored out of ``_execute_route`` to avoid resetting
+        the segment loop counter.  The logic is identical.
+        """
+        node_idx = 0
+
+        for si, seg in enumerate(segments):
+            if self._cancelled or self._preempted:
+                self._sm.transition(NavState.CANCELLED)
+                self._publish_status("CANCELLED")
+                return False
+
+            # Check for *another* map update
+            if self._apply_pending_map():
+                self.get_logger().info(
+                    "[EXEC] Map updated again between segments",
+                )
+                if not self._validate_remaining_route(
+                    route_nodes, node_idx,
+                ):
+                    self._map_updated_during_nav = True
+                    return False
+                remaining_nodes = route_nodes[node_idx:]
+                route_edges = get_route_edges(
+                    self._graph, remaining_nodes,
+                )
+                if not route_edges:
+                    self._map_updated_during_nav = True
+                    return False
+                segments = merge_action_segments(
+                    route_edges,
+                    map_actions=self._map_actions or None,
+                )
+                return self._execute_remaining_segments(
+                    segments, route_nodes[node_idx:], target,
+                )
+
+            is_final = si == len(segments) - 1
+            ok = self._execute_segment(seg, is_final, si, len(segments))
+            if not ok:
+                if self._cancelled or self._preempted:
+                    self._sm.transition(NavState.CANCELLED)
+                    self._publish_status("CANCELLED")
+                    return False
+                recovered = self._attempt_recovery(
+                    seg, route_nodes, target, si,
+                )
+                if not recovered:
+                    return False
+
+            node_idx += seg.num_edges
+
+        self._sm.transition(NavState.SUCCEEDED)
+        self._publish_status("SUCCEEDED")
         return True
 
     def _execute_segment(self, segment, is_final, seg_idx, total):
-        """Execute one action segment as a single Nav2 multi-pose goal.
-
-        All waypoints in the segment are sent at once via
-        ``NavigateThroughPoses``. Intermediate waypoints use identity
-        orientation so the robot drives through without stopping to
-        rotate; only the final waypoint keeps its map orientation.
-
-        For ``row_traversal`` segments the boundary polygon is
-        published before sending the goal.
-
-        Pre-flight checks (restrictions, reconfigure) are performed
-        for every edge in the segment before the goal is dispatched.
-        After the Nav2 goal completes, per-edge statistics are
-        published retroactively.
-        """
+        """Execute one action segment."""
         action = segment.action_type
         exec_state = ACTION_TO_STATE.get(
             action, NavState.EXECUTING_NAVIGATE_TO_POSE,
         )
-
         self._sm.transition(exec_state)
         self._publish_status(exec_state.value)
 
         self.get_logger().info(
-            "[SEG %d/%d] %s x%d: %s -> %s"
-            % (
-                seg_idx + 1,
-                total,
-                action,
-                segment.num_edges,
-                segment.first_source,
-                segment.last_target,
+            "[SEG %d/%d] %s x%d: %s -> %s" % (
+                seg_idx + 1, total, action, segment.num_edges,
+                segment.first_source, segment.last_target,
             ),
         )
 
-        # row_traversal: compute & publish boundary polygon
+        # Row-traversal boundary polygon
         if action == "row_traversal":
             self._handle_row_boundary(segment)
         else:
             self._publish_empty_boundary()
 
-        # ----- Pre-flight: validate all edges before sending goal -----
+        # Pre-flight: validate all edges
         edge_dicts = []
-        for ei, edata in enumerate(segment.edge_data):
+        for edata in segment.edge_data:
             if self._cancelled or self._preempted:
                 return False
 
             src = edata['source']
             tgt = edata['target']
-            edge_id = edata.get('edge_id', '')
+            eid = edata.get('edge_id', '')
 
-            edge_dict = get_edge_from_id_tmap2(
-                self._tmap, src, edge_id,
-            )
-
-            if not edge_dict:
+            ed = get_edge_from_id_tmap2(self._tmap, src, eid)
+            if not ed:
                 self.get_logger().error(
                     "  Edge '%s' (%s->%s): lookup failed"
-                    % (edge_id, src, tgt),
+                    % (eid, src, tgt),
                 )
-                self._stat = nav_stats(
-                    src, tgt, self._topol_map, edge_id,
-                )
+                self._stat = nav_stats(src, tgt, self._topol_map, eid)
                 self._stat.set_ended(self._current_node)
                 self._stat.status = "failed"
                 self._publish_stats()
                 return False
 
-            # Restrictions check
-            if not self._check_restrictions(edge_id, tgt):
-                self._stat = nav_stats(
-                    src, tgt, self._topol_map, edge_id,
-                )
+            if not self._check_restrictions(eid, tgt):
+                self._stat = nav_stats(src, tgt, self._topol_map, eid)
                 self._stat.set_ended(self._current_node)
                 self._stat.status = "restricted"
                 self._publish_stats()
                 return False
 
-            edge_dicts.append(edge_dict)
+            edge_dicts.append(ed)
 
-        # ----- Edge reconfigure (pre) using first edge -----
-        first_edge_dict = edge_dicts[0] if edge_dicts else None
+        # Edge reconfigure (pre)
+        first_ed = edge_dicts[0] if edge_dicts else None
         if (
-            first_edge_dict
-            and self._edge_reconf_mgr
-            and not self._srv_edge_reconfigure
+            first_ed and self._edge_reconf_mgr
+            and not self._srv_edge_reconf
         ):
-            self._edge_reconf_mgr.register_edge(first_edge_dict)
+            self._edge_reconf_mgr.register_edge(first_ed)
             if self._edge_reconf_mgr.active:
                 self._edge_reconf_mgr.initialise()
                 self._edge_reconf_mgr.reconfigure()
 
-        # ----- Build multi-pose goal for the whole segment -----
+        # Build and send goal
         self._current_target = segment.last_target
-        all_edge_ids = " -> ".join(
-            e.get('edge_id', '?') for e in segment.edge_data
-        )
         self._publish_current_edge(
             segment.edge_ids[0] if segment.edge_ids else "none",
         )
 
         self.get_logger().info(
-            "  Sending %d-waypoint %s goal: %s"
-            % (segment.num_edges, action, all_edge_ids),
+            "  Sending %d-wp %s goal" % (segment.num_edges, action),
         )
 
-        nav2_goal = self._build_segment_goal(segment, is_final)
+        goal = self._build_segment_goal(segment, is_final)
         self._stat = nav_stats(
             segment.first_source or "?",
             segment.last_target or "?",
             self._topol_map,
             segment.edge_ids[0] if segment.edge_ids else "",
         )
-        status = self._send_nav2_goal(nav2_goal)
 
-        status_str = _status_str(status)
+        info = self._action_clients.get(action)
+        client = info['client'] if info else None
+        status = self._send_nav2_goal(goal, action_client=client)
+
         self._publish_move_status(
-            segment.last_target or "?", action, status_str,
+            segment.last_target or "?", action, _status_str(status),
         )
 
-        # ----- Edge reconfigure (post-reset) -----
+        # Edge reconfigure (post-reset)
         if (
             self._edge_reconf_mgr
-            and not self._srv_edge_reconfigure
+            and not self._srv_edge_reconf
             and self._edge_reconf_mgr.active
         ):
             self._edge_reconf_mgr._reset()
 
-        # ----- Evaluate result -----
+        # Evaluate
         self._stat.set_ended(self._current_node)
-        if (
-            status == GoalStatus.STATUS_SUCCEEDED
-            or self._goal_reached
-        ):
+        if status == GoalStatus.STATUS_SUCCEEDED or self._goal_reached:
             self._stat.status = "success"
             self._publish_stats()
             self.get_logger().info(
-                "  Segment OK: %s -> %s (%.1fs)"
-                % (
-                    segment.first_source,
-                    segment.last_target,
+                "  Segment OK: %s -> %s (%.1fs)" % (
+                    segment.first_source, segment.last_target,
                     self._stat.operation_time,
                 ),
             )
@@ -1321,11 +1530,9 @@ class TopologicalNavServer(rclpy.node.Node):
             if status == GoalStatus.STATUS_CANCELED:
                 self._preempted = True
             self.get_logger().warning(
-                "  Segment FAILED: %s -> %s (status=%s)"
-                % (
-                    segment.first_source,
-                    segment.last_target,
-                    status_str,
+                "  Segment FAILED: %s -> %s (%s)" % (
+                    segment.first_source, segment.last_target,
+                    _status_str(status),
                 ),
             )
             return False
@@ -1334,39 +1541,24 @@ class TopologicalNavServer(rclpy.node.Node):
         return True
 
     # =================================================================
-    # RowTraversal boundary
+    # Row-traversal boundary
     # =================================================================
 
     def _handle_row_boundary(self, segment):
-        """Compute and publish boundary polygon for row_traversal."""
         frame_id = self._graph.nodes.get(
             segment.first_source, {},
-        ).get('parent_frame', 'map')
+        ).get('parent_frame', self._nav_frame())
 
         poly = compute_row_boundary_polygon(
-            self._graph,
-            segment,
+            self._graph, segment,
             default_left=self._default_boundary_left,
             default_right=self._default_boundary_right,
         )
-
         if poly:
             self._publish_boundary(poly, frame_id)
-            props = segment.edge_data[0].get('properties', {})
-            left = props.get(
-                'boundary_left', self._default_boundary_left,
-            )
-            right = props.get(
-                'boundary_right', self._default_boundary_right,
-            )
-            self.get_logger().info(
-                "[BOUNDARY] row_traversal corridor: "
-                "left=%.2fm, right=%.2fm, edges=%d"
-                % (left, right, segment.num_edges),
-            )
         else:
             self.get_logger().warning(
-                "[BOUNDARY] Could not compute row boundary polygon",
+                "[BOUNDARY] Cannot compute row polygon",
             )
             self._publish_empty_boundary(frame_id)
 
@@ -1375,19 +1567,17 @@ class TopologicalNavServer(rclpy.node.Node):
     # =================================================================
 
     def _check_restrictions(self, edge_id, target_node):
-        """Check edge/node restrictions. True = navigation allowed."""
+        """Check edge/node restrictions.  True = allowed."""
         if not self._using_restrictions:
             return True
         try:
             req = EvaluateEdge.Request()
             req.edge = edge_id
             req.runtime = True
-            fut = self._eval_edge_srv.call_async(req)
-            rclpy.spin_until_future_complete(
-                self, fut, timeout_sec=3.0,
-            )
-            if fut.done():
-                r = fut.result()
+            f = self._eval_edge_srv.call_async(req)
+            rclpy.spin_until_future_complete(self, f, timeout_sec=3.0)
+            if f.done():
+                r = f.result()
                 if r and r.success and r.evaluation:
                     self.get_logger().warning(
                         "[RESTRICT] Edge '%s' restricted" % edge_id,
@@ -1397,21 +1587,17 @@ class TopologicalNavServer(rclpy.node.Node):
             req2 = EvaluateNode.Request()
             req2.node = target_node
             req2.runtime = True
-            fut2 = self._eval_node_srv.call_async(req2)
-            rclpy.spin_until_future_complete(
-                self, fut2, timeout_sec=3.0,
-            )
-            if fut2.done():
-                r2 = fut2.result()
+            f2 = self._eval_node_srv.call_async(req2)
+            rclpy.spin_until_future_complete(self, f2, timeout_sec=3.0)
+            if f2.done():
+                r2 = f2.result()
                 if r2 and r2.success and r2.evaluation:
                     self.get_logger().warning(
                         "[RESTRICT] Node '%s' restricted" % target_node,
                     )
                     return False
         except Exception as exc:
-            self.get_logger().error(
-                "[RESTRICT] Error checking restrictions: %s" % exc,
-            )
+            self.get_logger().error("[RESTRICT] Error: %s" % exc)
         return True
 
     # =================================================================
@@ -1419,14 +1605,7 @@ class TopologicalNavServer(rclpy.node.Node):
     # =================================================================
 
     def _attempt_recovery(self, segment, route_nodes, target, seg_idx):
-        """Execute fail-policy recovery for a failed segment.
-
-        Supported policies (comma-separated on edge,
-        e.g. ``retry_3,replan,fail``):
-            retry  -- re-execute the failed segment
-            replan -- A* avoiding the failed edge(s), then execute
-            fail   -- stop navigation
-        """
+        """Execute fail-policy: retry / replan / fail."""
         self._sm.transition(NavState.RECOVERING)
         self._publish_status("RECOVERING")
 
@@ -1454,10 +1633,8 @@ class TopologicalNavServer(rclpy.node.Node):
         while idx < len(policies):
             pol = policies[idx]
             self._fail_policy_state[edge_key] = idx + 1
-
             self.get_logger().info(
-                "[RECOVER] Policy '%s' (%d/%d)"
-                % (pol, idx + 1, len(policies)),
+                "[RECOVER] '%s' (%d/%d)" % (pol, idx + 1, len(policies)),
             )
 
             if pol == "retry":
@@ -1475,13 +1652,12 @@ class TopologicalNavServer(rclpy.node.Node):
                     if self._current_node not in ("none", "Unknown")
                     else self._closest_node
                 )
-                avoid = list(segment.edge_ids)
                 new_route = plan_route(
-                    self._graph,
-                    origin,
-                    target,
-                    avoid_edges=avoid,
+                    self._graph, origin, target,
+                    avoid_edges=list(segment.edge_ids),
                     logger=self.get_logger(),
+                    algorithm=self._route_algorithm,
+                    weight=self._route_weight,
                 )
                 if new_route and len(new_route) >= 2:
                     self.get_logger().info(
@@ -1493,21 +1669,17 @@ class TopologicalNavServer(rclpy.node.Node):
                         self._fail_policy_state.pop(edge_key, None)
                         return True
                 else:
-                    self.get_logger().warning(
-                        "[RECOVER] Replan failed -- no route",
-                    )
+                    self.get_logger().warning("[RECOVER] Replan failed")
                 idx += 1
 
             elif pol == "fail":
-                self.get_logger().warning(
-                    "[RECOVER] 'fail' policy -- stopping navigation",
-                )
+                self.get_logger().warning("[RECOVER] 'fail' -- stopping")
                 self._fail_policy_state.pop(edge_key, None)
                 return False
 
             else:
                 self.get_logger().warning(
-                    "[RECOVER] Unknown policy '%s', skipping" % pol,
+                    "[RECOVER] Unknown '%s', skipping" % pol,
                 )
                 idx += 1
 
@@ -1518,35 +1690,30 @@ class TopologicalNavServer(rclpy.node.Node):
     # Helpers
     # =================================================================
 
-    def _cancel_current_navigation(self):
-        """Cancel any active navigation."""
+    def _cancel_current_nav(self):
         if self._navigation_activated:
-            self.get_logger().info(
-                "[CANCEL] Stopping current navigation",
-            )
+            self.get_logger().info("[CANCEL] Stopping current nav")
             self._cancel_nav2_goal(timeout_sec=2.0)
             self._cancelled = True
             self._navigation_activated = False
+            # Reset state machine so next goal can transition to PLANNING
+            if not self._sm.is_terminal() and self._sm.state != NavState.READY:
+                self._sm.transition(NavState.CANCELLED)
+            if self._sm.is_terminal():
+                self._sm.reset()
 
 
 # =====================================================================
 # Entry point
 # =====================================================================
 
-
 def main():
-    """Launch the topological navigation server."""
     rclpy.init(args=None)
-
     node = TopologicalNavServer('topological_navigation')
-
     executor = MultiThreadedExecutor()
     executor.add_node(node)
-
-    # EdgeReconfigureManager is a separate node if enabled
     if node._edge_reconf_mgr is not None:
         executor.add_node(node._edge_reconf_mgr)
-
     try:
         executor.spin()
     except KeyboardInterrupt:

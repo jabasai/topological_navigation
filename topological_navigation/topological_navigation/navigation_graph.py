@@ -96,6 +96,7 @@ VALID_TRANSITIONS: Dict[NavState, set] = {
 ACTION_TO_STATE: Dict[str, NavState] = {
     "NavigateToPose": NavState.EXECUTING_NAVIGATE_TO_POSE,
     "navigate_to_pose": NavState.EXECUTING_NAVIGATE_TO_POSE,
+    "navigate_to_pose_goal_align": NavState.EXECUTING_GOAL_ALIGN,
     "goal_align": NavState.EXECUTING_GOAL_ALIGN,
     "GoalAlign": NavState.EXECUTING_GOAL_ALIGN,
     "row_traversal": NavState.EXECUTING_ROW_TRAVERSAL,
@@ -273,11 +274,22 @@ def plan_route(
     target: str,
     avoid_edges: Optional[List[str]] = None,
     logger=None,
+    algorithm: str = 'astar',
+    weight: str = 'weight',
 ) -> Optional[List[str]]:
-    """Plan shortest route using NetworkX A* algorithm.
+    """Plan shortest route using NetworkX algorithms.
 
-    Uses Euclidean distance heuristic and edge weights from the graph.
-    Optionally avoids specific edges (for replan-after-failure).
+    Supports multiple path-finding algorithms selectable at runtime
+    via the ``algorithm`` parameter:
+
+    - ``'astar'`` (default): A* with Euclidean distance heuristic.
+      Optimal and efficient for spatial graphs.
+    - ``'dijkstra'``: Dijkstra's algorithm.  No heuristic -- explores
+      more nodes but handles non-spatial weights better.
+
+    The ``weight`` parameter selects which edge attribute is used as
+    the path cost.  By default this is ``'weight'`` (set to 1.0
+    during graph construction but overridable via edge properties).
 
     Args:
         graph: NetworkX DiGraph from build_graph_from_tmap().
@@ -285,6 +297,8 @@ def plan_route(
         target: Name of the target node.
         avoid_edges: Optional list of edge_ids to exclude.
         logger: Optional ROS 2 logger.
+        algorithm: ``'astar'`` or ``'dijkstra'``.
+        weight: Edge attribute used as cost (default ``'weight'``).
 
     Returns:
         Ordered list of node names [origin, ..., target],
@@ -316,13 +330,17 @@ def plan_route(
         view = graph
 
     try:
-        path = nx.astar_path(
-            view,
-            origin,
-            target,
-            heuristic=lambda u, v: _heuristic(u, v, graph),
-            weight='weight',
-        )
+        if algorithm == 'dijkstra':
+            path = nx.dijkstra_path(
+                view, origin, target, weight=weight,
+            )
+        else:
+            # Default: A* with Euclidean heuristic
+            path = nx.astar_path(
+                view, origin, target,
+                heuristic=lambda u, v: _heuristic(u, v, graph),
+                weight=weight,
+            )
         return path
     except nx.NetworkXNoPath:
         if logger:
@@ -365,19 +383,29 @@ def get_route_edges(
 
 def merge_action_segments(
     route_edges: List[Dict[str, Any]],
+    map_actions: Optional[Dict[str, Any]] = None,
 ) -> List[ActionSegment]:
     """Merge consecutive same-action-type edges into segments.
 
     Given edges: [Nav, Nav, Row, Row, GoalAlign]
     Produces:    [Seg(Nav,2), Seg(Row,2), Seg(GoalAlign,1)]
 
-    This enables:
-    - Fewer state machine transitions
-    - Unified boundary publishing per RowTraversal segment
-    - Cleaner logging (one message per segment)
+    When ``map_actions`` is provided the ``composable`` flag from
+    each action configuration controls merging:
+
+    - ``composable: true`` -- consecutive same-action edges are
+      merged into a single multi-waypoint segment.
+    - ``composable: false`` -- each edge becomes its own segment
+      even when the action name matches the previous edge.
+
+    If ``map_actions`` is *None* (legacy maps without an ``actions``
+    section), all edges are merged by action name as before.
 
     Args:
         route_edges: Edge data dicts from :func:`get_route_edges`.
+        map_actions: Optional ``actions`` dict from the topological
+            map YAML.  Keys are action names, values are config
+            dicts with at least a ``composable`` boolean.
 
     Returns:
         List of ActionSegment instances with merged edges.
@@ -389,9 +417,23 @@ def merge_action_segments(
     current: Optional[ActionSegment] = None
 
     for edge in route_edges:
-        action = normalize_action_name(edge.get('action', 'NavigateToPose'))
+        action = edge.get('action', 'navigate_to_pose')
+        # Legacy maps: normalise CamelCase -> canonical form
+        if map_actions is None:
+            action = normalize_action_name(action)
 
-        if current is None or current.action_type != action:
+        # Determine if this action type is composable
+        composable = True
+        if map_actions and action in map_actions:
+            composable = map_actions[action].get('composable', True)
+
+        # Start a new segment when the action changes *or* when
+        # the action is explicitly non-composable.
+        if (
+            current is None
+            or current.action_type != action
+            or not composable
+        ):
             if current is not None:
                 segments.append(current)
             current = ActionSegment(action_type=action)
@@ -495,6 +537,63 @@ def compute_row_boundary_polygon(
 
     # Closed polygon: left side forward + right side backward
     return left_pts + list(reversed(right_pts))
+
+
+# ==============================================================================
+# NavRoute conversion
+# ==============================================================================
+
+def plan_route_as_navroute(
+    graph: nx.DiGraph,
+    origin: str,
+    target: str,
+    avoid_edges: Optional[List[str]] = None,
+    logger=None,
+    algorithm: str = 'astar',
+    weight: str = 'weight',
+):
+    """Plan a route and return a ``NavRoute`` message.
+
+    Thin wrapper around :func:`plan_route` that converts the
+    resulting node list into the ``NavRoute`` format expected by
+    legacy services (``source[]`` and ``edge_id[]``).
+
+    The caller must import ``NavRoute`` from
+    ``topological_navigation_msgs.msg``.
+
+    Args:
+        graph: NetworkX DiGraph from :func:`build_graph_from_tmap`.
+        origin: Name of the origin node.
+        target: Name of the target node.
+        avoid_edges: Optional list of edge_ids to exclude.
+        logger: Optional ROS 2 logger.
+        algorithm: ``'astar'`` or ``'dijkstra'``.
+        weight: Edge attribute used as cost (default ``'weight'``).
+
+    Returns:
+        ``NavRoute`` message with ``source`` and ``edge_id`` fields
+        populated when a route is found, or an empty ``NavRoute`` on
+        failure.
+    """
+    from topological_navigation_msgs.msg import NavRoute
+
+    route_msg = NavRoute()
+    route_nodes = plan_route(
+        graph, origin, target,
+        avoid_edges=avoid_edges,
+        logger=logger,
+        algorithm=algorithm,
+        weight=weight,
+    )
+    if not route_nodes or len(route_nodes) < 2:
+        return route_msg
+
+    route_edges = get_route_edges(graph, route_nodes)
+    for edge in route_edges:
+        route_msg.source.append(edge['source'])
+        route_msg.edge_id.append(edge.get('edge_id', ''))
+
+    return route_msg
 
 
 # ==============================================================================

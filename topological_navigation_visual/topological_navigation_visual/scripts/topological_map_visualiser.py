@@ -58,7 +58,8 @@ from interactive_markers import InteractiveMarkerServer, MenuHandler
 
 from topological_navigation.map_types import CustomSafeLoader
 import topological_navigation.tmap_utils as tmap_utils
-from topological_navigation.route_search2 import TopologicalRouteSearch2
+from topological_navigation.navigation_graph import plan_route
+from topological_navigation.networkx_utils import build_graph_from_tmap
 from topological_navigation_msgs.action import GotoNode
 
 # ──────────────────────────────────────────────────────────────────
@@ -128,11 +129,11 @@ class TopologicalMapVisualiser(Node):
 
         # ── State ────────────────────────────────────────────────
         self.tmap = None
+        self._graph = None
         self._map_dirty = False
         self._navigating_to: str | None = None
         self._current_node: str = 'none'
         self._closest_node: str = 'none'
-        self._route_search = None
         self._route_nodes: list = []  # ordered node names on active route
 
         # ── QoS ──────────────────────────────────────────────────
@@ -245,7 +246,9 @@ class TopologicalMapVisualiser(Node):
         try:
             with open(self.map_file, 'r') as fh:
                 self.tmap = yaml.load(fh, Loader=CustomSafeLoader)
-            self._route_search = TopologicalRouteSearch2(self.tmap)
+            self._graph = build_graph_from_tmap(
+                self.tmap, logger=self.get_logger(),
+            )
             self.get_logger().info(
                 f'Loaded map with {len(self.tmap.get("nodes", []))} nodes '
                 f'from {self.map_file}'
@@ -300,7 +303,9 @@ class TopologicalMapVisualiser(Node):
         if incoming == self.tmap:
             return  # no change, avoid flicker
         self.tmap = incoming
-        self._route_search = TopologicalRouteSearch2(self.tmap)
+        self._graph = build_graph_from_tmap(
+            self.tmap, logger=self.get_logger(),
+        )
         self.get_logger().info('Received updated map from topic')
         self._rebuild_visualisation()
 
@@ -411,17 +416,22 @@ class TopologicalMapVisualiser(Node):
                 'Cannot highlight route — current/closest node unknown'
             )
             return
-        if self._route_search is None:
+        if self._graph is None:
             if self.tmap is not None:
-                self._route_search = TopologicalRouteSearch2(self.tmap)
+                self._graph = build_graph_from_tmap(
+                    self.tmap, logger=self.get_logger(),
+                )
             else:
                 self.get_logger().warn(
                     'Cannot highlight route — no map loaded'
                 )
                 return
 
-        route = self._route_search.search_route(source, target)
-        if not route.source:
+        route_nodes = plan_route(
+            self._graph, source, target,
+            logger=self.get_logger(),
+        )
+        if not route_nodes or len(route_nodes) < 2:
             self.get_logger().warn(
                 f'No route found from {source} to {target}'
             )
@@ -429,8 +439,7 @@ class TopologicalMapVisualiser(Node):
             self._clear_route_highlight()
             return
 
-        # Build ordered list of node names along the route
-        self._route_nodes = list(route.source) + [target]
+        self._route_nodes = route_nodes
         self.get_logger().info(
             f'Route highlighted: {" → ".join(self._route_nodes)}'
         )

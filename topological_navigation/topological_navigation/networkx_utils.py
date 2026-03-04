@@ -1160,6 +1160,46 @@ def point_in_poly_nx(graph: Optional[nx.DiGraph], node_name: str, pose) -> bool:
     return inside
 
 
+# ==============================================================================
+# Point-to-line-segment distance (vectorized)
+# ==============================================================================
+
+def _pnt2line(
+    pnt: np.ndarray,
+    start: np.ndarray,
+    end: np.ndarray,
+) -> np.ndarray:
+    """Vectorized perpendicular distance from points to line segments.
+
+    All three arguments are ``(N, 3)`` arrays.  Returns an ``(N,)``
+    array of distances from each point to the corresponding segment.
+
+    The projection parameter *t* is clamped to ``[0, 1]`` so the
+    result is the distance to the *segment*, not the infinite line.
+
+    Args:
+        pnt: Array of query points, shape ``(N, 3)``.
+        start: Segment start points, shape ``(N, 3)``.
+        end: Segment end points, shape ``(N, 3)``.
+
+    Returns:
+        1-D array of Euclidean distances, shape ``(N,)``.
+    """
+    line_vec = end - start
+    pnt_vec = pnt - start
+
+    line_len = np.linalg.norm(line_vec, axis=1, keepdims=True)
+    line_unitvec = line_vec / line_len
+    pnt_vec_scaled = pnt_vec / line_len
+
+    # Projection parameter clamped to [0, 1]
+    t = np.sum(line_unitvec * pnt_vec_scaled, axis=1)
+    t = np.clip(t, 0.0, 1.0)
+
+    nearest = line_vec * t[:, np.newaxis]
+    diff = nearest - pnt_vec
+    return np.linalg.norm(diff, axis=1)
+
 
 def get_edge_distances_nx(graph: Optional[nx.DiGraph], pose, logger=None) -> Tuple[List[str], np.ndarray]:
     """
@@ -1238,8 +1278,6 @@ def get_edge_distances_nx(graph: Optional[nx.DiGraph], pose, logger=None) -> Tup
         - 15.2: Comprehensive docstrings with parameter descriptions
         - 15.3: Type hints for parameters and return values
     """
-    # Import pnt2line function for distance calculations
-    from topological_navigation.point2line import pnt2line
     
     # Validate graph
     if graph is None:
@@ -1288,7 +1326,7 @@ def get_edge_distances_nx(graph: Optional[nx.DiGraph], pose, logger=None) -> Tup
     
     # Calculate perpendicular distances using vectorized operation
     try:
-        distances = pnt2line(pose_points, vectors_start, vectors_end)
+        distances = _pnt2line(pose_points, vectors_start, vectors_end)
     except Exception as e:
         if logger:
             logger.warning(f"Cannot calculate distance to edges: {e}")

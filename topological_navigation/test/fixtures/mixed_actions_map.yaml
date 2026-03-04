@@ -1,5 +1,5 @@
 meta:
-  last_updated: 01-01-2026_00-00-00
+  last_updated: 25-02-2026_00-00-00
   origin:
     latitude: 0.0
     longitude: 0.0
@@ -10,7 +10,7 @@ name: mixed_test_map
 pointset: mixed_test_map
 
 transformation:
-  child: mixed_test_map
+  topological_frame_id: mixed_test_map
   parent: map
   rotation:
     w: 1.0
@@ -22,10 +22,147 @@ transformation:
     y: 0.0
     z: 0.0
 
+definitions:
+  default_bt: |
+    <root main_tree_to_execute="MainTree">
+      <BehaviorTree ID="MainTree">
+        <RecoveryNode number_of_retries="6" name="NavigateRecovery">
+          <PipelineSequence name="NavigateWithReplanning">
+            <RateController hz="1.0">
+              <RecoveryNode number_of_retries="1" name="ComputePathToPose">
+                <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased"/>
+                <ReactiveFallback name="ComputePathToPoseRecoveryFallback">
+                  <GoalUpdated/>
+                  <ClearEntireCostmap name="ClearGlobalCostmap-Context" service_name="global_costmap/clear_entirely_global_costmap"/>
+                </ReactiveFallback>
+              </RecoveryNode>
+            </RateController>
+            <RecoveryNode number_of_retries="1" name="FollowPath">
+              <FollowPath path="{path}" controller_id="FollowPath"/>
+              <ReactiveFallback name="FollowPathRecoveryFallback">
+                <GoalUpdated/>
+                <ClearEntireCostmap name="ClearLocalCostmap-Context" service_name="local_costmap/clear_entirely_local_costmap"/>
+              </ReactiveFallback>
+            </RecoveryNode>
+          </PipelineSequence>
+          <ReactiveFallback name="RecoveryFallback">
+            <GoalUpdated/>
+            <RoundRobin name="RecoveryActions">
+              <Sequence name="ClearingActions">
+                <ClearEntireCostmap name="ClearLocalCostmap-Subtree" service_name="local_costmap/clear_entirely_local_costmap"/>
+                <ClearEntireCostmap name="ClearGlobalCostmap-Subtree" service_name="global_costmap/clear_entirely_global_costmap"/>
+              </Sequence>
+              <Spin spin_dist="1.57"/>
+              <Wait wait_duration="5"/>
+              <BackUp backup_dist="0.15" backup_speed="0.025"/>
+            </RoundRobin>
+          </ReactiveFallback>
+        </RecoveryNode>
+      </BehaviorTree>
+    </root>
+  goal_align_bt: |
+    <root main_tree_to_execute="MainTree">
+      <BehaviorTree ID="MainTree">
+        <RecoveryNode number_of_retries="6" name="NavigateRecovery">
+          <PipelineSequence name="NavigateWithReplanning">
+            <RateController hz="1.0">
+              <RecoveryNode number_of_retries="1" name="ComputePathToPose">
+                <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased"/>
+                <ReactiveFallback name="ComputePathToPoseRecoveryFallback">
+                  <GoalUpdated/>
+                  <ClearEntireCostmap name="ClearGlobalCostmap-Context" service_name="global_costmap/clear_entirely_global_costmap"/>
+                </ReactiveFallback>
+              </RecoveryNode>
+            </RateController>
+            <RecoveryNode number_of_retries="1" name="FollowPath">
+              <FollowPath path="{path}" controller_id="FollowPath"/>
+              <ReactiveFallback name="FollowPathRecoveryFallback">
+                <GoalUpdated/>
+                <ClearEntireCostmap name="ClearLocalCostmap-Context" service_name="local_costmap/clear_entirely_local_costmap"/>
+              </ReactiveFallback>
+            </RecoveryNode>
+          </PipelineSequence>
+          <ReactiveFallback name="RecoveryFallback">
+            <GoalUpdated/>
+            <RoundRobin name="RecoveryActions">
+              <Sequence name="ClearingActions">
+                <ClearEntireCostmap name="ClearLocalCostmap-Subtree" service_name="local_costmap/clear_entirely_local_costmap"/>
+                <ClearEntireCostmap name="ClearGlobalCostmap-Subtree" service_name="global_costmap/clear_entirely_global_costmap"/>
+              </Sequence>
+              <Wait wait_duration="5"/>
+              <BackUp backup_dist="0.15" backup_speed="0.025"/>
+            </RoundRobin>
+          </ReactiveFallback>
+        </RecoveryNode>
+      </BehaviorTree>
+    </root>
+  row_traversal_bt: |
+    <root main_tree_to_execute="MainTree">
+      <BehaviorTree ID="MainTree">
+        <RecoveryNode number_of_retries="0" name="NavigateRecovery">
+          <PipelineSequence name="NavigateWithReplanning">
+            <RateController hz="0.333">
+              <RecoveryNode number_of_retries="0" name="ComputePathThroughPoses">
+                <ReactiveSequence>
+                  <RemovePassedGoals input_goals="{goals}" output_goals="{goals}" radius="1.5"/>
+                  <ComputePathThroughPoses goals="{goals}" path="{path}" planner_id="GridBased"/>
+                </ReactiveSequence>
+                <ReactiveFallback name="ComputePathThroughPosesRecoveryFallback">
+                  <GoalUpdated/>
+                  <ClearEntireCostmap name="ClearGlobalCostmap-Context" service_name="global_costmap/clear_entirely_global_costmap"/>
+                </ReactiveFallback>
+              </RecoveryNode>
+            </RateController>
+            <RecoveryNode number_of_retries="0" name="FollowPath">
+              <FollowPath path="{path}" controller_id="FollowPath"/>
+              <ReactiveFallback name="FollowPathRecoveryFallback">
+                <GoalUpdated/>
+                <ClearEntireCostmap name="ClearLocalCostmap-Context" service_name="local_costmap/clear_entirely_local_costmap"/>
+              </ReactiveFallback>
+            </RecoveryNode>
+          </PipelineSequence>
+          <ReactiveFallback name="RecoveryFallback">
+            <GoalUpdated/>
+            <RoundRobin name="RecoveryActions">
+              <Sequence name="ClearingActions">
+                <ClearEntireCostmap name="ClearLocalCostmap-Subtree" service_name="local_costmap/clear_entirely_local_costmap"/>
+                <ClearEntireCostmap name="ClearGlobalCostmap-Subtree" service_name="global_costmap/clear_entirely_global_costmap"/>
+              </Sequence>
+              <Wait wait_duration="5"/>
+              <BackUp backup_dist="0.15" backup_speed="0.025"/>
+            </RoundRobin>
+          </ReactiveFallback>
+        </RecoveryNode>
+      </BehaviorTree>
+    </root>
+
+actions:
+  navigate_to_pose:
+    composable: false
+    action_type: nav2_msgs/NavigateToPose
+    action_server: /navigate_to_pose
+    action_goal_template:
+      pose: '${node.pose}'
+      behavior_tree: '${definitions.default_bt}'
+  goal_align:
+    composable: false
+    action_type: nav2_msgs/NavigateToPose
+    action_server: /navigate_to_pose
+    action_goal_template:
+      pose: '${node.pose}'
+      behavior_tree: '${definitions.goal_align_bt}'
+  row_traversal:
+    composable: true
+    action_type: nav2_msgs/NavigateThroughPoses
+    action_server: /navigate_through_poses
+    action_goal_template:
+      poses: ['${node.pose}']
+      behavior_tree: '${definitions.row_traversal_bt}'
+
 nodes:
-  # N1 -- NavigateToPose --> N2 -- NavigateToPose --> N3
-  # N3 -- row_traversal  --> N4 -- row_traversal  --> N5
-  # N5 -- goal_align      --> N6
+  # N1 -- navigate_to_pose --> N2 -- navigate_to_pose --> N3
+  # N3 -- row_traversal    --> N4 -- row_traversal    --> N5
+  # N5 -- goal_align       --> N6
 
   - meta:
       map: mixed_test_map
@@ -33,21 +170,13 @@ nodes:
       pointset: mixed_test_map
     node:
       edges:
-        - action: NavigateToPose
-          action_type: nav2_msgs/action/NavigateToPose
+        - action: navigate_to_pose
           edge_id: N1_N2
           node: N2
           fail_policy: retry_2,fail
-          goal:
-            target_pose:
-              header:
-                frame_id: $node.parent_frame
-              pose: $node.pose
           properties:
             max_speed: 0.5
-      localise_by_topic: ''
       name: N1
-      parent_frame: map
       pose:
         orientation:
           w: 1.0
@@ -77,21 +206,13 @@ nodes:
       pointset: mixed_test_map
     node:
       edges:
-        - action: NavigateToPose
-          action_type: nav2_msgs/action/NavigateToPose
+        - action: navigate_to_pose
           edge_id: N2_N3
           node: N3
           fail_policy: retry_1,fail
-          goal:
-            target_pose:
-              header:
-                frame_id: $node.parent_frame
-              pose: $node.pose
           properties:
             max_speed: 0.5
-      localise_by_topic: ''
       name: N2
-      parent_frame: map
       pose:
         orientation:
           w: 1.0
@@ -122,21 +243,13 @@ nodes:
     node:
       edges:
         - action: row_traversal
-          action_type: nav2_msgs/action/NavigateToPose
           edge_id: N3_N4
           node: N4
           fail_policy: retry_2,replan,fail
-          goal:
-            target_pose:
-              header:
-                frame_id: $node.parent_frame
-              pose: $node.pose
           properties:
             boundary_left: 0.4
             boundary_right: 0.6
-      localise_by_topic: ''
       name: N3
-      parent_frame: map
       pose:
         orientation:
           w: 1.0
@@ -167,19 +280,13 @@ nodes:
     node:
       edges:
         - action: row_traversal
-          action_type: nav2_msgs/action/NavigateToPose
           edge_id: N4_N5
           node: N5
           fail_policy: retry_1,fail
-          goal:
-            target_pose:
-              header:
-                frame_id: $node.parent_frame
-              pose: $node.pose
-          properties: {}
-      localise_by_topic: ''
+          properties:
+            boundary_left: 0.4
+            boundary_right: 0.6
       name: N4
-      parent_frame: map
       pose:
         orientation:
           w: 1.0
@@ -210,20 +317,12 @@ nodes:
     node:
       edges:
         - action: goal_align
-          action_type: nav2_msgs/action/NavigateToPose
           edge_id: N5_N6
           node: N6
           fail_policy: fail
-          goal:
-            target_pose:
-              header:
-                frame_id: $node.parent_frame
-              pose: $node.pose
           properties:
             precision: true
-      localise_by_topic: ''
       name: N5
-      parent_frame: map
       pose:
         orientation:
           w: 0.707
@@ -253,9 +352,7 @@ nodes:
       pointset: mixed_test_map
     node:
       edges: []
-      localise_by_topic: ''
       name: N6
-      parent_frame: map
       pose:
         orientation:
           w: 0.707

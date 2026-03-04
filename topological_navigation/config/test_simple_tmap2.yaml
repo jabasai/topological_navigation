@@ -10,7 +10,7 @@ name: test_map
 pointset: test_map
 
 transformation:
-  child: test_map
+  topological_frame_id: test_map
   parent: map
   rotation:
     w: 1.0
@@ -18,9 +18,149 @@ transformation:
     y: 0.0
     z: 0.0
   translation:
-    x: 10.0
-    y: 20.0
+    x: 0.0
+    y: 0.0
     z: 0.0
+
+definitions:
+  default_bt: |
+    <root main_tree_to_execute="MainTree">
+      <BehaviorTree ID="MainTree">
+        <RecoveryNode number_of_retries="0" name="NavigateRecovery">
+          <PipelineSequence name="NavigateWithReplanning">
+            <RateController hz="0.333">
+              <RecoveryNode number_of_retries="0" name="ComputePathThroughPoses">
+                <ReactiveSequence>
+                  <RemovePassedGoals input_goals="{goals}" output_goals="{goals}" radius="1.5"/>
+                  <ComputePathThroughPoses goals="{goals}" path="{path}" planner_id="GridBased"/>
+                </ReactiveSequence>
+                <ReactiveFallback name="ComputePathThroughPosesRecoveryFallback">
+                  <GoalUpdated/>
+                  <ClearEntireCostmap name="ClearGlobalCostmap-Context" service_name="global_costmap/clear_entirely_global_costmap"/>
+                </ReactiveFallback>
+              </RecoveryNode>
+            </RateController>
+            <RecoveryNode number_of_retries="0" name="FollowPath">
+              <FollowPath path="{path}" controller_id="FollowPath"/>
+              <ReactiveFallback name="FollowPathRecoveryFallback">
+                <GoalUpdated/>
+                <ClearEntireCostmap name="ClearLocalCostmap-Context" service_name="local_costmap/clear_entirely_local_costmap"/>
+              </ReactiveFallback>
+            </RecoveryNode>
+          </PipelineSequence>
+          <ReactiveFallback name="RecoveryFallback">
+            <GoalUpdated/>
+            <RoundRobin name="RecoveryActions">
+              <Sequence name="ClearingActions">
+                <ClearEntireCostmap name="ClearLocalCostmap-Subtree" service_name="local_costmap/clear_entirely_local_costmap"/>
+                <ClearEntireCostmap name="ClearGlobalCostmap-Subtree" service_name="global_costmap/clear_entirely_global_costmap"/>
+              </Sequence>
+              <Spin spin_dist="1.57"/>
+              <Wait wait_duration="5"/>
+              <BackUp backup_dist="0.15" backup_speed="0.025"/>
+            </RoundRobin>
+          </ReactiveFallback>
+        </RecoveryNode>
+      </BehaviorTree>
+    </root>
+  goal_align_bt: |
+    <root main_tree_to_execute="MainTree">
+      <BehaviorTree ID="MainTree">
+        <RecoveryNode number_of_retries="6" name="NavigateRecovery">
+          <PipelineSequence name="NavigateWithReplanning">
+            <RateController hz="1.0">
+              <RecoveryNode number_of_retries="1" name="ComputePathToPose">
+                <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased"/>
+                <ReactiveFallback name="ComputePathToPoseRecoveryFallback">
+                  <GoalUpdated/>
+                  <ClearEntireCostmap name="ClearGlobalCostmap-Context" service_name="global_costmap/clear_entirely_global_costmap"/>
+                </ReactiveFallback>
+              </RecoveryNode>
+            </RateController>
+            <RecoveryNode number_of_retries="1" name="FollowPath">
+              <FollowPath path="{path}" controller_id="FollowPath"/>
+              <ReactiveFallback name="FollowPathRecoveryFallback">
+                <GoalUpdated/>
+                <ClearEntireCostmap name="ClearLocalCostmap-Context" service_name="local_costmap/clear_entirely_local_costmap"/>
+              </ReactiveFallback>
+            </RecoveryNode>
+          </PipelineSequence>
+          <ReactiveFallback name="RecoveryFallback">
+            <GoalUpdated/>
+            <RoundRobin name="RecoveryActions">
+              <Sequence name="ClearingActions">
+                <ClearEntireCostmap name="ClearLocalCostmap-Subtree" service_name="local_costmap/clear_entirely_local_costmap"/>
+                <ClearEntireCostmap name="ClearGlobalCostmap-Subtree" service_name="global_costmap/clear_entirely_global_costmap"/>
+              </Sequence>
+              <Wait wait_duration="5"/>
+              <BackUp backup_dist="0.15" backup_speed="0.025"/>
+            </RoundRobin>
+          </ReactiveFallback>
+        </RecoveryNode>
+      </BehaviorTree>
+    </root>
+  row_traversal_bt: |
+    <root main_tree_to_execute="MainTree">
+      <BehaviorTree ID="MainTree">
+        <RecoveryNode number_of_retries="0" name="NavigateRecovery">
+          <PipelineSequence name="NavigateWithReplanning">
+            <RateController hz="0.333">
+              <RecoveryNode number_of_retries="0" name="ComputePathThroughPoses">
+                <ReactiveSequence>
+                  <RemovePassedGoals input_goals="{goals}" output_goals="{goals}" radius="1.5"/>
+                  <ComputePathThroughPoses goals="{goals}" path="{path}" planner_id="GridBased"/>
+                </ReactiveSequence>
+                <ReactiveFallback name="ComputePathThroughPosesRecoveryFallback">
+                  <GoalUpdated/>
+                  <ClearEntireCostmap name="ClearGlobalCostmap-Context" service_name="global_costmap/clear_entirely_global_costmap"/>
+                </ReactiveFallback>
+              </RecoveryNode>
+            </RateController>
+            <RecoveryNode number_of_retries="0" name="FollowPath">
+              <FollowPath path="{path}" controller_id="FollowPath"/>
+              <ReactiveFallback name="FollowPathRecoveryFallback">
+                <GoalUpdated/>
+                <ClearEntireCostmap name="ClearLocalCostmap-Context" service_name="local_costmap/clear_entirely_local_costmap"/>
+              </ReactiveFallback>
+            </RecoveryNode>
+          </PipelineSequence>
+          <ReactiveFallback name="RecoveryFallback">
+            <GoalUpdated/>
+            <RoundRobin name="RecoveryActions">
+              <Sequence name="ClearingActions">
+                <ClearEntireCostmap name="ClearLocalCostmap-Subtree" service_name="local_costmap/clear_entirely_local_costmap"/>
+                <ClearEntireCostmap name="ClearGlobalCostmap-Subtree" service_name="global_costmap/clear_entirely_global_costmap"/>
+              </Sequence>
+              <Wait wait_duration="5"/>
+              <BackUp backup_dist="0.15" backup_speed="0.025"/>
+            </RoundRobin>
+          </ReactiveFallback>
+        </RecoveryNode>
+      </BehaviorTree>
+    </root>
+
+actions:
+  navigate_to_pose:
+    composable: false
+    action_type: nav2_msgs/NavigateToPose
+    action_server: /navigate_to_pose
+    action_goal_template:
+      pose: '${node.pose}'
+      behavior_tree: '${definitions.default_bt}'
+  navigate_to_pose_goal_align:
+    composable: false
+    action_type: nav2_msgs/NavigateToPose
+    action_server: /navigate_to_pose
+    action_goal_template:
+      pose: '${node.pose}'
+      behavior_tree: '${definitions.goal_align_bt}'
+  row_traversal:
+    composable: true
+    action_type: nav2_msgs/NavigateThroughPoses
+    action_server: /navigate_through_poses
+    action_goal_template:
+      poses: ['${node.pose}']
+      behavior_tree: '${definitions.row_traversal_bt}'
 
 nodes:
   - meta:
@@ -30,23 +170,9 @@ nodes:
     node:
       edges:
         - action: row_traversal
-          action_type: geometry_msgs/PoseStamped
-          config: []
           edge_id: node0_node1
-          fail_policy: fail
-          fluid_navigation: true
-          goal:
-            target_pose:
-              header:
-                frame_id: $node.parent_frame
-              pose: $node.pose
           node: node1
-          recovery_behaviours_config: ''
-          restrictions_planning: none
-          restrictions_runtime: none
-      localise_by_topic: ''
       name: node0
-      parent_frame: map
       pose:
         orientation:
           w: 1.0
@@ -60,8 +186,6 @@ nodes:
       properties:
         xy_goal_tolerance: 0.3
         yaw_goal_tolerance: 6.28
-      restrictions_planning: none
-      restrictions_runtime: none
       verts:
         - x: 0.3839717361251064
           y: -0.6411198818013286
@@ -87,23 +211,9 @@ nodes:
     node:
       edges:
         - action: row_traversal
-          action_type: geometry_msgs/PoseStamped
-          config: []
           edge_id: node1_node2
-          fail_policy: fail
-          fluid_navigation: true
-          goal:
-            target_pose:
-              header:
-                frame_id: $node.parent_frame
-              pose: $node.pose
           node: node2
-          recovery_behaviours_config: ''
-          restrictions_planning: none
-          restrictions_runtime: none
-      localise_by_topic: ''
       name: node1
-      parent_frame: map
       pose:
         orientation:
           w: 1.0
@@ -117,8 +227,6 @@ nodes:
       properties:
         xy_goal_tolerance: 0.3
         yaw_goal_tolerance: 6.28
-      restrictions_planning: none
-      restrictions_runtime: none      
       verts:
         - x: 0.3839717361251064
           y: -0.6411198818013286
@@ -135,7 +243,7 @@ nodes:
         - x: -0.4432315207951729
           y: -0.3549856737865013
         - x: -0.1839678947585299
-          y: -0.724309885809929      
+          y: -0.724309885809929
 
   - meta:
       map: test_map
@@ -144,23 +252,9 @@ nodes:
     node:
       edges:
         - action: row_traversal
-          action_type: geometry_msgs/PoseStamped
-          config: []
           edge_id: node2_node3
-          fail_policy: fail
-          fluid_navigation: true
-          goal:
-            target_pose:
-              header:
-                frame_id: $node.parent_frame
-              pose: $node.pose
           node: node3
-          recovery_behaviours_config: ''
-          restrictions_planning: none
-          restrictions_runtime: none
-      localise_by_topic: ''
       name: node2
-      parent_frame: map
       pose:
         orientation:
           w: 1.0
@@ -174,8 +268,6 @@ nodes:
       properties:
         xy_goal_tolerance: 0.3
         yaw_goal_tolerance: 6.28
-      restrictions_planning: none
-      restrictions_runtime: none
       verts:
         - x: 0.3839717361251064
           y: -0.6411198818013286
@@ -201,23 +293,9 @@ nodes:
     node:
       edges:
         - action: row_traversal
-          action_type: geometry_msgs/PoseStamped
-          config: []
           edge_id: node3_node4
-          fail_policy: fail
-          fluid_navigation: true
-          goal:
-            target_pose:
-              header:
-                frame_id: $node.parent_frame
-              pose: $node.pose
           node: node4
-          recovery_behaviours_config: ''
-          restrictions_planning: none
-          restrictions_runtime: none
-      localise_by_topic: ''
       name: node3
-      parent_frame: map
       pose:
         orientation:
           w: 1.0
@@ -231,8 +309,6 @@ nodes:
       properties:
         xy_goal_tolerance: 0.3
         yaw_goal_tolerance: 6.28
-      restrictions_planning: none
-      restrictions_runtime: none
       verts:
         - x: 0.3839717361251064
           y: -0.6411198818013286
@@ -257,9 +333,7 @@ nodes:
       pointset: test_map
     node:
       edges: []
-      localise_by_topic: ''
       name: node4
-      parent_frame: map
       pose:
         orientation:
           w: 1.0
@@ -273,8 +347,6 @@ nodes:
       properties:
         xy_goal_tolerance: 0.3
         yaw_goal_tolerance: 6.28
-      restrictions_planning: none
-      restrictions_runtime: none
       verts:
         - x: 0.3839717361251064
           y: -0.6411198818013286
