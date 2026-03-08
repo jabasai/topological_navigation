@@ -768,10 +768,25 @@ class TopologicalNavServer(rclpy.node.Node):
     # =================================================================
 
     def _nav_frame(self):
-        """Navigation frame from map ``transformation.parent``."""
-        return self._tmap.get(
-            'transformation', {},
-        ).get('parent', 'map')
+        """Default navigation frame from ``transformation.topological_frame_id``.
+
+        Falls back to ``transformation.parent``, then ``'map'``.
+        """
+        tx = self._tmap.get('transformation', {})
+        return tx.get('topological_frame_id', tx.get('parent', 'map'))
+
+    def _node_nav_frame(self, node_name):
+        """Resolve the navigation frame for a specific node.
+
+        Lookup order:
+            1. ``nav_frame`` attribute on the graph node (per-node override)
+            2. Map-level default via :meth:`_nav_frame`
+        """
+        if node_name and node_name in self._graph:
+            nf = self._graph.nodes[node_name].get('nav_frame', '')
+            if nf:
+                return nf
+        return self._nav_frame()
 
     def _build_pose_stamped(self, node_dict, ignore_orientation=False):
         """Build ``PoseStamped`` from a raw topomap node dict."""
@@ -779,7 +794,10 @@ class TopologicalNavServer(rclpy.node.Node):
         pose = nd["pose"]
         ps = PoseStamped()
         ps.header.stamp = self.get_clock().now().to_msg()
-        ps.header.frame_id = nd.get("parent_frame", self._nav_frame())
+        ps.header.frame_id = (
+            nd.get("nav_frame", '')
+            or self._nav_frame()
+        )
         ps.pose.position.x = float(pose["position"]["x"])
         ps.pose.position.y = float(pose["position"]["y"])
         ps.pose.position.z = float(pose["position"]["z"])
@@ -799,9 +817,7 @@ class TopologicalNavServer(rclpy.node.Node):
         attrs = self._graph.nodes[node_name]
         ps = PoseStamped()
         ps.header.stamp = self.get_clock().now().to_msg()
-        ps.header.frame_id = attrs.get(
-            'parent_frame', self._nav_frame(),
-        )
+        ps.header.frame_id = self._node_nav_frame(node_name)
         ps.pose.position.x = float(attrs.get('x', 0.0))
         ps.pose.position.y = float(attrs.get('y', 0.0))
         ps.pose.position.z = float(attrs.get('z', 0.0))
@@ -1502,9 +1518,7 @@ class TopologicalNavServer(rclpy.node.Node):
     # =================================================================
 
     def _handle_row_boundary(self, segment):
-        frame_id = self._graph.nodes.get(
-            segment.first_source, {},
-        ).get('parent_frame', self._nav_frame())
+        frame_id = self._node_nav_frame(segment.first_source)
 
         poly = compute_row_boundary_polygon(
             self._graph, segment,

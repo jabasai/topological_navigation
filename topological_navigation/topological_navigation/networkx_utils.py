@@ -79,7 +79,10 @@ def build_graph_from_tmap(tmap_data: Dict[str, Any], logger=None) -> Optional[nx
             - x, y, z: float - Position coordinates
             - orientation: dict - Quaternion {x, y, z, w}
             - verts: list - Influence zone vertices [{'x': float, 'y': float}, ...]
-            - parent_frame: str - Coordinate frame
+            - parent_frame: str - Coordinate frame (structural)
+            - nav_frame: str - Navigation frame override for PoseStamped
+              goals.  Empty string means "use map-level default
+              (topological_frame_id)".
             - properties: dict - Optional user-defined properties
             - localise_by_topic: str - JSON config string for topic-based localization
             - meta: dict - Metadata including tags
@@ -195,6 +198,7 @@ def build_graph_from_tmap(tmap_data: Dict[str, Any], logger=None) -> Optional[nx
                     },
                     'verts': node.get('verts', []),
                     'parent_frame': node.get('parent_frame', 'map'),
+                    'nav_frame': node.get('nav_frame', ''),
                     'properties': node.get('properties', {}),
                     'localise_by_topic': node.get('localise_by_topic', ''),
                     'meta': node_data.get('meta', {})

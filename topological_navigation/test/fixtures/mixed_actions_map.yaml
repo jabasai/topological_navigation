@@ -9,6 +9,7 @@ metric_map: mixed_test_map
 name: mixed_test_map
 pointset: mixed_test_map
 
+# All nodes default to topological_frame_id ("mixed_test_map")
 transformation:
   topological_frame_id: mixed_test_map
   parent: map
@@ -375,6 +376,7 @@ nodes:
           properties:
             precision: true
       name: N6
+      nav_frame: map  # override: use 'map' instead of topological_frame_id
       pose:
         orientation:
           w: 0.707
