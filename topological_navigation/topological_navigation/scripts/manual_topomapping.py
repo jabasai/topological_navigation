@@ -48,73 +48,9 @@ from visualization_msgs.msg import Marker, MarkerArray
 
 from builtin_interfaces.msg import Duration
 
-from tf_transformations import euler_from_quaternion, quaternion_from_euler
+from tf_transformations import quaternion_from_euler
 
 from ament_index_python.packages import get_package_share_directory
-
-
-# -----------------------------------------------------------------
-# Default influence-zone vertices (octagon, ~0.7 m radius)
-# -----------------------------------------------------------------
-_DEFAULT_VERTS = [
-    {"x":  0.3840, "y": -0.6411},
-    {"x":  0.5264, "y": -0.2130},
-    {"x":  0.4432, "y":  0.3550},
-    {"x":  0.1840, "y":  0.7243},
-    {"x": -0.3840, "y":  0.6411},
-    {"x": -0.5264, "y":  0.2130},
-    {"x": -0.4432, "y": -0.3550},
-    {"x": -0.1840, "y": -0.7243},
-]
-
-# -----------------------------------------------------------------
-# Default BT XML (same as test_simple_tmap2.yaml default_bt)
-# -----------------------------------------------------------------
-_DEFAULT_BT = """\
-<root main_tree_to_execute="MainTree">
-  <BehaviorTree ID="MainTree">
-    <RecoveryNode number_of_retries="0" name="NavigateRecovery">
-      <PipelineSequence name="NavigateWithReplanning">
-        <RateController hz="0.333">
-          <RecoveryNode number_of_retries="0" name="ComputePathThroughPoses">
-            <ReactiveSequence>
-              <RemovePassedGoals input_goals="{goals}" output_goals="{goals}" radius="1.5"/>
-              <ComputePathThroughPoses goals="{goals}" path="{path}" planner_id="GridBased"/>
-            </ReactiveSequence>
-            <ReactiveFallback name="ComputePathThroughPosesRecoveryFallback">
-              <GoalUpdated/>
-              <ClearEntireCostmap name="ClearGlobalCostmap-Context" \
-service_name="global_costmap/clear_entirely_global_costmap"/>
-            </ReactiveFallback>
-          </RecoveryNode>
-        </RateController>
-        <RecoveryNode number_of_retries="0" name="FollowPath">
-          <FollowPath path="{path}" controller_id="FollowPath"/>
-          <ReactiveFallback name="FollowPathRecoveryFallback">
-            <GoalUpdated/>
-            <ClearEntireCostmap name="ClearLocalCostmap-Context" \
-service_name="local_costmap/clear_entirely_local_costmap"/>
-          </ReactiveFallback>
-        </RecoveryNode>
-      </PipelineSequence>
-      <ReactiveFallback name="RecoveryFallback">
-        <GoalUpdated/>
-        <RoundRobin name="RecoveryActions">
-          <Sequence name="ClearingActions">
-            <ClearEntireCostmap name="ClearLocalCostmap-Subtree" \
-service_name="local_costmap/clear_entirely_local_costmap"/>
-            <ClearEntireCostmap name="ClearGlobalCostmap-Subtree" \
-service_name="global_costmap/clear_entirely_global_costmap"/>
-          </Sequence>
-          <Spin spin_dist="1.57"/>
-          <Wait wait_duration="5"/>
-          <BackUp backup_dist="0.15" backup_speed="0.025"/>
-        </RoundRobin>
-      </ReactiveFallback>
-    </RecoveryNode>
-  </BehaviorTree>
-</root>
-"""
 
 
 class RobotTmapping(Node):
@@ -175,11 +111,15 @@ class RobotTmapping(Node):
         self.robot_pose_msg = Pose()
         self.robot_imu_msg = None
 
-        # -- Load node template from package config ----------------------------
+        # -- Load templates from package config --------------------------------
         toponav_dir = get_package_share_directory('topological_navigation')
         config_dir = os.path.join(toponav_dir, 'config')
         self.template_node = self._load_yaml(
-            os.path.join(config_dir, 'template_node_2.yaml'))
+            os.path.join(config_dir, 'template_node.yaml'))
+        self.template_edge = self._load_yaml(
+            os.path.join(config_dir, 'template_edge.yaml'))
+        self.template_action = self._load_yaml(
+            os.path.join(config_dir, 'template_action.yaml'))
 
         # -- QoS (transient-local, same as map_manager2) -----------------------
         self._latched_qos = QoSProfile(
@@ -241,7 +181,7 @@ class RobotTmapping(Node):
     # ==================================================================
 
     def _init_topomap(self):
-        """Create an empty topomap dict matching test_simple_tmap2.yaml."""
+        """Create an empty topomap dict using loaded template files."""
         self.topomap = {
             "meta": {
                 "last_updated": self._get_time(),
@@ -255,25 +195,12 @@ class RobotTmapping(Node):
                 "rotation":    {"w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0},
                 "translation": {"x": 0.0, "y": 0.0, "z": 0.0},
             },
-            "definitions": {
-                "default_bt": _DEFAULT_BT,
-            },
-            "actions": {
-                "navigate_to_pose": {
-                    "composable": False,
-                    "action_type": "nav2_msgs/NavigateToPose",
-                    "action_server": "/navigate_to_pose",
-                    "action_goal_template": {
-                        "pose": {
-                            "header": {
-                                "frame_id": "${node.nav_frame}",
-                            },
-                            "pose": "${node.pose}",
-                        },
-                        "behavior_tree": "${definitions.default_bt}",
-                    },
-                },
-            },
+            "definitions": deepcopy(
+                self.template_action.get("definitions", {})
+            ),
+            "actions": deepcopy(
+                self.template_action.get("actions", {})
+            ),
             "nodes": [],
         }
 
@@ -463,21 +390,19 @@ class RobotTmapping(Node):
             edge_id_fwd = f"{src_name}_{dst_name}"
             existing_ids = {e["edge_id"] for e in edges_map[src_name]}
             if edge_id_fwd not in existing_ids:
-                edges_map[src_name].append({
-                    "action": "navigate_to_pose",
-                    "edge_id": edge_id_fwd,
-                    "node": dst_name,
-                })
+                fwd = deepcopy(self.template_edge)
+                fwd["edge_id"] = edge_id_fwd
+                fwd["node"] = dst_name
+                edges_map[src_name].append(fwd)
 
             # Reverse edge (dst -> src)
             edge_id_rev = f"{dst_name}_{src_name}"
             existing_ids_dst = {e["edge_id"] for e in edges_map[dst_name]}
             if edge_id_rev not in existing_ids_dst:
-                edges_map[dst_name].append({
-                    "action": "navigate_to_pose",
-                    "edge_id": edge_id_rev,
-                    "node": src_name,
-                })
+                rev = deepcopy(self.template_edge)
+                rev["edge_id"] = edge_id_rev
+                rev["node"] = src_name
+                edges_map[dst_name].append(rev)
 
             # Yaw: point from src toward its closest neighbour
             if src_name not in node_yaws:
@@ -509,34 +434,30 @@ class RobotTmapping(Node):
                     "w": float(pose.orientation.w),
                 }
 
-            # Rotate influence zone vertices to match orientation
-            rotated_verts = self._rotate_verts(
-                _DEFAULT_VERTS, node_yaws.get(name, 0.0))
+            # Build node dict from template
+            node_dict = deepcopy(self.template_node)
 
-            node_dict = {
-                "meta": {
-                    "map": self.site_name,
-                    "node": name,
-                    "pointset": self.pointset,
-                },
-                "node": {
-                    "edges": edges_map.get(name, []),
-                    "name": name,
-                    "pose": {
-                        "orientation": orientation,
-                        "position": {
-                            "x": float(pose.position.x),
-                            "y": float(pose.position.y),
-                            "z": float(pose.position.z),
-                        },
-                    },
-                    "properties": {
-                        "xy_goal_tolerance": 0.3,
-                        "yaw_goal_tolerance": 6.28,
-                    },
-                    "verts": rotated_verts,
-                },
+            # Populate meta
+            node_dict["meta"]["map"] = self.site_name
+            node_dict["meta"]["node"] = name
+            node_dict["meta"]["pointset"] = self.pointset
+
+            # Populate node fields
+            nd = node_dict["node"]
+            nd["edges"] = edges_map.get(name, [])
+            nd["name"] = name
+            nd["pose"]["orientation"] = orientation
+            nd["pose"]["position"] = {
+                "x": float(pose.position.x),
+                "y": float(pose.position.y),
+                "z": float(pose.position.z),
             }
+
+            # Rotate template influence-zone vertices to match orientation
+            template_verts = nd.get("verts", [])
+            nd["verts"] = self._rotate_verts(
+                template_verts, node_yaws.get(name, 0.0))
+
             self.topomap["nodes"].append(node_dict)
 
         self.topomap["meta"]["last_updated"] = self._get_time()
