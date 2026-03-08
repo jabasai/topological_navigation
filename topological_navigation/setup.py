@@ -13,7 +13,10 @@ setup(
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
         ('share/' + package_name + '/config/', glob('config/*', recursive=True)),
-        ('share/' + package_name + '/launch/', glob('launch/*', recursive=True))
+        ('share/' + package_name + '/config/',
+            glob('test/fixtures/mixed_actions_map.yaml')),
+        ('share/' + package_name + '/launch/', glob('launch/*', recursive=True)),
+        ('share/' + package_name + '/rviz/', glob('rviz/*', recursive=True)),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
