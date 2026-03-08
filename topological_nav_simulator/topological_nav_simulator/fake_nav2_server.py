@@ -191,9 +191,12 @@ class FakeNav2Server(Node):
         if success:
             goal_handle.succeed()
             self.get_logger().info('NavigateToPose succeeded')
+        elif goal_handle.is_cancel_requested or goal_handle.status == 5:
+            # Already transitioned to CANCELED inside _move_to_pose
+            self.get_logger().info('NavigateToPose cancelled')
         else:
             goal_handle.abort()
-            self.get_logger().warn('NavigateToPose aborted/cancelled')
+            self.get_logger().warn('NavigateToPose aborted')
         return result
 
     # ── NavigateThroughPoses ─────────────────────────────────────────────
@@ -223,9 +226,12 @@ class FakeNav2Server(Node):
         if success:
             goal_handle.succeed()
             self.get_logger().info('NavigateThroughPoses succeeded')
+        elif goal_handle.is_cancel_requested or goal_handle.status == 5:
+            # Already transitioned to CANCELED inside _move_to_pose
+            self.get_logger().info('NavigateThroughPoses cancelled')
         else:
             goal_handle.abort()
-            self.get_logger().warn('NavigateThroughPoses aborted/cancelled')
+            self.get_logger().warn('NavigateThroughPoses aborted')
         return result
 
     # ── FollowWaypoints ──────────────────────────────────────────────────
@@ -256,6 +262,9 @@ class FakeNav2Server(Node):
         if not missed:
             goal_handle.succeed()
             self.get_logger().info('FollowWaypoints succeeded')
+        elif goal_handle.is_cancel_requested or goal_handle.status == 5:
+            # Already transitioned to CANCELED inside _move_to_pose
+            self.get_logger().info('FollowWaypoints cancelled')
         else:
             goal_handle.abort()
             self.get_logger().warn(
