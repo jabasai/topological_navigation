@@ -71,7 +71,8 @@ VALID_TRANSITIONS: Dict[NavState, set] = {
     NavState.WAITING_FOR_LOCALISATION: {NavState.READY},
     NavState.READY: {NavState.PLANNING, NavState.CANCELLED},
     NavState.PLANNING: (
-        _EXECUTING_STATES | {NavState.FAILED, NavState.CANCELLED}
+        _EXECUTING_STATES | {NavState.SUCCEEDED, NavState.FAILED,
+                             NavState.CANCELLED}
     ),
     NavState.EXECUTING_NAVIGATE_TO_POSE: (
         _EXEC_AND_TERMINAL
