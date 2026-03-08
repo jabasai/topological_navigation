@@ -42,7 +42,7 @@ from tf2_ros import TransformException
 from tf2_ros.buffer import Buffer
 from tf2_ros.transform_listener import TransformListener
 
-from topological_navigation.map_types import CustomSafeLoader
+from topological_navigation.tmap_utils import CustomSafeLoader
 from topological_navigation.networkx_utils import (
     build_graph_from_tmap,
     build_kdtree_from_graph,

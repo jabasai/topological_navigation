@@ -24,6 +24,12 @@ class CustomSafeLoader(yaml.SafeLoader):
         return mapping
 # ========================
 
+class NoAliasDumper(yaml.SafeDumper):
+    """YAML dumper that disables aliases/anchors for cleaner output."""
+    def ignore_aliases(self, data):
+        return True
+# ========================
+
 def get_node(top_map, node_name):
     """
     Given a topological map and a node name it returns the node object

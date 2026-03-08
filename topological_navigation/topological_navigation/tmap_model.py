@@ -4,7 +4,7 @@ import datetime
 import logging
 import jsonschema
 
-from topological_navigation.map_types import CustomSafeLoader
+from topological_navigation.tmap_utils import CustomSafeLoader
 
 # Helper for YAML dumping
 class NoAliasDumper(yaml.SafeDumper):

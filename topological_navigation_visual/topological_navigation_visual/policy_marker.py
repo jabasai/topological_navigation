@@ -18,7 +18,7 @@ from std_msgs.msg import String
 from visualization_msgs.msg import Marker, MarkerArray
 from tf_transformations import quaternion_from_euler
 
-from topological_navigation.map_types import CustomSafeLoader
+from topological_navigation.tmap_utils import CustomSafeLoader
 from topological_navigation.networkx_utils import build_graph_from_tmap
 from topological_navigation.tmap_utils import get_edge_from_id_tmap2
 

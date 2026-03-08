@@ -57,8 +57,7 @@ from visualization_msgs.msg import (
 from rclpy.action import ActionClient
 from interactive_markers import InteractiveMarkerServer, MenuHandler
 
-from topological_navigation.map_types import CustomSafeLoader
-import topological_navigation.tmap_utils as tmap_utils
+from topological_navigation.tmap_utils import CustomSafeLoader
 from topological_navigation.navigation_graph import plan_route
 from topological_navigation.networkx_utils import build_graph_from_tmap
 from topological_navigation_msgs.action import GotoNode

@@ -30,30 +30,12 @@ from geometry_msgs.msg import Vector3, Quaternion, TransformStamped
 from std_srvs.srv import Trigger
 import topological_navigation_msgs.srv as tn_srv
 
+from topological_navigation.tmap_utils import CustomSafeLoader, NoAliasDumper
+
 try:
     import jsonschema
 except ImportError:
     jsonschema = None
-
-
-#########################################################################################################
-# YAML Helpers (self-contained, no external imports)
-#########################################################################################################
-
-class CustomSafeLoader(yaml.SafeLoader):
-    """Custom YAML loader that ensures pose/vector keys are float-type."""
-    def construct_mapping(self, node, deep=False):
-        mapping = super().construct_mapping(node, deep=deep)
-        for key in ['x', 'y', 'z', 'w', 'yaw_goal_tolerance', 'xy_goal_tolerance']:
-            if key in mapping and isinstance(mapping[key], int):
-                mapping[key] = float(mapping[key])
-        return mapping
-
-
-class NoAliasDumper(yaml.SafeDumper):
-    """YAML dumper that disables aliases/anchors for cleaner output."""
-    def ignore_aliases(self, data):
-        return True
 
 
 #########################################################################################################
