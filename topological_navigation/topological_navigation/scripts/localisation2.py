@@ -21,6 +21,8 @@ Subscriptions:
     /topological_map_2      (std_msgs/String)   - YAML-encoded topological map
 """
 
+import threading
+
 import numpy as np
 import rclpy
 import yaml
@@ -101,6 +103,10 @@ class TopologicalNavLoc(rclpy.node.Node):
         self._kdtree = None
         self._kdtree_node_names: list = []
 
+        # Lock protects _graph, _kdtree, _kdtree_node_names, loc_by_topic,
+        # names_by_topic, and nogos during concurrent map rebuilds.
+        self._map_lock = threading.Lock()
+
         self.with_tags = with_tags
 
         # -- QoS profile (transient-local for late-joining subscribers) -------
@@ -120,8 +126,9 @@ class TopologicalNavLoc(rclpy.node.Node):
 
         # -- Localisation state -----------------------------------------------
         self.rec_map = False
-        self.set_nogos = False
         self.loc_by_topic: list = []
+        self.names_by_topic: list = []
+        self.nogos: list = []
 
         self.current_pose = Pose()
 
@@ -147,15 +154,12 @@ class TopologicalNavLoc(rclpy.node.Node):
         )
 
         # -- Wait for the first map -------------------------------------------
+        # _map_callback already rebuilds graph, KD-tree, nogos, and
+        # loc_by_topic, so we only need to wait for rec_map here.
         self.get_logger().info("Waiting for the topological map on /topological_map_2 ...")
         while rclpy.ok():
             rclpy.spin_once(self)
             if self.rec_map:
-                if self.with_tags:
-                    self.nogos = self._get_no_go_nodes()
-                    self.set_nogos = True
-                else:
-                    self.nogos = []
                 self.get_logger().info(f"No-go nodes: {self.nogos}")
                 self.get_logger().info(f"Localise-by-topic nodes: {self.names_by_topic}")
                 self.get_logger().info(
@@ -173,18 +177,22 @@ class TopologicalNavLoc(rclpy.node.Node):
         """Return edge-ID list and distance array for all edges relative to *pose*.
 
         Uses the NetworkX graph for vectorised edge distance calculations.
+        Thread-safe: takes a snapshot of the graph under the map lock.
 
         Returns:
             Tuple ``(edge_ids, distances)`` - both may be empty if the graph
             is unavailable.
         """
-        if self._graph is None:
+        with self._map_lock:
+            graph = self._graph
+
+        if graph is None:
             self.get_logger().warning(
                 "Cannot compute edge distances: graph not yet available"
             )
             return [], np.array([])
 
-        return get_edge_distances_nx(self._graph, pose, logger=self.get_logger())
+        return get_edge_distances_nx(graph, pose, logger=self.get_logger())
 
     # -----------------------------------------------------------------
     # Periodic TF-based localisation
@@ -216,7 +224,17 @@ class TopologicalNavLoc(rclpy.node.Node):
             self.throttle += 1
             return
 
-        if self._graph is None or self._kdtree is None:
+        # Snapshot data structures under the lock so we work with a
+        # consistent view even if a map update arrives mid-callback.
+        with self._map_lock:
+            graph = self._graph
+            kdtree = self._kdtree
+            kdtree_names = self._kdtree_node_names
+            loc_by_topic = self.loc_by_topic
+            nogos = list(self.nogos)
+            names_by_topic = list(self.names_by_topic)
+
+        if graph is None or kdtree is None:
             self.get_logger().warning(
                 "Localisation skipped: graph or KD-tree not ready"
             )
@@ -225,18 +243,18 @@ class TopologicalNavLoc(rclpy.node.Node):
 
         # Current node (inside influence zone)
         currentstr = determine_current_node(
-            self._graph, self._kdtree, self._kdtree_node_names,
-            msg, self.loc_by_topic, self.nogos,
+            graph, kdtree, kdtree_names,
+            msg, loc_by_topic, nogos,
         )
 
         # Closest node by distance
         closeststr, closest_dist = determine_closest_node(
-            self._kdtree, self._kdtree_node_names, self._graph,
-            currentstr, self.nogos, self.names_by_topic, msg,
+            kdtree, kdtree_names, graph,
+            currentstr, nogos, names_by_topic, msg,
         )
 
         # Closest edges (computed from the *current* pose)
-        closest_edges, edge_dists = self.get_edge_distances_to_pose(msg)
+        closest_edges, edge_dists = get_edge_distances_nx(graph, msg, logger=self.get_logger())
         if len(closest_edges) > 1:
             closest_edges = closest_edges[:2]
             edge_dists = edge_dists[:2]
@@ -348,42 +366,68 @@ class TopologicalNavLoc(rclpy.node.Node):
     # -----------------------------------------------------------------
 
     def _map_callback(self, msg):
-        """Handle incoming topological map - build graph and KD-tree."""
+        """Handle incoming topological map - build graph and KD-tree.
 
-        self.names_by_topic: list = []
-        self.nogos: list = []
+        This callback is safe to invoke repeatedly: on every update the
+        graph, KD-tree, topic-based localisation config, and no-go nodes
+        are fully rebuilt so that localisation keeps working after node
+        positions, edges, or properties change at runtime.
+        """
+        is_update = self.rec_map
+        label = "Updated" if is_update else "Received"
 
         self.tmap = yaml.load(msg.data, Loader=CustomSafeLoader)
         self.tmap_frame = self.tmap["transformation"]["topological_frame_id"]
-        self.get_logger().info("Received the topological map")
+        self.get_logger().info(f"{label} the topological map")
 
-        # Build NetworkX graph
-        self._graph = build_graph_from_tmap(self.tmap, logger=self.get_logger())
-        if self._graph is None:
+        # Build new graph and KD-tree in local variables first so the
+        # live data structures remain consistent until the swap.
+        new_graph = build_graph_from_tmap(self.tmap, logger=self.get_logger())
+        if new_graph is None:
             self.get_logger().error("Failed to build the NetworkX graph – aborting map load")
             return
         self.get_logger().info(
-            f"Graph built: {self._graph.number_of_nodes()} nodes, "
-            f"{self._graph.number_of_edges()} edges"
+            f"Graph built: {new_graph.number_of_nodes()} nodes, "
+            f"{new_graph.number_of_edges()} edges"
         )
 
-        # Build KD-tree
-        self._kdtree, self._kdtree_node_names = build_kdtree_from_graph(
-            self._graph, logger=self.get_logger(),
+        new_kdtree, new_kdtree_node_names = build_kdtree_from_graph(
+            new_graph, logger=self.get_logger(),
         )
-        if self._kdtree is None:
+        if new_kdtree is None:
             self.get_logger().error("Failed to build KD-tree – aborting map load")
             return
         self.get_logger().info(
-            f"KD-tree built with {len(self._kdtree_node_names)} nodes"
+            f"KD-tree built with {len(new_kdtree_node_names)} nodes"
         )
 
         # Topic-based localisation config
-        _, self.names_by_topic = update_loc_by_topic_nx(
-            self._graph, logger=self.get_logger(),
+        new_loc_by_topic, new_names_by_topic = update_loc_by_topic_nx(
+            new_graph, logger=self.get_logger(),
         )
 
+        # Re-query no-go nodes (may have changed with the map update)
+        if self.with_tags:
+            new_nogos = self._get_no_go_nodes()
+        else:
+            new_nogos = []
+
+        # Atomically swap all data structures under the lock so that
+        # _pose_callback never sees a half-rebuilt state.
+        with self._map_lock:
+            self._graph = new_graph
+            self._kdtree = new_kdtree
+            self._kdtree_node_names = new_kdtree_node_names
+            self.loc_by_topic = new_loc_by_topic
+            self.names_by_topic = new_names_by_topic
+            self.nogos = new_nogos
+
         self.rec_map = True
+        if is_update:
+            self.get_logger().info(
+                "Map update applied – graph, KD-tree, no-go nodes, "
+                "and topic-based localisation refreshed"
+            )
 
     # -----------------------------------------------------------------
     # Localise-pose service
@@ -391,7 +435,14 @@ class TopologicalNavLoc(rclpy.node.Node):
 
     def localise_pose_cb(self, req, res):
         """Service callback: localise a given pose in the topological map."""
-        if self._graph is None or self._kdtree is None:
+        with self._map_lock:
+            graph = self._graph
+            kdtree = self._kdtree
+            kdtree_names = self._kdtree_node_names
+            nogos = list(self.nogos)
+            names_by_topic = list(self.names_by_topic)
+
+        if graph is None or kdtree is None:
             self.get_logger().warning(
                 "localise_pose service called before map is ready"
             )
@@ -400,12 +451,12 @@ class TopologicalNavLoc(rclpy.node.Node):
             return res
 
         currentstr = determine_current_node(
-            self._graph, self._kdtree, self._kdtree_node_names,
-            req.pose, [], self.nogos,  # no topic-based loc for one-shot queries
+            graph, kdtree, kdtree_names,
+            req.pose, [], nogos,  # no topic-based loc for one-shot queries
         )
         closeststr, _ = determine_closest_node(
-            self._kdtree, self._kdtree_node_names, self._graph,
-            currentstr, self.nogos, self.names_by_topic, req.pose,
+            kdtree, kdtree_names, graph,
+            currentstr, nogos, names_by_topic, req.pose,
         )
 
         res.current_node = currentstr

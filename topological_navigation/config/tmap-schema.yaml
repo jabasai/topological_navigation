@@ -48,7 +48,7 @@ properties:
           required:
             - edges
             - name
-            - parent_frame
+            # - parent_frame
           additionalProperties: true
           properties:
             edges:

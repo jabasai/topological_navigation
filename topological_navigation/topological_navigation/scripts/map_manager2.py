@@ -306,7 +306,7 @@ class map_manager_2(rclpy.node.Node):
             self.tmap["transformation"] = self.transformation
 
         self.map_pub.publish(std_msgs.msg.String(data=json.dumps(self.tmap)))
-        self.broadcaster = tf2_ros.transform_broadcaster.TransformBroadcaster(self)
+        self.broadcaster = tf2_ros.StaticTransformBroadcaster(self)
         self.broadcast_transform()
 
     # ------------------------------------------------------------------
@@ -327,13 +327,23 @@ class map_manager_2(rclpy.node.Node):
             rot, self.transformation.get("rotation", {})
         )
 
+        # Use topological_frame_id as the child frame so localisation
+        # can look up the transform to the frame the map is defined in.
+        child_frame = self.transformation.get(
+            "topological_frame_id",
+            self.transformation.get("child", "topo_map"),
+        )
+
         msg = TransformStamped()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = self.transformation.get("parent", "map")
-        msg.child_frame_id = self.transformation.get("child", "topo_map")
+        msg.child_frame_id = child_frame
         msg.transform.translation = trans
         msg.transform.rotation = rot
         self.broadcaster.sendTransform(msg)
+        self.get_logger().info(
+            f'Broadcasting static TF: {msg.header.frame_id} -> {child_frame}'
+        )
 
     # ------------------------------------------------------------------
     # Parameter callback

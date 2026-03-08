@@ -139,21 +139,21 @@ definitions:
 actions:
   navigate_to_pose:
     composable: false
-    action_type: nav2_msgs/NavigateToPose
+    action_type: nav2_msgs.action.NavigateToPose
     action_server: /navigate_to_pose
     action_goal_template:
       pose: '${node.pose}'
       behavior_tree: '${definitions.default_bt}'
   goal_align:
     composable: false
-    action_type: nav2_msgs/NavigateToPose
+    action_type: nav2_msgs.action.NavigateToPose
     action_server: /navigate_to_pose
     action_goal_template:
       pose: '${node.pose}'
       behavior_tree: '${definitions.goal_align_bt}'
   row_traversal:
     composable: true
-    action_type: nav2_msgs/NavigateThroughPoses
+    action_type: nav2_msgs.action.NavigateThroughPoses
     action_server: /navigate_through_poses
     action_goal_template:
       poses: ['${node.pose}']

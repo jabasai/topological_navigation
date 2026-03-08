@@ -40,14 +40,13 @@ ROS 2 interfaces
         max_dist_to_closest_edge  (double)  -- origin heuristic
         default_boundary_left     (double)  -- row corridor left
         default_boundary_right    (double)  -- row corridor right
-        reconfigure_edges         (bool)    -- enable edge reconfig
-        reconfigure_edges_srv     (bool)    -- srv-based reconfig
         route_algorithm           (string)  -- 'astar' | 'dijkstra'
         route_weight_attr         (string)  -- edge attribute for cost
 
 Last Updated: 2026-02-25
 """
 
+import importlib
 import json
 import os
 import tempfile
@@ -60,7 +59,6 @@ import rclpy
 import rclpy.node
 from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import Point32, PolygonStamped, PoseStamped
-from nav2_msgs.action import NavigateToPose, NavigateThroughPoses
 from rclpy import Parameter
 from rclpy.action import ActionClient, ActionServer
 from rclpy.callback_groups import (
@@ -70,15 +68,13 @@ from rclpy.callback_groups import (
 from rclpy.executors import MultiThreadedExecutor, SingleThreadedExecutor
 from rclpy.qos import (
     DurabilityPolicy,
+    HistoryPolicy,
     QoSHistoryPolicy,
     QoSProfile,
     ReliabilityPolicy,
 )
 from std_msgs.msg import String
 
-from topological_navigation.edge_reconfigure_manager2 import (
-    EdgeReconfigureManager,
-)
 from topological_navigation.navigation_graph import (
     ACTION_TO_STATE,
     NavState,
@@ -103,17 +99,6 @@ from topological_navigation_msgs.msg import (
     TopologicalRoute,
 )
 from topological_navigation_msgs.srv import EvaluateEdge, EvaluateNode
-
-
-# =====================================================================
-# Action-type string -> ROS 2 class mapping
-# =====================================================================
-
-_ACTION_TYPE_MAP = {
-    'nav2_msgs/NavigateToPose': NavigateToPose,
-    'nav2_msgs/NavigateThroughPoses': NavigateThroughPoses,
-}
-
 
 # =====================================================================
 # GoalStatus helpers
@@ -215,7 +200,7 @@ class TopologicalNavServer(rclpy.node.Node):
 
     All action clients, BT selection, and composability rules are
     derived from the ``definitions`` and ``actions`` sections of the
-    topological map YAML.  NetworkX path-planning parameters are
+    topological map YAML. NetworkX path-planning parameters are
     exposed as ROS 2 parameters.
     """
 
@@ -247,7 +232,7 @@ class TopologicalNavServer(rclpy.node.Node):
 
         # -- Deferred map update (thread-safe buffering) -------------
         self._pending_map_msg = None
-        self._map_lock = threading.Lock()
+        self._map_lock = threading.RLock()
         self._map_updated_during_nav = False
 
         # -- Map-driven config (populated by _load_map_config) -------
@@ -277,8 +262,11 @@ class TopologicalNavServer(rclpy.node.Node):
         # -- QoS -----------------------------------------------------
         self._latch = QoSProfile(
             depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            history=HistoryPolicy.KEEP_LAST,
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
         )
+        
         self._best = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
             history=QoSHistoryPolicy.KEEP_LAST,
@@ -340,20 +328,6 @@ class TopologicalNavServer(rclpy.node.Node):
             ),
         )
 
-        # -- Edge reconfigure ----------------------------------------
-        self._edge_reconf_enabled = self.get_parameter_or(
-            "reconfigure_edges",
-            Parameter('b', Parameter.Type.BOOL, True),
-        ).value
-        self._srv_edge_reconf = self.get_parameter_or(
-            "reconfigure_edges_srv",
-            Parameter('b', Parameter.Type.BOOL, False),
-        ).value
-        if self._edge_reconf_enabled:
-            self._edge_reconf_mgr = EdgeReconfigureManager()
-        else:
-            self._edge_reconf_mgr = None
-
         # -- Localisation subscription (blocking wait) ---------------
         self._sm.transition(NavState.WAITING_FOR_LOCALISATION)
         self._publish_status("WAITING_FOR_LOCALISATION")
@@ -376,30 +350,6 @@ class TopologicalNavServer(rclpy.node.Node):
             String, 'current_node', self._current_node_cb,
             qos_profile=self._latch,
         )
-
-        # -- Restrictions (optional) ---------------------------------
-        self._using_restrictions = False
-        try:
-            self._eval_edge_srv = self.create_client(
-                EvaluateEdge, '/restrictions_manager/evaluate_edge',
-            )
-            if self._eval_edge_srv.wait_for_service(timeout_sec=3.0):
-                self._eval_node_srv = self.create_client(
-                    EvaluateNode, '/restrictions_manager/evaluate_node',
-                )
-                self._using_restrictions = True
-                self.get_logger().info("[INIT] Restrictions services OK")
-            else:
-                self.get_logger().warning(
-                    "[INIT] Restrictions services unavailable",
-                )
-        except Exception as exc:
-            self.get_logger().error(
-                "[INIT] Restrictions probe error: %s" % exc,
-            )
-
-        # -- Fail-policy state ---------------------------------------
-        self._fail_policy_state = {}
 
         # -- Action servers ------------------------------------------
         self._sm.transition(NavState.READY)
@@ -445,8 +395,6 @@ class TopologicalNavServer(rclpy.node.Node):
         """Declare all ROS 2 parameters."""
         for name, ptype in [
             ('max_dist_to_closest_edge', Parameter.Type.DOUBLE),
-            ('reconfigure_edges', Parameter.Type.BOOL),
-            ('reconfigure_edges_srv', Parameter.Type.BOOL),
             ('default_boundary_left', Parameter.Type.DOUBLE),
             ('default_boundary_right', Parameter.Type.DOUBLE),
             # NetworkX path optimisation
@@ -484,6 +432,13 @@ class TopologicalNavServer(rclpy.node.Node):
     # =================================================================
     # Map-driven configuration
     # =================================================================
+
+    def _load_action_type(self, type_str):
+        # Example: nav2_msgs.action.NavigateThroughPoses
+        module_name, class_name = type_str.rsplit('.', 1)
+        module = importlib.import_module(module_name)
+        return getattr(module, class_name)
+    
 
     def _load_map_config(self):
         """Extract ``definitions`` and ``actions`` from the topomap.
@@ -558,12 +513,14 @@ class TopologicalNavServer(rclpy.node.Node):
         for act_name, act_cfg in self._map_actions.items():
             type_str = act_cfg.get('action_type', '')
             server = act_cfg.get('action_server', '')
-            action_class = _ACTION_TYPE_MAP.get(type_str)
 
-            if action_class is None:
+            # Dynamically import the action type (e.g. nav2_msgs.action.NavigateToPose)
+            try:
+                action_class = self._load_action_type(type_str)
+            except Exception as exc:
                 self.get_logger().warning(
-                    "[MAP] Unknown action_type '%s' for '%s'"
-                    % (type_str, act_name),
+                    "[MAP] Cannot load action_type '%s' for '%s': %s"
+                    % (type_str, act_name, exc),
                 )
                 continue
 
@@ -1712,8 +1669,6 @@ def main():
     node = TopologicalNavServer('topological_navigation')
     executor = MultiThreadedExecutor()
     executor.add_node(node)
-    if node._edge_reconf_mgr is not None:
-        executor.add_node(node._edge_reconf_mgr)
     try:
         executor.spin()
     except KeyboardInterrupt:

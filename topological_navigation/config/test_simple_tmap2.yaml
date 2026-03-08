@@ -173,6 +173,7 @@ nodes:
           edge_id: node0_node1
           node: node1
       name: node0
+      parent_frame: test_map
       pose:
         orientation:
           w: 1.0
@@ -214,6 +215,7 @@ nodes:
           edge_id: node1_node2
           node: node2
       name: node1
+      parent_frame: test_map
       pose:
         orientation:
           w: 1.0
@@ -255,6 +257,7 @@ nodes:
           edge_id: node2_node3
           node: node3
       name: node2
+      parent_frame: test_map
       pose:
         orientation:
           w: 1.0
@@ -296,6 +299,7 @@ nodes:
           edge_id: node3_node4
           node: node4
       name: node3
+      parent_frame: test_map
       pose:
         orientation:
           w: 1.0
@@ -334,6 +338,7 @@ nodes:
     node:
       edges: []
       name: node4
+      parent_frame: test_map
       pose:
         orientation:
           w: 1.0
