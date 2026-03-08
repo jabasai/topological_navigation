@@ -6,7 +6,7 @@ package_name = 'topological_navigation'
 
 setup(
     name=package_name,
-    version='4.0.0',  # Major version bump - ROS1 code removed
+    version='5.0.0',  # Major version bump - ROS1 code removed
     packages=find_packages(),
     data_files=[
         ('share/ament_index/resource_index/packages',
@@ -20,8 +20,8 @@ setup(
     ],
     install_requires=['setuptools'],
     zip_safe=True,
-    maintainer='Adam Binch',
-    maintainer_email='abinch@sagarobotics.com',
+    maintainer='Ibrahim Hroob',
+    maintainer_email='ihroob@lincoln.ac.uk',
     description='ROS2 topological navigation package (ROS1 support removed in v4.0.0)',
     license='MIT',
     tests_require=['pytest', 'launch-pytest'],
@@ -31,24 +31,14 @@ setup(
             'navigation2.py = topological_navigation.scripts.navigation2:main',
             'localisation2.py = topological_navigation.scripts.localisation2:main',
             'map_manager2.py = topological_navigation.scripts.map_manager2:main',
-            'get_simple_policy2.py = topological_navigation.scripts.get_simple_policy2:main',
 
             # Supporting Utilities
-            'occupancy_checker.py = topological_navigation.scripts.occupancy_checker:main',
-            'topological_transform_publisher.py = topological_navigation.scripts.topological_transform_publisher:main',
             'manual_topomapping.py = topological_navigation.scripts.manual_topomapping:main',
-            'validate_map.py = topological_navigation.scripts.validate_map:main',
-
-            # Networkx
-            'networkx_utils.py = topological_navigation.scripts.networkx_utils:main',
+            'validate_map.py = topological_navigation.validate_map:main',
 
             # Map conversion
-            'convert_tmap.py = topological_navigation.scripts.convert_tmap:main',
+            'convert_tmap.py = topological_navigation.convert_tmap:main',
         ],
     },
 
 )
-
-
-
-
