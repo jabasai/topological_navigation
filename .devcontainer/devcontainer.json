@@ -9,10 +9,9 @@
 		"ghcr.io/devcontainers/features/desktop-lite:1": {}
 	},
 
-	"forwardPorts": [6080, 5901],
+	"forwardPorts": [6080],
 	"portsAttributes": {
-		"6080": { "label": "novnc" },
-		"5901": { "label": "vnc" }
+		"6080": { "label": "novnc" }
 	},
 
 	"postCreateCommand": "bash .devcontainer/run.sh",
@@ -34,7 +33,8 @@
 				"nonanonno.vscode-ros2",
 				"deitry.colcon-helper",
 				"yzhang.markdown-all-in-one",
-				"github.vscode-github-actions"
+				"github.vscode-github-actions",
+				"ArshadKhan.topological-map-visual"
 			]
 		}
 	}
