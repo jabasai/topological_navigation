@@ -137,9 +137,9 @@ class RouteVisualiserNode(Node):
             x=e['position'][0], y=e['position'][1], z=e['position'][2] + 0.25
         )
         m.pose.orientation.w = 1.0
-        m.scale.x = 0.2
-        m.scale.y = 0.2
-        m.scale.z = 0.4
+        m.scale.x = 0.08
+        m.scale.y = 0.12
+        m.scale.z = 0.2
         m.color.a = 1.0
         m.color.r = 0.33
         m.color.g = 0.99

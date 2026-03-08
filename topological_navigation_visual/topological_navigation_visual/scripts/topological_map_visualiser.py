@@ -135,6 +135,9 @@ class TopologicalMapVisualiser(Node):
         self._current_node: str = 'none'
         self._closest_node: str = 'none'
         self._route_nodes: list = []  # ordered node names on active route
+        self._pending_route_target: str | None = None
+        self._route_retry_timer = None
+        self._initial_vis_timer = None
 
         # ── Debounced republish after drag ────────────────────────
         self._republish_timer = None
@@ -210,6 +213,11 @@ class TopologicalMapVisualiser(Node):
             self._load_map_from_file()
             self._publish_map_topic()
             self._rebuild_visualisation()
+            # Delayed re-publish so late-subscribing RViz gets markers
+            self._initial_vis_timer = self.create_timer(
+                2.0, self._delayed_initial_vis,
+                callback_group=self._cb_group,
+            )
         else:
             self.get_logger().info(
                 'No map_file parameter — subscribing to /topological_map_2'
@@ -315,6 +323,13 @@ class TopologicalMapVisualiser(Node):
         )
         self.get_logger().info('Received updated map from topic')
         self._rebuild_visualisation()
+        # Delayed re-publish so late-subscribing RViz gets markers
+        if self._initial_vis_timer is not None:
+            self.destroy_timer(self._initial_vis_timer)
+        self._initial_vis_timer = self.create_timer(
+            2.0, self._delayed_initial_vis,
+            callback_group=self._cb_group,
+        )
 
     def _save_map_service(self, request, response):
         ok = self.save_map()
@@ -328,6 +343,17 @@ class TopologicalMapVisualiser(Node):
         if self._map_dirty:
             self.get_logger().info('Auto-saving map…')
             self.save_map()
+
+    def _delayed_initial_vis(self):
+        """One-shot republish so late-subscribing RViz gets markers."""
+        if self._initial_vis_timer is not None:
+            self.destroy_timer(self._initial_vis_timer)
+            self._initial_vis_timer = None
+        if self.tmap is not None:
+            self._rebuild_static_markers()
+            self.get_logger().debug(
+                'Deferred map visualisation republished'
+            )
 
     # ──────────────────────────────────────────────────────────────
     #  GotoNode navigation helpers
@@ -419,9 +445,15 @@ class TopologicalMapVisualiser(Node):
         """Compute route from current node to target and publish markers."""
         source = self._get_source_node()
         if source == 'none':
-            self.get_logger().warn(
-                'Cannot highlight route — current/closest node unknown'
+            self.get_logger().info(
+                'Source node unknown — will retry route highlight'
             )
+            self._pending_route_target = target
+            if self._route_retry_timer is None:
+                self._route_retry_timer = self.create_timer(
+                    0.5, self._retry_route_highlight,
+                    callback_group=self._cb_group,
+                )
             return
         if self._graph is None:
             if self.tmap is not None:
@@ -451,6 +483,28 @@ class TopologicalMapVisualiser(Node):
             f'Route highlighted: {" → ".join(self._route_nodes)}'
         )
         self._publish_route_markers()
+
+    def _retry_route_highlight(self):
+        """Timer callback: retry route highlighting once source is known."""
+        if self._pending_route_target is None or self._navigating_to is None:
+            # Navigation finished or cancelled before source appeared
+            self._pending_route_target = None
+            if self._route_retry_timer is not None:
+                self.destroy_timer(self._route_retry_timer)
+                self._route_retry_timer = None
+            return
+
+        source = self._get_source_node()
+        if source == 'none':
+            return  # Still unknown — timer will fire again
+
+        target = self._pending_route_target
+        self._pending_route_target = None
+        if self._route_retry_timer is not None:
+            self.destroy_timer(self._route_retry_timer)
+            self._route_retry_timer = None
+
+        self._compute_and_highlight_route(target)
 
     def _publish_route_markers(self):
         """Create and publish route highlight markers."""
@@ -498,7 +552,7 @@ class TopologicalMapVisualiser(Node):
             m.header.frame_id = src_data.get('parent_frame', 'map')
             m.type = Marker.LINE_STRIP
             m.pose.orientation.w = 1.0
-            m.scale.x = scale * 0.45  # thicker than normal edges
+            m.scale.x = scale * 0.12
             m.color.a = 0.9
             m.color.r = 0.0
             m.color.g = 1.0
@@ -577,6 +631,10 @@ class TopologicalMapVisualiser(Node):
     def _clear_route_highlight(self):
         """Remove route highlight markers from RViz."""
         self._route_nodes = []
+        self._pending_route_target = None
+        if self._route_retry_timer is not None:
+            self.destroy_timer(self._route_retry_timer)
+            self._route_retry_timer = None
         # Publish a DELETE_ALL marker to clear the route topic
         marker_array = MarkerArray()
         m = Marker()
@@ -976,7 +1034,7 @@ class TopologicalMapVisualiser(Node):
         m.header.frame_id = node.get('parent_frame', 'map')
         m.type = Marker.LINE_STRIP
         m.pose.orientation.w = 1.0
-        m.scale.x = self.marker_scale * 0.2
+        m.scale.x = self.marker_scale * 0.06
         m.color.a = 0.8
         m.color.r = 0.7
         m.color.g = 0.1
@@ -1027,7 +1085,7 @@ class TopologicalMapVisualiser(Node):
         v2.z += 0.1
 
         m.pose.orientation.w = 1.0
-        m.scale.x = self.marker_scale * 0.2
+        m.scale.x = self.marker_scale * 0.06
         m.color.a = 0.5
         m.color.r = float(col[0])
         m.color.g = float(col[1])
