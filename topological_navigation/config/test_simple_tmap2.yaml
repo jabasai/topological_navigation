@@ -1,5 +1,5 @@
 meta:
-  last_updated: 08-02-2026_12-00-00
+  last_updated: 08-03-2026_12-00-00
   origin:
     latitude: 53.268642038
     longitude: -0.524509505881
@@ -10,7 +10,7 @@ name: test_map
 pointset: test_map
 
 transformation:
-  topological_frame_id: test_map
+  topo_frame_id: test_map
   parent: map
   rotation:
     w: 1.0
@@ -26,140 +26,63 @@ definitions:
   default_bt: |
     <root main_tree_to_execute="MainTree">
       <BehaviorTree ID="MainTree">
-        <RecoveryNode number_of_retries="0" name="NavigateRecovery">
-          <PipelineSequence name="NavigateWithReplanning">
-            <RateController hz="0.333">
-              <RecoveryNode number_of_retries="0" name="ComputePathThroughPoses">
-                <ReactiveSequence>
-                  <RemovePassedGoals input_goals="{goals}" output_goals="{goals}" radius="1.5"/>
-                  <ComputePathThroughPoses goals="{goals}" path="{path}" planner_id="GridBased"/>
-                </ReactiveSequence>
-                <ReactiveFallback name="ComputePathThroughPosesRecoveryFallback">
-                  <GoalUpdated/>
-                  <ClearEntireCostmap name="ClearGlobalCostmap-Context" service_name="global_costmap/clear_entirely_global_costmap"/>
-                </ReactiveFallback>
-              </RecoveryNode>
-            </RateController>
-            <RecoveryNode number_of_retries="0" name="FollowPath">
-              <FollowPath path="{path}" controller_id="FollowPath"/>
-              <ReactiveFallback name="FollowPathRecoveryFallback">
-                <GoalUpdated/>
-                <ClearEntireCostmap name="ClearLocalCostmap-Context" service_name="local_costmap/clear_entirely_local_costmap"/>
-              </ReactiveFallback>
-            </RecoveryNode>
-          </PipelineSequence>
-          <ReactiveFallback name="RecoveryFallback">
-            <GoalUpdated/>
-            <RoundRobin name="RecoveryActions">
-              <Sequence name="ClearingActions">
-                <ClearEntireCostmap name="ClearLocalCostmap-Subtree" service_name="local_costmap/clear_entirely_local_costmap"/>
-                <ClearEntireCostmap name="ClearGlobalCostmap-Subtree" service_name="global_costmap/clear_entirely_global_costmap"/>
-              </Sequence>
-              <Spin spin_dist="1.57"/>
-              <Wait wait_duration="5"/>
-              <BackUp backup_dist="0.15" backup_speed="0.025"/>
-            </RoundRobin>
-          </ReactiveFallback>
-        </RecoveryNode>
+        <PipelineSequence name="NavigateWithReplanning">
+          <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased"/>
+          <FollowPath path="{path}" controller_id="FollowPath"/>
+        </PipelineSequence>
       </BehaviorTree>
     </root>
   goal_align_bt: |
     <root main_tree_to_execute="MainTree">
       <BehaviorTree ID="MainTree">
-        <RecoveryNode number_of_retries="6" name="NavigateRecovery">
-          <PipelineSequence name="NavigateWithReplanning">
-            <RateController hz="1.0">
-              <RecoveryNode number_of_retries="1" name="ComputePathToPose">
-                <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased"/>
-                <ReactiveFallback name="ComputePathToPoseRecoveryFallback">
-                  <GoalUpdated/>
-                  <ClearEntireCostmap name="ClearGlobalCostmap-Context" service_name="global_costmap/clear_entirely_global_costmap"/>
-                </ReactiveFallback>
-              </RecoveryNode>
-            </RateController>
-            <RecoveryNode number_of_retries="1" name="FollowPath">
-              <FollowPath path="{path}" controller_id="FollowPath"/>
-              <ReactiveFallback name="FollowPathRecoveryFallback">
-                <GoalUpdated/>
-                <ClearEntireCostmap name="ClearLocalCostmap-Context" service_name="local_costmap/clear_entirely_local_costmap"/>
-              </ReactiveFallback>
-            </RecoveryNode>
-          </PipelineSequence>
-          <ReactiveFallback name="RecoveryFallback">
-            <GoalUpdated/>
-            <RoundRobin name="RecoveryActions">
-              <Sequence name="ClearingActions">
-                <ClearEntireCostmap name="ClearLocalCostmap-Subtree" service_name="local_costmap/clear_entirely_local_costmap"/>
-                <ClearEntireCostmap name="ClearGlobalCostmap-Subtree" service_name="global_costmap/clear_entirely_global_costmap"/>
-              </Sequence>
-              <Wait wait_duration="5"/>
-              <BackUp backup_dist="0.15" backup_speed="0.025"/>
-            </RoundRobin>
-          </ReactiveFallback>
-        </RecoveryNode>
+        <PipelineSequence name="NavigateWithReplanning">
+          <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased"/>
+          <FollowPath path="{path}" controller_id="FollowPath"/>
+        </PipelineSequence>
       </BehaviorTree>
     </root>
   row_traversal_bt: |
     <root main_tree_to_execute="MainTree">
       <BehaviorTree ID="MainTree">
-        <RecoveryNode number_of_retries="0" name="NavigateRecovery">
-          <PipelineSequence name="NavigateWithReplanning">
-            <RateController hz="0.333">
-              <RecoveryNode number_of_retries="0" name="ComputePathThroughPoses">
-                <ReactiveSequence>
-                  <RemovePassedGoals input_goals="{goals}" output_goals="{goals}" radius="1.5"/>
-                  <ComputePathThroughPoses goals="{goals}" path="{path}" planner_id="GridBased"/>
-                </ReactiveSequence>
-                <ReactiveFallback name="ComputePathThroughPosesRecoveryFallback">
-                  <GoalUpdated/>
-                  <ClearEntireCostmap name="ClearGlobalCostmap-Context" service_name="global_costmap/clear_entirely_global_costmap"/>
-                </ReactiveFallback>
-              </RecoveryNode>
-            </RateController>
-            <RecoveryNode number_of_retries="0" name="FollowPath">
-              <FollowPath path="{path}" controller_id="FollowPath"/>
-              <ReactiveFallback name="FollowPathRecoveryFallback">
-                <GoalUpdated/>
-                <ClearEntireCostmap name="ClearLocalCostmap-Context" service_name="local_costmap/clear_entirely_local_costmap"/>
-              </ReactiveFallback>
-            </RecoveryNode>
-          </PipelineSequence>
-          <ReactiveFallback name="RecoveryFallback">
-            <GoalUpdated/>
-            <RoundRobin name="RecoveryActions">
-              <Sequence name="ClearingActions">
-                <ClearEntireCostmap name="ClearLocalCostmap-Subtree" service_name="local_costmap/clear_entirely_local_costmap"/>
-                <ClearEntireCostmap name="ClearGlobalCostmap-Subtree" service_name="global_costmap/clear_entirely_global_costmap"/>
-              </Sequence>
-              <Wait wait_duration="5"/>
-              <BackUp backup_dist="0.15" backup_speed="0.025"/>
-            </RoundRobin>
-          </ReactiveFallback>
-        </RecoveryNode>
+        <PipelineSequence name="NavigateWithReplanning">
+          <ComputePathThroughPoses goals="{goals}" path="{path}" planner_id="GridBased"/>
+          <FollowPath path="{path}" controller_id="FollowPath"/>
+        </PipelineSequence>
       </BehaviorTree>
     </root>
 
 actions:
   navigate_to_pose:
     composable: false
-    action_type: nav2_msgs/NavigateToPose
+    action_type: nav2_msgs.action.NavigateToPose
     action_server: /navigate_to_pose
     action_goal_template:
-      pose: '${node.pose}'
+      pose: # Nested to match geometry_msgs/PoseStamped
+        header:
+          frame_id: '${node.nav_frame}'
+        pose: '${node.pose}'
       behavior_tree: '${definitions.default_bt}'
-  navigate_to_pose_goal_align:
+
+  goal_align:
     composable: false
-    action_type: nav2_msgs/NavigateToPose
+    action_type: nav2_msgs.action.NavigateToPose
     action_server: /navigate_to_pose
     action_goal_template:
-      pose: '${node.pose}'
+      pose: # Nested to match geometry_msgs/PoseStamped
+        header:
+          frame_id: '${node.nav_frame}'
+        pose: '${node.pose}'
       behavior_tree: '${definitions.goal_align_bt}'
+
   row_traversal:
     composable: true
-    action_type: nav2_msgs/NavigateThroughPoses
+    action_type: nav2_msgs.action.NavigateThroughPoses
     action_server: /navigate_through_poses
     action_goal_template:
-      poses: ['${node.pose}']
+      poses: # Needs to be an array of PoseStamped objects
+        - header:
+            frame_id: '${node.nav_frame}'
+          pose: '${node.pose}'
       behavior_tree: '${definitions.row_traversal_bt}'
 
 nodes:
@@ -172,8 +95,11 @@ nodes:
         - action: row_traversal
           edge_id: node0_node1
           node: node1
+          properties:
+            boundary_left: 0.4
+            boundary_right: 0.6
       name: node0
-      parent_frame: test_map
+      nav_frame: '${transformation.topo_frame_id}'
       pose:
         orientation:
           w: 1.0
@@ -188,22 +114,14 @@ nodes:
         xy_goal_tolerance: 0.3
         yaw_goal_tolerance: 6.28
       verts:
-        - x: 0.3839717361251064
-          y: -0.6411198818013286
-        - x: 0.5264215248037732
-          y: -0.212953957097135
-        - x: 0.4432315207951729
-          y: 0.3549856737865013
-        - x: 0.1839678947585299
-          y: 0.724309885809929
-        - x: -0.3839717361251064
-          y: 0.6411198818013286
-        - x: -0.5264215248037732
-          y: 0.212953957097135
-        - x: -0.4432315207951729
-          y: -0.3549856737865013
-        - x: -0.1839678947585299
-          y: -0.724309885809929
+        - x: -0.5
+          y: -0.5
+        - x: 0.5
+          y: -0.5
+        - x: 0.5
+          y: 0.5
+        - x: -0.5
+          y: 0.5
 
   - meta:
       map: test_map
@@ -214,8 +132,11 @@ nodes:
         - action: row_traversal
           edge_id: node1_node2
           node: node2
+          properties:
+            boundary_left: 0.4
+            boundary_right: 0.6
       name: node1
-      parent_frame: test_map
+      nav_frame: '${transformation.topo_frame_id}'
       pose:
         orientation:
           w: 1.0
@@ -230,22 +151,14 @@ nodes:
         xy_goal_tolerance: 0.3
         yaw_goal_tolerance: 6.28
       verts:
-        - x: 0.3839717361251064
-          y: -0.6411198818013286
-        - x: 0.5264215248037732
-          y: -0.212953957097135
-        - x: 0.4432315207951729
-          y: 0.3549856737865013
-        - x: 0.1839678947585299
-          y: 0.724309885809929
-        - x: -0.3839717361251064
-          y: 0.6411198818013286
-        - x: -0.5264215248037732
-          y: 0.212953957097135
-        - x: -0.4432315207951729
-          y: -0.3549856737865013
-        - x: -0.1839678947585299
-          y: -0.724309885809929
+        - x: -0.5
+          y: -0.5
+        - x: 0.5
+          y: -0.5
+        - x: 0.5
+          y: 0.5
+        - x: -0.5
+          y: 0.5
 
   - meta:
       map: test_map
@@ -256,8 +169,11 @@ nodes:
         - action: row_traversal
           edge_id: node2_node3
           node: node3
+          properties:
+            boundary_left: 0.4
+            boundary_right: 0.6
       name: node2
-      parent_frame: test_map
+      nav_frame: '${transformation.topo_frame_id}'
       pose:
         orientation:
           w: 1.0
@@ -272,22 +188,14 @@ nodes:
         xy_goal_tolerance: 0.3
         yaw_goal_tolerance: 6.28
       verts:
-        - x: 0.3839717361251064
-          y: -0.6411198818013286
-        - x: 0.5264215248037732
-          y: -0.212953957097135
-        - x: 0.4432315207951729
-          y: 0.3549856737865013
-        - x: 0.1839678947585299
-          y: 0.724309885809929
-        - x: -0.3839717361251064
-          y: 0.6411198818013286
-        - x: -0.5264215248037732
-          y: 0.212953957097135
-        - x: -0.4432315207951729
-          y: -0.3549856737865013
-        - x: -0.1839678947585299
-          y: -0.724309885809929
+        - x: -0.5
+          y: -0.5
+        - x: 0.5
+          y: -0.5
+        - x: 0.5
+          y: 0.5
+        - x: -0.5
+          y: 0.5
 
   - meta:
       map: test_map
@@ -298,8 +206,11 @@ nodes:
         - action: row_traversal
           edge_id: node3_node4
           node: node4
+          properties:
+            boundary_left: 0.4
+            boundary_right: 0.6
       name: node3
-      parent_frame: test_map
+      nav_frame: '${transformation.topo_frame_id}'
       pose:
         orientation:
           w: 1.0
@@ -314,22 +225,14 @@ nodes:
         xy_goal_tolerance: 0.3
         yaw_goal_tolerance: 6.28
       verts:
-        - x: 0.3839717361251064
-          y: -0.6411198818013286
-        - x: 0.5264215248037732
-          y: -0.212953957097135
-        - x: 0.4432315207951729
-          y: 0.3549856737865013
-        - x: 0.1839678947585299
-          y: 0.724309885809929
-        - x: -0.3839717361251064
-          y: 0.6411198818013286
-        - x: -0.5264215248037732
-          y: 0.212953957097135
-        - x: -0.4432315207951729
-          y: -0.3549856737865013
-        - x: -0.1839678947585299
-          y: -0.724309885809929
+        - x: -0.5
+          y: -0.5
+        - x: 0.5
+          y: -0.5
+        - x: 0.5
+          y: 0.5
+        - x: -0.5
+          y: 0.5
 
   - meta:
       map: test_map
@@ -338,7 +241,7 @@ nodes:
     node:
       edges: []
       name: node4
-      parent_frame: test_map
+      nav_frame: '${transformation.topo_frame_id}'
       pose:
         orientation:
           w: 1.0
@@ -353,19 +256,11 @@ nodes:
         xy_goal_tolerance: 0.3
         yaw_goal_tolerance: 6.28
       verts:
-        - x: 0.3839717361251064
-          y: -0.6411198818013286
-        - x: 0.5264215248037732
-          y: -0.212953957097135
-        - x: 0.4432315207951729
-          y: 0.3549856737865013
-        - x: 0.1839678947585299
-          y: 0.724309885809929
-        - x: -0.3839717361251064
-          y: 0.6411198818013286
-        - x: -0.5264215248037732
-          y: 0.212953957097135
-        - x: -0.4432315207951729
-          y: -0.3549856737865013
-        - x: -0.1839678947585299
-          y: -0.724309885809929
+        - x: -0.5
+          y: -0.5
+        - x: 0.5
+          y: -0.5
+        - x: 0.5
+          y: 0.5
+        - x: -0.5
+          y: 0.5
