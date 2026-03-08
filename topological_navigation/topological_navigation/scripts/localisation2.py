@@ -355,11 +355,11 @@ class TopologicalNavLoc(rclpy.node.Node):
         self.closest_edge_ids = closest_edge_ids
         self.closest_edge_dists = closest_edge_dists
 
-        self.get_logger().info(
-            f"Published: closest_node='{wpstr}', closest_dist={closest_dist}, "
-            f"current_node='{cnstr}', nodetag='{nodetag}', "
-            f"closest_edges={closest_edge_ids} (dists: {closest_edge_dists})"
-        )
+        # self.get_logger().info(
+        #     f"Published: closest_node='{wpstr}', closest_dist={closest_dist}, "
+        #     f"current_node='{cnstr}', nodetag='{nodetag}', "
+        #     f"closest_edges={closest_edge_ids} (dists: {closest_edge_dists})"
+        # )
 
     # -----------------------------------------------------------------
     # Map reception

@@ -50,6 +50,7 @@ import importlib
 import json
 import os
 import tempfile
+import time
 import threading
 from datetime import datetime
 
@@ -65,7 +66,7 @@ from rclpy.callback_groups import (
     MutuallyExclusiveCallbackGroup,
     ReentrantCallbackGroup,
 )
-from rclpy.executors import MultiThreadedExecutor, SingleThreadedExecutor
+from rclpy.executors import MultiThreadedExecutor
 from rclpy.qos import (
     DurabilityPolicy,
     HistoryPolicy,
@@ -98,8 +99,6 @@ from topological_navigation_msgs.msg import (
     NavStatistics,
     TopologicalRoute,
 )
-from topological_navigation_msgs.srv import EvaluateEdge, EvaluateNode
-
 # =====================================================================
 # GoalStatus helpers
 # =====================================================================
@@ -248,7 +247,6 @@ class TopologicalNavServer(rclpy.node.Node):
 
         # -- Nav2 infra ----------------------------------------------
         self._nav2_cb_group = MutuallyExclusiveCallbackGroup()
-        self._nav2_executor = SingleThreadedExecutor()
         self._goal_handle = None
         self._action_status = GoalStatus.STATUS_UNKNOWN
 
@@ -834,66 +832,72 @@ class TopologicalNavServer(rclpy.node.Node):
     # =================================================================
 
     def _build_segment_goal(self, segment, is_final_segment):
-        """Build a Nav2 goal from map ``actions`` configuration.
+        """Build a Nav2 goal dynamically from map ``actions`` config.
 
-        Dispatches to ``NavigateToPose.Goal`` or
-        ``NavigateThroughPoses.Goal`` based on the action's
-        ``action_type``.
+        The action class is resolved at map-load time via
+        ``_load_action_type`` and stored in ``_action_clients``.
+        Single-pose vs multi-pose dispatch is detected by checking
+        whether the goal object has a ``poses`` (list) or ``pose``
+        (single) attribute -- no hardcoded action imports needed.
         """
         action = segment.action_type
         info = self._action_clients.get(action)
 
         if not info:
-            self.get_logger().warning(
-                "[GOAL] No config for '%s' -- fallback NTP" % action,
+            self.get_logger().error(
+                "[GOAL] No action config for '%s'" % action,
             )
-            return self._build_nttp_goal(segment, is_final_segment, '')
+            return None
 
+        action_class = info['action_class']
         bt = info['config'].get(
             'action_goal_template', {},
         ).get('behavior_tree', '')
         if isinstance(bt, str) and bt.startswith('${'):
             bt = ''
 
-        if info['action_class'] == NavigateToPose:
-            return self._build_ntp_goal(segment, is_final_segment, bt)
-        return self._build_nttp_goal(segment, is_final_segment, bt)
+        goal = action_class.Goal()
 
-    def _build_ntp_goal(self, segment, is_final, bt):
-        """``NavigateToPose.Goal`` -- single target pose."""
-        goal = NavigateToPose.Goal()
-        tgt = segment.last_target
-        ignore = self._no_orientation and is_final
-        ps = self._pose_or_fallback(tgt, ignore_orientation=ignore)
-        if ps is not None:
-            goal.pose = ps
-        if bt:
-            goal.behavior_tree = bt
-        self.get_logger().info(
-            "[GOAL] NTP -> '%s', BT=%s" % (tgt, bt or 'default'),
-        )
-        return goal
-
-    def _build_nttp_goal(self, segment, is_final, bt):
-        """``NavigateThroughPoses.Goal`` -- multi-waypoint."""
-        goal = NavigateThroughPoses.Goal()
-        n = segment.num_edges
-        for i, ed in enumerate(segment.edge_data):
-            last = (i == n - 1)
-            ignore = not last or (
-                last and self._no_orientation and is_final
+        # Multi-waypoint goal (e.g. NavigateThroughPoses)
+        if hasattr(goal, 'poses'):
+            n = segment.num_edges
+            for i, ed in enumerate(segment.edge_data):
+                last = (i == n - 1)
+                ignore = not last or (
+                    last and self._no_orientation and is_final_segment
+                )
+                ps = self._pose_or_fallback(
+                    ed['target'], ignore_orientation=ignore,
+                )
+                if ps is not None:
+                    goal.poses.append(ps)
+            self.get_logger().info(
+                "[GOAL] %s %d poses, BT=%s"
+                % (action_class.__name__, len(goal.poses),
+                   bt or 'default'),
             )
+        # Single-pose goal (e.g. NavigateToPose)
+        elif hasattr(goal, 'pose'):
+            tgt = segment.last_target
+            ignore = self._no_orientation and is_final_segment
             ps = self._pose_or_fallback(
-                ed['target'], ignore_orientation=ignore,
+                tgt, ignore_orientation=ignore,
             )
             if ps is not None:
-                goal.poses.append(ps)
-        if bt:
+                goal.pose = ps
+            self.get_logger().info(
+                "[GOAL] %s -> '%s', BT=%s"
+                % (action_class.__name__, tgt, bt or 'default'),
+            )
+        else:
+            self.get_logger().warning(
+                "[GOAL] %s goal has no 'pose'/'poses' attr"
+                % action_class.__name__,
+            )
+
+        if bt and hasattr(goal, 'behavior_tree'):
             goal.behavior_tree = bt
-        self.get_logger().info(
-            "[GOAL] NTTP %d poses, BT=%s"
-            % (len(goal.poses), bt or 'default'),
-        )
+
         return goal
 
     # =================================================================
@@ -901,7 +905,12 @@ class TopologicalNavServer(rclpy.node.Node):
     # =================================================================
 
     def _send_nav2_goal(self, goal, action_client=None):
-        """Send goal to Nav2. Blocks until result.
+        """Send goal to Nav2.  Blocks until result.
+
+        The main ``MultiThreadedExecutor`` processes action-client
+        callbacks, so this method polls futures with ``time.sleep``
+        instead of calling ``rclpy.spin_once`` (which would conflict
+        with the executor that already owns the node).
 
         Returns ``GoalStatus`` integer.
         """
@@ -923,16 +932,15 @@ class TopologicalNavServer(rclpy.node.Node):
             goal, feedback_callback=self._nav2_fb_cb,
         )
 
-        while rclpy.ok():
-            try:
-                rclpy.spin_once(
-                    self, executor=self._nav2_executor, timeout_sec=0.5,
-                )
-                if future.done():
-                    break
-            except Exception as exc:
-                self.get_logger().error("[NAV2] send error: %s" % exc)
-                return GoalStatus.STATUS_ABORTED
+        # Wait for goal acceptance
+        while rclpy.ok() and not future.done():
+            if self._preempted or self._cancelled:
+                return GoalStatus.STATUS_CANCELED
+            time.sleep(0.1)
+
+        if not future.done():
+            self.get_logger().error("[NAV2] send_goal did not complete")
+            return GoalStatus.STATUS_ABORTED
 
         self._goal_handle = future.result()
         if not self._goal_handle.accepted:
@@ -940,39 +948,32 @@ class TopologicalNavServer(rclpy.node.Node):
             return GoalStatus.STATUS_ABORTED
         self.get_logger().info("[NAV2] Goal ACCEPTED")
 
+        # Wait for result
         result_future = self._goal_handle.get_result_async()
         while rclpy.ok():
             if self._preempted or self._cancelled:
-                self._cancel_nav2_goal(timeout_sec=2.0)
+                self._cancel_nav2_goal()
                 return GoalStatus.STATUS_CANCELED
-            try:
-                rclpy.spin_once(
-                    self, executor=self._nav2_executor, timeout_sec=1.0,
+            if result_future.done():
+                res = result_future.result()
+                self._action_status = res.status
+                self.get_logger().info(
+                    "[NAV2] Finished: %s" % _status_str(res.status),
                 )
-                if result_future.done():
-                    res = result_future.result()
-                    self._action_status = res.status
-                    self.get_logger().info(
-                        "[NAV2] Finished: %s" % _status_str(res.status),
-                    )
-                    return res.status
-            except Exception as exc:
-                self.get_logger().error("[NAV2] result error: %s" % exc)
-                return GoalStatus.STATUS_ABORTED
+                return res.status
+            time.sleep(0.1)
         return GoalStatus.STATUS_ABORTED
 
     def _nav2_fb_cb(self, _feedback_msg):
         self._action_status = GoalStatus.STATUS_EXECUTING
 
-    def _cancel_nav2_goal(self, timeout_sec=2.0):
+    def _cancel_nav2_goal(self, timeout_sec=None):
+        """Cancel the active Nav2 goal (fire-and-forget)."""
         if self._goal_handle is None:
             return
         try:
-            f = self._goal_handle.cancel_goal_async()
-            rclpy.spin_until_future_complete(
-                self, f, timeout_sec=timeout_sec,
-            )
-            self.get_logger().info("[NAV2] Cancel sent")
+            self._goal_handle.cancel_goal_async()
+            self.get_logger().info("[NAV2] Cancel requested")
         except Exception as exc:
             self.get_logger().error("[NAV2] Cancel error: %s" % exc)
         finally:
@@ -989,12 +990,29 @@ class TopologicalNavServer(rclpy.node.Node):
             "=" * 60 + "\n[GOTO] target='%s', no_ori=%s"
             % (target, goal_handle.request.no_orientation),
         )
-        self._cancel_current_nav()
+        # Preempt any active navigation and wait for it to stop
+        if self._navigation_activated:
+            self.get_logger().info("[GOTO] Preempting active navigation")
+            self._preempted = True
+            self._cancel_nav2_goal()
+            deadline = time.time() + 5.0
+            while self._navigation_activated and time.time() < deadline:
+                time.sleep(0.05)
+            if self._navigation_activated:
+                self.get_logger().warning(
+                    "[GOTO] Timeout waiting for old navigation",
+                )
+                self._navigation_activated = False
+            if self._sm.is_terminal():
+                self._sm.reset()
+            elif self._sm.state != NavState.READY:
+                self._sm.transition(NavState.CANCELLED)
+                self._sm.reset()
+
         self._navigation_activated = True
         self._cancelled = False
         self._preempted = False
         self._no_orientation = goal_handle.request.no_orientation
-        self._fail_policy_state = {}
 
         fb = GotoNodeFeedback()
         fb.route = "Planning..."
@@ -1021,11 +1039,29 @@ class TopologicalNavServer(rclpy.node.Node):
     def _exec_policy_cb(self, goal_handle):
         """``ExecutePolicyMode`` action callback."""
         self.get_logger().info("=" * 60 + "\n[POLICY] Goal received")
-        self._cancel_current_nav()
+
+        # Preempt any active navigation and wait for it to stop
+        if self._navigation_activated:
+            self.get_logger().info("[POLICY] Preempting active navigation")
+            self._preempted = True
+            self._cancel_nav2_goal()
+            deadline = time.time() + 5.0
+            while self._navigation_activated and time.time() < deadline:
+                time.sleep(0.05)
+            if self._navigation_activated:
+                self.get_logger().warning(
+                    "[POLICY] Timeout waiting for old navigation",
+                )
+                self._navigation_activated = False
+            if self._sm.is_terminal():
+                self._sm.reset()
+            elif self._sm.state != NavState.READY:
+                self._sm.transition(NavState.CANCELLED)
+                self._sm.reset()
+
         self._navigation_activated = True
         self._cancelled = False
         self._preempted = False
-        self._fail_policy_state = {}
 
         route = goal_handle.request.route
         if (
@@ -1297,12 +1333,7 @@ class TopologicalNavServer(rclpy.node.Node):
                 if self._cancelled or self._preempted:
                     self._sm.transition(NavState.CANCELLED)
                     self._publish_status("CANCELLED")
-                    return False
-                recovered = self._attempt_recovery(
-                    seg, route_nodes, target, si,
-                )
-                if not recovered:
-                    return False
+                return False
 
             # Advance node_idx past the nodes consumed by this segment
             node_idx += seg.num_edges
@@ -1358,12 +1389,7 @@ class TopologicalNavServer(rclpy.node.Node):
                 if self._cancelled or self._preempted:
                     self._sm.transition(NavState.CANCELLED)
                     self._publish_status("CANCELLED")
-                    return False
-                recovered = self._attempt_recovery(
-                    seg, route_nodes, target, si,
-                )
-                if not recovered:
-                    return False
+                return False
 
             node_idx += seg.num_edges
 
@@ -1415,25 +1441,7 @@ class TopologicalNavServer(rclpy.node.Node):
                 self._publish_stats()
                 return False
 
-            if not self._check_restrictions(eid, tgt):
-                self._stat = nav_stats(src, tgt, self._topol_map, eid)
-                self._stat.set_ended(self._current_node)
-                self._stat.status = "restricted"
-                self._publish_stats()
-                return False
-
             edge_dicts.append(ed)
-
-        # Edge reconfigure (pre)
-        first_ed = edge_dicts[0] if edge_dicts else None
-        if (
-            first_ed and self._edge_reconf_mgr
-            and not self._srv_edge_reconf
-        ):
-            self._edge_reconf_mgr.register_edge(first_ed)
-            if self._edge_reconf_mgr.active:
-                self._edge_reconf_mgr.initialise()
-                self._edge_reconf_mgr.reconfigure()
 
         # Build and send goal
         self._current_target = segment.last_target
@@ -1460,14 +1468,6 @@ class TopologicalNavServer(rclpy.node.Node):
         self._publish_move_status(
             segment.last_target or "?", action, _status_str(status),
         )
-
-        # Edge reconfigure (post-reset)
-        if (
-            self._edge_reconf_mgr
-            and not self._srv_edge_reconf
-            and self._edge_reconf_mgr.active
-        ):
-            self._edge_reconf_mgr._reset()
 
         # Evaluate
         self._stat.set_ended(self._current_node)
@@ -1518,130 +1518,6 @@ class TopologicalNavServer(rclpy.node.Node):
                 "[BOUNDARY] Cannot compute row polygon",
             )
             self._publish_empty_boundary(frame_id)
-
-    # =================================================================
-    # Restrictions
-    # =================================================================
-
-    def _check_restrictions(self, edge_id, target_node):
-        """Check edge/node restrictions.  True = allowed."""
-        if not self._using_restrictions:
-            return True
-        try:
-            req = EvaluateEdge.Request()
-            req.edge = edge_id
-            req.runtime = True
-            f = self._eval_edge_srv.call_async(req)
-            rclpy.spin_until_future_complete(self, f, timeout_sec=3.0)
-            if f.done():
-                r = f.result()
-                if r and r.success and r.evaluation:
-                    self.get_logger().warning(
-                        "[RESTRICT] Edge '%s' restricted" % edge_id,
-                    )
-                    return False
-
-            req2 = EvaluateNode.Request()
-            req2.node = target_node
-            req2.runtime = True
-            f2 = self._eval_node_srv.call_async(req2)
-            rclpy.spin_until_future_complete(self, f2, timeout_sec=3.0)
-            if f2.done():
-                r2 = f2.result()
-                if r2 and r2.success and r2.evaluation:
-                    self.get_logger().warning(
-                        "[RESTRICT] Node '%s' restricted" % target_node,
-                    )
-                    return False
-        except Exception as exc:
-            self.get_logger().error("[RESTRICT] Error: %s" % exc)
-        return True
-
-    # =================================================================
-    # Recovery / fail policy
-    # =================================================================
-
-    def _attempt_recovery(self, segment, route_nodes, target, seg_idx):
-        """Execute fail-policy: retry / replan / fail."""
-        self._sm.transition(NavState.RECOVERING)
-        self._publish_status("RECOVERING")
-
-        src0 = segment.source_nodes[0] if segment.source_nodes else None
-        eid0 = segment.edge_ids[0] if segment.edge_ids else None
-        raw_edge = None
-        if src0 and eid0:
-            raw_edge = get_edge_from_id_tmap2(self._tmap, src0, eid0)
-        policy_str = (raw_edge or {}).get('fail_policy', 'fail')
-
-        policies = []
-        for part in policy_str.split(','):
-            tokens = part.strip().split('_')
-            act = tokens[0]
-            count = 1
-            if len(tokens) > 1 and tokens[1].isdigit():
-                count = int(tokens[1])
-            policies.extend([act] * count)
-
-        edge_key = eid0 or 'unknown'
-        if edge_key not in self._fail_policy_state:
-            self._fail_policy_state[edge_key] = 0
-        idx = self._fail_policy_state[edge_key]
-
-        while idx < len(policies):
-            pol = policies[idx]
-            self._fail_policy_state[edge_key] = idx + 1
-            self.get_logger().info(
-                "[RECOVER] '%s' (%d/%d)" % (pol, idx + 1, len(policies)),
-            )
-
-            if pol == "retry":
-                ok = self._execute_segment(
-                    segment, seg_idx == 0, seg_idx, 1,
-                )
-                if ok:
-                    self._fail_policy_state.pop(edge_key, None)
-                    return True
-                idx += 1
-
-            elif pol == "replan":
-                origin = (
-                    self._current_node
-                    if self._current_node not in ("none", "Unknown")
-                    else self._closest_node
-                )
-                new_route = plan_route(
-                    self._graph, origin, target,
-                    avoid_edges=list(segment.edge_ids),
-                    logger=self.get_logger(),
-                    algorithm=self._route_algorithm,
-                    weight=self._route_weight,
-                )
-                if new_route and len(new_route) >= 2:
-                    self.get_logger().info(
-                        "[RECOVER] Replanned: %s"
-                        % " -> ".join(new_route),
-                    )
-                    ok = self._execute_route(new_route, target)
-                    if ok:
-                        self._fail_policy_state.pop(edge_key, None)
-                        return True
-                else:
-                    self.get_logger().warning("[RECOVER] Replan failed")
-                idx += 1
-
-            elif pol == "fail":
-                self.get_logger().warning("[RECOVER] 'fail' -- stopping")
-                self._fail_policy_state.pop(edge_key, None)
-                return False
-
-            else:
-                self.get_logger().warning(
-                    "[RECOVER] Unknown '%s', skipping" % pol,
-                )
-                idx += 1
-
-        self._fail_policy_state.pop(edge_key, None)
-        return False
 
     # =================================================================
     # Helpers

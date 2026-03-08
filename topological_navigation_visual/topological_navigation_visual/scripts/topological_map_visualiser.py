@@ -32,6 +32,7 @@ Usage
 import math
 import os
 import sys
+import tempfile
 from copy import deepcopy
 
 import rclpy
@@ -135,6 +136,13 @@ class TopologicalMapVisualiser(Node):
         self._current_node: str = 'none'
         self._closest_node: str = 'none'
         self._route_nodes: list = []  # ordered node names on active route
+
+        # ── Debounced republish after drag ────────────────────────
+        self._republish_timer = None
+        self._temp_map_dir = os.path.join(
+            tempfile.gettempdir(), 'topological_maps',
+        )
+        os.makedirs(self._temp_map_dir, exist_ok=True)
 
         # ── QoS ──────────────────────────────────────────────────
         self._latching_qos = QoSProfile(
@@ -661,10 +669,20 @@ class TopologicalMapVisualiser(Node):
             node = entry['node']
             self._create_edit_marker(node)
 
-        # Apply the right-click context menu to every marker
+        # Apply the right-click context menu to every marker, then
+        # re-register type-specific callbacks.  MenuHandler.apply()
+        # overwrites the default (catch-all) callback, so BUTTON_CLICK
+        # and POSE_UPDATE would be silently dropped without this step.
         for entry in nodes:
-            self._menu_handler.apply(
-                self._im_server, entry['node']['name'],
+            name = entry['node']['name']
+            self._menu_handler.apply(self._im_server, name)
+            self._im_server.setCallback(
+                name, self._im_feedback,
+                InteractiveMarkerFeedback.BUTTON_CLICK,
+            )
+            self._im_server.setCallback(
+                name, self._im_feedback,
+                InteractiveMarkerFeedback.POSE_UPDATE,
             )
 
         self._im_server.applyChanges()
@@ -695,7 +713,7 @@ class TopologicalMapVisualiser(Node):
         vis_ctrl = InteractiveMarkerControl()
         vis_ctrl.always_visible = True
         vis_ctrl.markers.append(sphere)
-        vis_ctrl.interaction_mode = InteractiveMarkerControl.MOVE_PLANE
+        vis_ctrl.interaction_mode = InteractiveMarkerControl.BUTTON
         vis_ctrl.orientation.w = 1.0
         vis_ctrl.orientation.y = 1.0  # XY plane
         im.controls.append(vis_ctrl)
@@ -758,10 +776,25 @@ class TopologicalMapVisualiser(Node):
         self._im_server.setCallback(im.name, self._im_feedback)
 
     def _im_feedback(self, feedback: InteractiveMarkerFeedback):
-        """Handle interactive-marker drag / rotate events."""
+        """Handle interactive-marker drag / rotate / click events."""
         # Let MenuHandler process right-click menu selections
         if feedback.event_type == InteractiveMarkerFeedback.MENU_SELECT:
             return
+
+        # Left-click on node sphere → navigate to that node
+        if feedback.event_type == InteractiveMarkerFeedback.BUTTON_CLICK:
+            node_name = feedback.marker_name
+            self.get_logger().info(
+                f'Node clicked → navigating to {node_name}'
+            )
+            # Cancel any active navigation before sending new goal
+            if self._goto_goal_handle is not None:
+                self._cancel_navigation()
+            self._compute_and_highlight_route(node_name)
+            self._send_goto_goal(node_name)
+            self._im_server.applyChanges()
+            return
+
         if feedback.event_type != InteractiveMarkerFeedback.POSE_UPDATE:
             self._im_server.applyChanges()
             return
@@ -804,6 +837,63 @@ class TopologicalMapVisualiser(Node):
         # Refresh the static markers (edges, zones) to reflect the move
         self._rebuild_static_markers()
         self._im_server.applyChanges()
+
+        # Schedule a debounced republish so downstream nodes
+        # (navigation, localisation) pick up the change.
+        self._schedule_republish()
+
+    def _schedule_republish(self):
+        """Debounce map republish: wait 0.5 s after the last drag event."""
+        if self._republish_timer is not None:
+            self._republish_timer.cancel()
+            self.destroy_timer(self._republish_timer)
+        self._republish_timer = self.create_timer(
+            0.5, self._deferred_republish,
+            callback_group=self._cb_group,
+        )
+
+    def _deferred_republish(self):
+        """Republish map, rebuild graph, and save to temp folder."""
+        # One-shot: cancel the timer immediately
+        if self._republish_timer is not None:
+            self._republish_timer.cancel()
+            self.destroy_timer(self._republish_timer)
+            self._republish_timer = None
+
+        # Rebuild the NetworkX graph so route planning uses new positions
+        self._graph = build_graph_from_tmap(
+            self.tmap, logger=self.get_logger(),
+        )
+
+        # Publish updated map to topic so all subscribers get it
+        self._publish_map_topic()
+        self.get_logger().info(
+            'Map republished after node position update'
+        )
+
+        # Save to temp folder
+        self._save_to_temp()
+
+    def _save_to_temp(self):
+        """Save the current map to a temp folder for recovery."""
+        if self.tmap is None:
+            return
+        map_name = self.tmap.get('pointset', 'unknown_map')
+        temp_path = os.path.join(
+            self._temp_map_dir,
+            f'{map_name}.tmap2.yaml',
+        )
+        try:
+            with open(temp_path, 'w') as fh:
+                yaml.dump(
+                    self.tmap,
+                    fh,
+                    default_flow_style=False,
+                    sort_keys=False,
+                )
+            self.get_logger().info(f'Map saved to {temp_path}')
+        except Exception as exc:
+            self.get_logger().error(f'Failed to save temp map: {exc}')
 
     def _rebuild_static_markers(self):
         """Re-publish static MarkerArray only (no interactive markers)."""
