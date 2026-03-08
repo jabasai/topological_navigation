@@ -377,7 +377,7 @@ class TopologicalNavLoc(rclpy.node.Node):
         label = "Updated" if is_update else "Received"
 
         self.tmap = yaml.load(msg.data, Loader=CustomSafeLoader)
-        self.tmap_frame = self.tmap["transformation"]["topological_frame_id"]
+        self.tmap_frame = self.tmap["transformation"]["topo_frame_id"]
         self.get_logger().info(f"{label} the topological map")
 
         # Build new graph and KD-tree in local variables first so the

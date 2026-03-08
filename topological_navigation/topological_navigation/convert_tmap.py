@@ -262,22 +262,28 @@ def _build_actions_section(discovered, bt_defs):
         if bt_name is None:
             bt_name = 'default_bt'
 
-        # Determine goal template based on action type
+        # Determine goal template based on action type.
+        # The template mirrors the ROS 2 goal structure: pose/poses
+        # contain PoseStamped dicts with header and pose sub-fields.
+        _pose_stamped_tpl = {
+            'header': {'frame_id': '${node.nav_frame}'},
+            'pose': '${node.pose}',
+        }
         if name in _SINGLE_POSE_ACTIONS:
             goal_tpl = {
-                'pose': '${node.pose}',
+                'pose': dict(_pose_stamped_tpl),
             }
         elif name in _MULTI_POSE_ACTIONS:
             goal_tpl = {
-                'poses': ['${node.pose}'],
+                'poses': [dict(_pose_stamped_tpl)],
             }
         else:
             # Guess from action_type name
             type_tail = action_type.rsplit('.', 1)[-1]
             if 'Through' in type_tail or 'Waypoint' in type_tail:
-                goal_tpl = {'poses': ['${node.pose}']}
+                goal_tpl = {'poses': [dict(_pose_stamped_tpl)]}
             else:
-                goal_tpl = {'pose': '${node.pose}'}
+                goal_tpl = {'pose': dict(_pose_stamped_tpl)}
 
         if bt_name in bt_defs:
             goal_tpl['behavior_tree'] = '${definitions.%s}' % bt_name
@@ -383,18 +389,18 @@ def _convert_node(node_entry):
 def _convert_transformation(old_tf):
     """Convert transformation block.
 
-    Renames ``child`` to ``topological_frame_id`` if present.
+    Renames ``child`` to ``topo_frame_id`` if present.
     """
     new_tf = {}
     for k, v in old_tf.items():
         if k == 'child':
-            new_tf['topological_frame_id'] = v
+            new_tf['topo_frame_id'] = v
         else:
             new_tf[k] = v
-    # Ensure topological_frame_id exists
-    if 'topological_frame_id' not in new_tf:
-        new_tf['topological_frame_id'] = old_tf.get(
-            'child', old_tf.get('topological_frame_id', ''),
+    # Ensure topo_frame_id exists
+    if 'topo_frame_id' not in new_tf:
+        new_tf['topo_frame_id'] = old_tf.get(
+            'child', old_tf.get('topo_frame_id', ''),
         )
     return new_tf
 

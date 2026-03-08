@@ -250,7 +250,7 @@ class RobotTmapping(Node):
             "name": self.pointset,
             "pointset": self.pointset,
             "transformation": {
-                "topological_frame_id": self.site_name or "map",
+                "topo_frame_id": self.site_name or "map",
                 "parent": "map",
                 "rotation":    {"w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0},
                 "translation": {"x": 0.0, "y": 0.0, "z": 0.0},
@@ -264,7 +264,12 @@ class RobotTmapping(Node):
                     "action_type": "nav2_msgs/NavigateToPose",
                     "action_server": "/navigate_to_pose",
                     "action_goal_template": {
-                        "pose": "${node.pose}",
+                        "pose": {
+                            "header": {
+                                "frame_id": "${node.nav_frame}",
+                            },
+                            "pose": "${node.pose}",
+                        },
                         "behavior_tree": "${definitions.default_bt}",
                     },
                 },

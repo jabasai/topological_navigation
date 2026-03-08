@@ -768,12 +768,12 @@ class TopologicalNavServer(rclpy.node.Node):
     # =================================================================
 
     def _nav_frame(self):
-        """Default navigation frame from ``transformation.topological_frame_id``.
+        """Default navigation frame from ``transformation.topo_frame_id``.
 
         Falls back to ``transformation.parent``, then ``'map'``.
         """
         tx = self._tmap.get('transformation', {})
-        return tx.get('topological_frame_id', tx.get('parent', 'map'))
+        return tx.get('topo_frame_id', tx.get('parent', 'map'))
 
     def _node_nav_frame(self, node_name):
         """Resolve the navigation frame for a specific node.
@@ -794,10 +794,10 @@ class TopologicalNavServer(rclpy.node.Node):
         pose = nd["pose"]
         ps = PoseStamped()
         ps.header.stamp = self.get_clock().now().to_msg()
-        ps.header.frame_id = (
-            nd.get("nav_frame", '')
-            or self._nav_frame()
-        )
+        raw_frame = nd.get("nav_frame", '')
+        if raw_frame and raw_frame.startswith('${'):
+            raw_frame = self._resolve_tmap_ref(raw_frame)
+        ps.header.frame_id = raw_frame or self._nav_frame()
         ps.pose.position.x = float(pose["position"]["x"])
         ps.pose.position.y = float(pose["position"]["y"])
         ps.pose.position.z = float(pose["position"]["z"])
@@ -847,6 +847,73 @@ class TopologicalNavServer(rclpy.node.Node):
     # Goal construction (map-driven)
     # =================================================================
 
+    def _resolve_tmap_ref(self, value):
+        """Resolve ``${transformation.<key>}`` against the map."""
+        if not isinstance(value, str):
+            return value
+        if not (
+            value.startswith('${transformation.')
+            and value.endswith('}')
+        ):
+            return value
+        key = value[len('${transformation.'):-1]
+        tx = self._tmap.get('transformation', {})
+        return tx.get(key, value)
+
+    def _resolve_node_ref(self, value, node_name):
+        """Resolve ``${node.<attr>}`` and ``${transformation.<key>}``.
+
+        Looks up *attr* on the NetworkX graph node for *node_name*,
+        or resolves transformation-level references.
+        Returns the resolved value, or the original string if the
+        pattern does not match or the attribute is missing.
+        """
+        if not isinstance(value, str):
+            return value
+        if value.startswith('${transformation.'):
+            return self._resolve_tmap_ref(value)
+        if not (value.startswith('${node.') and value.endswith('}')):
+            return value
+        attr = value[len('${node.'):-1]
+        if node_name and node_name in self._graph:
+            resolved = self._graph.nodes[node_name].get(attr, '')
+            if resolved:
+                return resolved
+        return value
+
+    def _resolve_template_frame(self, template, node_name):
+        """Return the resolved ``header.frame_id`` from *template*.
+
+        Supports the nested format where ``header`` lives inside the
+        goal field (``pose.header`` or ``poses[0].header``) as well as
+        the legacy flat format (``header`` at template root).
+
+        Returns ``None`` when the template does not declare a header.
+        """
+        header = None
+
+        # New nested format: pose.header or poses[0].header
+        pose_tpl = template.get('pose')
+        if isinstance(pose_tpl, dict):
+            header = pose_tpl.get('header', {})
+        if not header:
+            poses_tpl = template.get('poses')
+            if isinstance(poses_tpl, list) and poses_tpl:
+                first = poses_tpl[0]
+                if isinstance(first, dict):
+                    header = first.get('header', {})
+
+        # Legacy flat format: header at template root
+        if not header:
+            header = template.get('header', {})
+
+        if not header:
+            return None
+        raw = header.get('frame_id', '')
+        if not raw:
+            return None
+        return self._resolve_node_ref(raw, node_name)
+
     def _build_segment_goal(self, segment, is_final_segment):
         """Build a Nav2 goal dynamically from map ``actions`` config.
 
@@ -855,6 +922,19 @@ class TopologicalNavServer(rclpy.node.Node):
         Single-pose vs multi-pose dispatch is detected by checking
         whether the goal object has a ``poses`` (list) or ``pose``
         (single) attribute -- no hardcoded action imports needed.
+
+        The ``action_goal_template`` mirrors the ROS 2 goal structure::
+
+            action_goal_template:
+              pose:                          # PoseStamped wrapper
+                header:
+                  frame_id: '${node.nav_frame}'
+                pose: '${node.pose}'
+              behavior_tree: '${definitions.default_bt}'
+
+        If the template contains a ``header.frame_id`` (nested under
+        ``pose`` or ``poses[0]``), the resolved value overrides the
+        frame on every built ``PoseStamped``.
         """
         action = segment.action_type
         info = self._action_clients.get(action)
@@ -866,9 +946,8 @@ class TopologicalNavServer(rclpy.node.Node):
             return None
 
         action_class = info['action_class']
-        bt = info['config'].get(
-            'action_goal_template', {},
-        ).get('behavior_tree', '')
+        tpl = info['config'].get('action_goal_template', {})
+        bt = tpl.get('behavior_tree', '')
         if isinstance(bt, str) and bt.startswith('${'):
             bt = ''
 
@@ -886,6 +965,11 @@ class TopologicalNavServer(rclpy.node.Node):
                     ed['target'], ignore_orientation=ignore,
                 )
                 if ps is not None:
+                    frame = self._resolve_template_frame(
+                        tpl, ed['target'],
+                    )
+                    if frame:
+                        ps.header.frame_id = frame
                     goal.poses.append(ps)
             self.get_logger().info(
                 "[GOAL] %s %d poses, BT=%s"
@@ -900,6 +984,9 @@ class TopologicalNavServer(rclpy.node.Node):
                 tgt, ignore_orientation=ignore,
             )
             if ps is not None:
+                frame = self._resolve_template_frame(tpl, tgt)
+                if frame:
+                    ps.header.frame_id = frame
                 goal.pose = ps
             self.get_logger().info(
                 "[GOAL] %s -> '%s', BT=%s"

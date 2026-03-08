@@ -309,10 +309,10 @@ class map_manager_2(rclpy.node.Node):
             rot, self.transformation.get("rotation", {})
         )
 
-        # Use topological_frame_id as the child frame so localisation
+        # Use topo_frame_id as the child frame so localisation
         # can look up the transform to the frame the map is defined in.
         child_frame = self.transformation.get(
-            "topological_frame_id",
+            "topo_frame_id",
             self.transformation.get("child", "topo_map"),
         )
 

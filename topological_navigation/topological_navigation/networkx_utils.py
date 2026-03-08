@@ -82,7 +82,7 @@ def build_graph_from_tmap(tmap_data: Dict[str, Any], logger=None) -> Optional[nx
             - parent_frame: str - Coordinate frame (structural)
             - nav_frame: str - Navigation frame override for PoseStamped
               goals.  Empty string means "use map-level default
-              (topological_frame_id)".
+              (topo_frame_id)".
             - properties: dict - Optional user-defined properties
             - localise_by_topic: str - JSON config string for topic-based localization
             - meta: dict - Metadata including tags
@@ -125,6 +125,21 @@ def build_graph_from_tmap(tmap_data: Dict[str, Any], logger=None) -> Optional[nx
 
     # Create directed graph
     G = nx.DiGraph()
+
+    # Resolve default nav_frame from transformation section
+    tx = tmap_data.get('transformation', {})
+    default_nav_frame = tx.get('topo_frame_id', tx.get('parent', 'map'))
+
+    def _resolve_tx_ref(value):
+        """Resolve ``${transformation.<key>}`` to a concrete value."""
+        if (
+            isinstance(value, str)
+            and value.startswith('${transformation.')
+            and value.endswith('}')
+        ):
+            key = value[len('${transformation.'):-1]
+            return tx.get(key, value)
+        return value
 
     try:
         # Process each node in the map
@@ -198,7 +213,9 @@ def build_graph_from_tmap(tmap_data: Dict[str, Any], logger=None) -> Optional[nx
                     },
                     'verts': node.get('verts', []),
                     'parent_frame': node.get('parent_frame', 'map'),
-                    'nav_frame': node.get('nav_frame', ''),
+                    'nav_frame': _resolve_tx_ref(
+                        node.get('nav_frame', '')
+                    ) or default_nav_frame,
                     'properties': node.get('properties', {}),
                     'localise_by_topic': node.get('localise_by_topic', ''),
                     'meta': node_data.get('meta', {})
