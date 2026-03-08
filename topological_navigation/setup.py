@@ -41,6 +41,9 @@ setup(
 
             # Networkx
             'networkx_utils.py = topological_navigation.scripts.networkx_utils:main',
+
+            # Map conversion
+            'convert_tmap.py = topological_navigation.scripts.convert_tmap:main',
         ],
     },
 
