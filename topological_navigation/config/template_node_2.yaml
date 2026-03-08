@@ -4,7 +4,6 @@ meta:
   pointset: PointSet
 node:
   edges: []
-  localise_by_topic: ''
   name: NodeName
   parent_frame: map
   pose:
@@ -20,8 +19,6 @@ node:
   properties:
     xy_goal_tolerance: 0.3
     yaw_goal_tolerance: 6.29
-  restrictions_planning: 'True'
-  restrictions_runtime: 'True'
   verts:
   - x: 0.689999997616
     y: 0.287000000477
