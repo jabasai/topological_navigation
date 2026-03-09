@@ -449,13 +449,13 @@ def merge_action_segments(
 # Boundary Polygon
 # ==============================================================================
 
-def compute_row_boundary_polygon(
+def compute_boundary_polygon(
     graph: nx.DiGraph,
     segment: ActionSegment,
     default_left: float = 0.5,
     default_right: float = 0.5,
 ) -> List[Tuple[float, float]]:
-    """Compute boundary polygon for a RowTraversal action segment.
+    """Compute boundary polygon for an action segment.
 
     Creates a corridor polygon around the path by offsetting each
     waypoint perpendicularly. The polygon goes left-side forward
@@ -464,9 +464,13 @@ def compute_row_boundary_polygon(
     Boundary distances are read from the first edge's properties:
     ``boundary_left`` and ``boundary_right``. Falls back to defaults.
 
+    This is action-type agnostic -- any segment whose edges carry
+    ``boundary_left`` / ``boundary_right`` properties will produce
+    a corridor polygon.
+
     Args:
         graph: NetworkX DiGraph with node position attributes.
-        segment: ActionSegment of ``row_traversal`` type.
+        segment: ActionSegment whose edges may carry boundary props.
         default_left: Default left offset in meters.
         default_right: Default right offset in meters.
 

@@ -22,8 +22,8 @@ Architecture
     parameters so they can be changed at launch time.
 4.  Consecutive composable edges are merged into multi-waypoint
     segments; non-composable edges are dispatched individually.
-5.  Boundary polygons are published for ``row_traversal`` segments
-    using ``boundary_left`` / ``boundary_right`` edge properties.
+5.  Boundary polygons are published for any segment whose edges
+    carry ``boundary_left`` / ``boundary_right`` properties.
 
 ROS 2 interfaces
     Action servers:
@@ -80,7 +80,7 @@ from topological_navigation.navigation_graph import (
     ACTION_TO_STATE,
     NavState,
     NavStateMachine,
-    compute_row_boundary_polygon,
+    compute_boundary_polygon,
     get_route_distance,
     get_route_edges,
     merge_action_segments,
@@ -957,9 +957,12 @@ class TopologicalNavServer(rclpy.node.Node):
         if hasattr(goal, 'poses'):
             n = segment.num_edges
             for i, ed in enumerate(segment.edge_data):
-                last = (i == n - 1)
-                ignore = not last or (
-                    last and self._no_orientation and is_final_segment
+                is_last = (i == n - 1)
+                # Composable: ignore orientation for all intermediate
+                # waypoints; only the final waypoint keeps orientation.
+                ignore = (
+                    not is_last
+                    or (self._no_orientation and is_final_segment)
                 )
                 ps = self._pose_or_fallback(
                     ed['target'], ignore_orientation=ignore,
@@ -1516,11 +1519,8 @@ class TopologicalNavServer(rclpy.node.Node):
             ),
         )
 
-        # Row-traversal boundary polygon
-        if action == "row_traversal":
-            self._handle_row_boundary(segment)
-        else:
-            self._publish_empty_boundary()
+        # Publish boundary polygon if edges carry boundary props
+        self._publish_segment_boundary(segment)
 
         # Pre-flight: validate all edges
         edge_dicts = []
@@ -1601,13 +1601,28 @@ class TopologicalNavServer(rclpy.node.Node):
         return True
 
     # =================================================================
-    # Row-traversal boundary
+    # Boundary publishing
     # =================================================================
 
-    def _handle_row_boundary(self, segment):
-        frame_id = self._node_nav_frame(segment.first_source)
+    def _publish_segment_boundary(self, segment):
+        """Publish a boundary polygon if edges have boundary properties.
 
-        poly = compute_row_boundary_polygon(
+        Checks whether any edge in the segment carries
+        ``boundary_left`` or ``boundary_right`` properties.  If so,
+        a corridor polygon is computed and published.  Otherwise an
+        empty polygon is published to clear any previous boundary.
+        """
+        has_boundary = any(
+            'boundary_left' in ed.get('properties', {})
+            or 'boundary_right' in ed.get('properties', {})
+            for ed in segment.edge_data
+        )
+        if not has_boundary:
+            self._publish_empty_boundary()
+            return
+
+        frame_id = self._node_nav_frame(segment.first_source)
+        poly = compute_boundary_polygon(
             self._graph, segment,
             default_left=self._default_boundary_left,
             default_right=self._default_boundary_right,
@@ -1616,7 +1631,7 @@ class TopologicalNavServer(rclpy.node.Node):
             self._publish_boundary(poly, frame_id)
         else:
             self.get_logger().warning(
-                "[BOUNDARY] Cannot compute row polygon",
+                "[BOUNDARY] Cannot compute boundary polygon",
             )
             self._publish_empty_boundary(frame_id)
 

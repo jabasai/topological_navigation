@@ -5,7 +5,7 @@ Covers the pure-Python navigation-graph module:
 - plan_route (A* via NetworkX)
 - get_route_edges
 - merge_action_segments
-- compute_row_boundary_polygon
+- compute_boundary_polygon
 - get_route_distance
 - ActionSegment dataclass
 """
@@ -23,7 +23,7 @@ from topological_navigation.navigation_graph import (
     NavState,
     NavStateMachine,
     VALID_TRANSITIONS,
-    compute_row_boundary_polygon,
+    compute_boundary_polygon,
     get_route_distance,
     get_route_edges,
     merge_action_segments,
@@ -397,7 +397,7 @@ class TestMergeActionSegments:
 
 
 # =====================================================================
-# compute_row_boundary_polygon tests
+# compute_boundary_polygon tests
 # =====================================================================
 
 
@@ -411,7 +411,7 @@ class TestComputeRowBoundary:
         segments = merge_action_segments(edges)
         assert len(segments) == 1
 
-        poly = compute_row_boundary_polygon(
+        poly = compute_boundary_polygon(
             simple_graph, segments[0],
             default_left=0.5, default_right=0.5,
         )
@@ -431,7 +431,7 @@ class TestComputeRowBoundary:
         edges = get_route_edges(simple_graph, ['B', 'C'])
         segments = merge_action_segments(edges)
 
-        poly = compute_row_boundary_polygon(simple_graph, segments[0])
+        poly = compute_boundary_polygon(simple_graph, segments[0])
 
         # Left offset should be 0.3 (y = +0.3 for horizontal edge)
         assert abs(poly[0][1] - 0.3) < 0.01
@@ -443,7 +443,7 @@ class TestComputeRowBoundary:
         edges = get_route_edges(simple_graph, ['B', 'C', 'D'])
         segments = merge_action_segments(edges)
 
-        poly = compute_row_boundary_polygon(
+        poly = compute_boundary_polygon(
             simple_graph, segments[0],
             default_left=0.5, default_right=0.5,
         )
@@ -451,14 +451,14 @@ class TestComputeRowBoundary:
 
     def test_empty_segment_returns_empty(self, simple_graph):
         segment = ActionSegment(action_type='row_traversal')
-        poly = compute_row_boundary_polygon(simple_graph, segment)
+        poly = compute_boundary_polygon(simple_graph, segment)
         assert poly == []
 
     def test_polygon_is_closed_corridor(self, simple_graph):
         """All left points should be on one side, right on the other."""
         edges = get_route_edges(simple_graph, ['B', 'C', 'D'])
         segments = merge_action_segments(edges)
-        poly = compute_row_boundary_polygon(
+        poly = compute_boundary_polygon(
             simple_graph, segments[0],
             default_left=1.0, default_right=1.0,
         )
@@ -479,7 +479,7 @@ class TestComputeRowBoundary:
 
         edges = get_route_edges(G, ['P', 'Q'])
         segments = merge_action_segments(edges)
-        poly = compute_row_boundary_polygon(
+        poly = compute_boundary_polygon(
             G, segments[0], default_left=1.0, default_right=1.0,
         )
         assert len(poly) == 4
@@ -584,7 +584,7 @@ class TestIntegrationWithBuildGraph:
 
         row_seg = [s for s in segments
                    if s.action_type == 'row_traversal'][0]
-        poly = compute_row_boundary_polygon(graph, row_seg)
+        poly = compute_boundary_polygon(graph, row_seg)
 
         # 3 waypoints (N3, N4, N5) -> 6 polygon points
         assert len(poly) == 6
