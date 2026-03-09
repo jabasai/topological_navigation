@@ -23,16 +23,9 @@ def generate_test_description():
         ),
         launch_ros.actions.Node(
             executable=sys.executable,
-            arguments=[str(path_to_test / '..' / 'topological_navigation'/'scripts' /'map_manager2.py'), str(path_to_test / 'conf' / 'network_autogen.tmap2.yaml')],
+            arguments=[str(path_to_test / '..' / 'topological_navigation'/'scripts' /'map_manager2.py'), str(path_to_test / 'fixtures' / 'simple_map.yaml')],
             additional_env={'PYTHONUNBUFFERED': '1'},
             name='map_manager',
-            output='screen',
-        ),
-        launch_ros.actions.Node(
-            executable=sys.executable,
-            arguments=[str(path_to_test / '..' / 'topological_navigation'/'scripts'/'topological_transform_publisher.py')],
-            additional_env={'PYTHONUNBUFFERED': '1'},
-            name='topological_transform_publisher',
             output='screen',
         ),
         launch_ros.actions.Node(
