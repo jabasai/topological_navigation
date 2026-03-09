@@ -10,7 +10,7 @@ name: polygon_shapes_test_map
 pointset: polygon_shapes_test_map
 
 transformation:
-  child: polygon_shapes_test_map
+  topo_frame_id: polygon_shapes_test_map
   parent: map
   rotation:
     w: 1.0
@@ -22,6 +22,29 @@ transformation:
     y: 0.0
     z: 0.0
 
+definitions:
+  default_bt: |
+    <root main_tree_to_execute="MainTree">
+      <BehaviorTree ID="MainTree">
+        <PipelineSequence name="NavigateWithReplanning">
+          <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased"/>
+          <FollowPath path="{path}" controller_id="FollowPath"/>
+        </PipelineSequence>
+      </BehaviorTree>
+    </root>
+
+actions:
+  navigate_to_pose:
+    composable: false
+    action_type: nav2_msgs.action.NavigateToPose
+    action_server: /navigate_to_pose
+    action_goal_template:
+      pose:
+        header:
+          frame_id: '${node.nav_frame}'
+        pose: '${node.pose}'
+      behavior_tree: '${definitions.default_bt}'
+
 nodes:
   # Triangle polygon
   - meta:
@@ -30,9 +53,8 @@ nodes:
       pointset: polygon_shapes_test_map
     node:
       edges: []
-      localise_by_topic: ''
       name: TriangleNode
-      parent_frame: map
+      nav_frame: '${transformation.topo_frame_id}'
       pose:
         orientation:
           w: 1.0
@@ -60,9 +82,8 @@ nodes:
       pointset: polygon_shapes_test_map
     node:
       edges: []
-      localise_by_topic: ''
       name: PentagonNode
-      parent_frame: map
+      nav_frame: '${transformation.topo_frame_id}'
       pose:
         orientation:
           w: 1.0
@@ -94,9 +115,8 @@ nodes:
       pointset: polygon_shapes_test_map
     node:
       edges: []
-      localise_by_topic: ''
       name: HexagonNode
-      parent_frame: map
+      nav_frame: '${transformation.topo_frame_id}'
       pose:
         orientation:
           w: 1.0
@@ -130,9 +150,8 @@ nodes:
       pointset: polygon_shapes_test_map
     node:
       edges: []
-      localise_by_topic: ''
       name: LShapeNode
-      parent_frame: map
+      nav_frame: '${transformation.topo_frame_id}'
       pose:
         orientation:
           w: 1.0
@@ -166,9 +185,8 @@ nodes:
       pointset: polygon_shapes_test_map
     node:
       edges: []
-      localise_by_topic: ''
       name: IrregularNode
-      parent_frame: map
+      nav_frame: '${transformation.topo_frame_id}'
       pose:
         orientation:
           w: 1.0
@@ -200,9 +218,8 @@ nodes:
       pointset: polygon_shapes_test_map
     node:
       edges: []
-      localise_by_topic: ''
       name: TinyNode
-      parent_frame: map
+      nav_frame: '${transformation.topo_frame_id}'
       pose:
         orientation:
           w: 1.0
@@ -232,9 +249,8 @@ nodes:
       pointset: polygon_shapes_test_map
     node:
       edges: []
-      localise_by_topic: ''
       name: LargeNode
-      parent_frame: map
+      nav_frame: '${transformation.topo_frame_id}'
       pose:
         orientation:
           w: 1.0
@@ -264,9 +280,8 @@ nodes:
       pointset: polygon_shapes_test_map
     node:
       edges: []
-      localise_by_topic: ''
       name: RectangleNode
-      parent_frame: map
+      nav_frame: '${transformation.topo_frame_id}'
       pose:
         orientation:
           w: 1.0
@@ -296,9 +311,8 @@ nodes:
       pointset: polygon_shapes_test_map
     node:
       edges: []
-      localise_by_topic: ''
       name: EmptyVertsNode
-      parent_frame: map
+      nav_frame: '${transformation.topo_frame_id}'
       pose:
         orientation:
           w: 1.0
@@ -320,9 +334,8 @@ nodes:
       pointset: polygon_shapes_test_map
     node:
       edges: []
-      localise_by_topic: ''
       name: StarNode
-      parent_frame: map
+      nav_frame: '${transformation.topo_frame_id}'
       pose:
         orientation:
           w: 1.0

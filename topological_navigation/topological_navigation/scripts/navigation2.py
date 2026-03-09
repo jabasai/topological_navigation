@@ -48,6 +48,7 @@ Last Updated: 2026-02-25
 
 import importlib
 import json
+import math
 import os
 import tempfile
 import time
@@ -60,6 +61,9 @@ import rclpy
 import rclpy.node
 from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import Point32, PolygonStamped, PoseStamped
+from rcl_interfaces.msg import Parameter as RclParameter
+from rcl_interfaces.msg import ParameterType, ParameterValue
+from rcl_interfaces.srv import SetParameters
 from rclpy import Parameter
 from rclpy.action import ActionClient, ActionServer
 from rclpy.callback_groups import (
@@ -380,6 +384,16 @@ class TopologicalNavServer(rclpy.node.Node):
             qos_profile=self._latch,
         )
 
+        # -- Goal checker service client ---------------------------
+        gc_node = self._goal_checker_node
+        self._set_params_client = self.create_client(
+            SetParameters,
+            '/%s/set_parameters' % gc_node,
+            callback_group=ReentrantCallbackGroup(),
+        )
+        self._last_xy_tol = None
+        self._last_yaw_tol = None
+
         self.get_logger().info(
             "[INIT] Navigation server READY ('%s', algo=%s, weight=%s)"
             % (self._topol_map, self._route_algorithm, self._route_weight),
@@ -398,6 +412,10 @@ class TopologicalNavServer(rclpy.node.Node):
             # NetworkX path optimisation
             ('route_algorithm', Parameter.Type.STRING),
             ('route_weight_attr', Parameter.Type.STRING),
+            # Nav2 goal checker
+            ('goal_checker_node', Parameter.Type.STRING),
+            ('xy_tolerance_param', Parameter.Type.STRING),
+            ('yaw_tolerance_param', Parameter.Type.STRING),
         ]:
             self.declare_parameter(name, ptype)
 
@@ -425,6 +443,19 @@ class TopologicalNavServer(rclpy.node.Node):
         # The edge attribute used as the cost for path planning
         self._route_weight = _p(
             'route_weight_attr', Parameter.Type.STRING, 'weight',
+        )
+        # Nav2 goal checker node and parameter names
+        self._goal_checker_node = _p(
+            'goal_checker_node', Parameter.Type.STRING,
+            'controller_server',
+        )
+        self._xy_tolerance_param = _p(
+            'xy_tolerance_param', Parameter.Type.STRING,
+            'goal_checker.xy_goal_tolerance',
+        )
+        self._yaw_tolerance_param = _p(
+            'yaw_tolerance_param', Parameter.Type.STRING,
+            'goal_checker.yaw_goal_tolerance',
         )
 
     # =================================================================
@@ -843,6 +874,130 @@ class TopologicalNavServer(rclpy.node.Node):
                 ps = self._build_pose_stamped(nd, ignore_orientation)
         return ps
 
+    def _build_edge_oriented_pose(self, node_name, next_node_name):
+        """Build ``PoseStamped`` at *node_name* oriented toward *next_node*.
+
+        Used for intermediate waypoints in composable segments so the
+        robot faces the direction of the next edge instead of using
+        the stored node orientation.
+
+        Args:
+            node_name: Node whose position is used.
+            next_node_name: Node toward which the orientation points.
+
+        Returns:
+            ``PoseStamped`` with yaw facing *next_node_name*,
+            or ``None`` if either node is missing from the graph.
+        """
+        if (
+            node_name not in self._graph
+            or next_node_name not in self._graph
+        ):
+            return None
+
+        attrs = self._graph.nodes[node_name]
+        next_attrs = self._graph.nodes[next_node_name]
+
+        dx = float(next_attrs.get('x', 0.0)) - float(attrs.get('x', 0.0))
+        dy = float(next_attrs.get('y', 0.0)) - float(attrs.get('y', 0.0))
+        yaw = math.atan2(dy, dx)
+
+        ps = PoseStamped()
+        ps.header.stamp = self.get_clock().now().to_msg()
+        ps.header.frame_id = self._node_nav_frame(node_name)
+        ps.pose.position.x = float(attrs.get('x', 0.0))
+        ps.pose.position.y = float(attrs.get('y', 0.0))
+        ps.pose.position.z = float(attrs.get('z', 0.0))
+        ps.pose.orientation.z = math.sin(yaw / 2.0)
+        ps.pose.orientation.w = math.cos(yaw / 2.0)
+        return ps
+
+    # =================================================================
+    # Nav2 goal tolerances
+    # =================================================================
+
+    def _set_goal_tolerances(self, node_name):
+        """Set Nav2 goal checker tolerances from node properties.
+
+        Reads ``xy_goal_tolerance`` and ``yaw_goal_tolerance`` from
+        the target node's properties and sets them on the Nav2
+        controller_server via the ``SetParameters`` service.
+
+        This is best-effort: if the service is unavailable the
+        goal proceeds with the previously configured tolerances.
+        """
+        if node_name not in self._graph:
+            return
+
+        props = self._graph.nodes[node_name].get('properties', {})
+        xy_tol = props.get('xy_goal_tolerance')
+        yaw_tol = props.get('yaw_goal_tolerance')
+
+        if xy_tol is None and yaw_tol is None:
+            return
+
+        # Skip if unchanged from last set
+        if xy_tol == self._last_xy_tol and yaw_tol == self._last_yaw_tol:
+            return
+
+        params = []
+        if xy_tol is not None:
+            p = RclParameter()
+            p.name = self._xy_tolerance_param
+            p.value = ParameterValue(
+                type=ParameterType.PARAMETER_DOUBLE,
+                double_value=float(xy_tol),
+            )
+            params.append(p)
+
+        if yaw_tol is not None:
+            p = RclParameter()
+            p.name = self._yaw_tolerance_param
+            p.value = ParameterValue(
+                type=ParameterType.PARAMETER_DOUBLE,
+                double_value=float(yaw_tol),
+            )
+            params.append(p)
+
+        if not self._set_params_client.service_is_ready():
+            self.get_logger().debug(
+                "[TOL] SetParameters service not available, skipping",
+            )
+            return
+
+        req = SetParameters.Request()
+        req.parameters = params
+        future = self._set_params_client.call_async(req)
+        future.add_done_callback(self._tolerance_set_cb)
+
+        self._last_xy_tol = xy_tol
+        self._last_yaw_tol = yaw_tol
+
+        self.get_logger().info(
+            "[TOL] Setting tolerances for '%s': xy=%.3f yaw=%.3f"
+            % (
+                node_name,
+                float(xy_tol) if xy_tol is not None else -1,
+                float(yaw_tol) if yaw_tol is not None else -1,
+            ),
+        )
+
+    def _tolerance_set_cb(self, future):
+        """Log result of tolerance parameter update."""
+        try:
+            result = future.result()
+            failed = [
+                r for r in result.results if not r.successful
+            ]
+            if failed:
+                self.get_logger().warning(
+                    "[TOL] Some parameters failed to set",
+                )
+        except Exception as exc:
+            self.get_logger().debug(
+                "[TOL] SetParameters call failed: %s" % exc,
+            )
+
     # =================================================================
     # Goal construction (map-driven)
     # =================================================================
@@ -958,18 +1113,31 @@ class TopologicalNavServer(rclpy.node.Node):
             n = segment.num_edges
             for i, ed in enumerate(segment.edge_data):
                 is_last = (i == n - 1)
-                # Composable: ignore orientation for all intermediate
-                # waypoints; only the final waypoint keeps orientation.
-                ignore = (
-                    not is_last
-                    or (self._no_orientation and is_final_segment)
-                )
-                ps = self._pose_or_fallback(
-                    ed['target'], ignore_orientation=ignore,
-                )
+                tgt = ed['target']
+
+                if not is_last:
+                    # Intermediate waypoint: orient toward the next
+                    # edge's target so the robot faces its travel
+                    # direction instead of using the node's stored
+                    # orientation.
+                    next_tgt = segment.edge_data[i + 1]['target']
+                    ps = self._build_edge_oriented_pose(tgt, next_tgt)
+                    if ps is None:
+                        ps = self._pose_or_fallback(
+                            tgt, ignore_orientation=True,
+                        )
+                elif self._no_orientation and is_final_segment:
+                    # Final waypoint with no-orientation flag.
+                    ps = self._pose_or_fallback(
+                        tgt, ignore_orientation=True,
+                    )
+                else:
+                    # Final waypoint: keep the node's orientation.
+                    ps = self._pose_or_fallback(tgt)
+
                 if ps is not None:
                     frame = self._resolve_template_frame(
-                        tpl, ed['target'],
+                        tpl, tgt,
                     )
                     if frame:
                         ps.header.frame_id = frame
@@ -1551,6 +1719,9 @@ class TopologicalNavServer(rclpy.node.Node):
         self._publish_current_edge(
             segment.edge_ids[0] if segment.edge_ids else "none",
         )
+
+        # Set Nav2 goal checker tolerances from target node properties
+        self._set_goal_tolerances(segment.last_target)
 
         self.get_logger().info(
             "  Sending %d-wp %s goal" % (segment.num_edges, action),

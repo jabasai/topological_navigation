@@ -92,8 +92,7 @@ class TestGraphConstruction:
         edge_attrs = graph.edges['WP1', 'WP2']
         
         assert edge_attrs['edge_id'] == 'WP1_WP2'
-        assert edge_attrs['action'] == 'NavigateToPose'
-        assert edge_attrs['action_type'] == 'nav2_msgs/action/NavigateToPose'
+        assert edge_attrs['action'] == 'navigate_to_pose'
         assert 'properties' in edge_attrs
         assert 'weight' in edge_attrs
 
