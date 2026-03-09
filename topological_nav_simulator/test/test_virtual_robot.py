@@ -4,7 +4,9 @@
 
 import math
 
-from geometry_msgs.msg import Pose, Quaternion
+import pytest
+geometry_msgs = pytest.importorskip('geometry_msgs', reason='geometry_msgs not available')
+from geometry_msgs.msg import Pose, Quaternion  # noqa: E402
 from topological_nav_simulator.virtual_robot import (
     _euler_from_quaternion,
     _lerp,
