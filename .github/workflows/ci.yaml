@@ -31,12 +31,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install pytest pyyaml jsonschema networkx scipy numpy
 
-      - name: Install ROS 2 message stubs for geometry_msgs
-        run: |
-          # geometry_msgs is only needed for a few tests; install the
-          # ROS 2 pip stubs when available, otherwise skip those tests.
-          pip install geometry-msgs 2>/dev/null || true
-
       - name: Run topological_navigation unit tests
         working-directory: topological_navigation
         run: |

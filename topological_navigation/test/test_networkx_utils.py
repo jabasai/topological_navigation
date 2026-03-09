@@ -17,6 +17,17 @@ from pathlib import Path
 # Import the module to test
 from topological_navigation.networkx_utils import build_graph_from_tmap
 
+# geometry_msgs is only available in a ROS 2 environment
+try:
+    import geometry_msgs  # noqa: F401
+    _has_geometry_msgs = True
+except ImportError:
+    _has_geometry_msgs = False
+
+_skip_no_geometry = pytest.mark.skipif(
+    not _has_geometry_msgs, reason='geometry_msgs not available'
+)
+
 
 # ---------------------------------------------------------------------------
 # Module-level fixtures (available to all test classes)
@@ -784,6 +795,7 @@ class TestKDTreeConstruction:
         assert node_names == []
 
 
+@_skip_no_geometry
 class TestNearestNodeQuery:
     """Tests for query_nearest_nodes function."""
 
@@ -839,6 +851,7 @@ class TestNearestNodeQuery:
         assert results == []
 
 
+@_skip_no_geometry
 class TestPointInPolygon:
     """Tests for point_in_poly_nx function."""
 
@@ -889,6 +902,7 @@ class TestPointInPolygon:
         assert result is False
 
 
+@_skip_no_geometry
 class TestEdgeDistances:
     """Tests for get_edge_distances_nx function."""
 
@@ -925,6 +939,7 @@ class TestEdgeDistances:
         assert len(distances) == 0
 
 
+@_skip_no_geometry
 class TestCurrentNodeDetermination:
     """Tests for determine_current_node function."""
 
@@ -977,6 +992,7 @@ class TestCurrentNodeDetermination:
         assert current == 'none'
 
 
+@_skip_no_geometry
 class TestClosestNodeDetermination:
     """Tests for determine_closest_node function."""
 
