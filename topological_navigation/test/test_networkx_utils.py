@@ -18,22 +18,29 @@ from pathlib import Path
 from topological_navigation.networkx_utils import build_graph_from_tmap
 
 
+# ---------------------------------------------------------------------------
+# Module-level fixtures (available to all test classes)
+# ---------------------------------------------------------------------------
+
+FIXTURE_DIR = Path(__file__).parent / 'fixtures'
+
+
+@pytest.fixture
+def simple_map_data():
+    """Load simple map fixture."""
+    with open(FIXTURE_DIR / 'simple_map.yaml', 'r') as f:
+        return yaml.safe_load(f)
+
+
+@pytest.fixture
+def complex_map_data():
+    """Load complex map fixture."""
+    with open(FIXTURE_DIR / 'complex_map.yaml', 'r') as f:
+        return yaml.safe_load(f)
+
+
 class TestGraphConstruction:
     """Tests for build_graph_from_tmap function."""
-
-    @pytest.fixture
-    def simple_map_data(self):
-        """Load simple map fixture."""
-        fixture_path = Path(__file__).parent / 'fixtures' / 'simple_map.yaml'
-        with open(fixture_path, 'r') as f:
-            return yaml.safe_load(f)
-
-    @pytest.fixture
-    def complex_map_data(self):
-        """Load complex map fixture."""
-        fixture_path = Path(__file__).parent / 'fixtures' / 'complex_map.yaml'
-        with open(fixture_path, 'r') as f:
-            return yaml.safe_load(f)
 
     def test_simple_map_conversion(self, simple_map_data):
         """Test conversion of simple map (2 nodes)."""
@@ -122,7 +129,8 @@ class TestGraphConstruction:
         invalid_map2 = {'nodes': 'not_a_list'}
         assert build_graph_from_tmap(invalid_map2) is None
         
-        # Map with node missing 'name'
+        # Map with node missing 'name' -- only invalid node means 0 valid,
+        # so build_graph_from_tmap returns None.
         invalid_map3 = {
             'nodes': [{
                 'node': {
@@ -134,8 +142,7 @@ class TestGraphConstruction:
             }]
         }
         graph = build_graph_from_tmap(invalid_map3)
-        assert graph is not None
-        assert graph.number_of_nodes() == 0  # Node skipped
+        assert graph is None  # No valid nodes -> returns None
 
     def test_invalid_data_handling(self):
         """Test handling of completely invalid data."""
@@ -153,9 +160,8 @@ class TestGraphConstruction:
         empty_map = {'nodes': []}
         graph = build_graph_from_tmap(empty_map)
         
-        assert graph is not None
-        assert graph.number_of_nodes() == 0
-        assert graph.number_of_edges() == 0
+        # Empty nodes list -> 0 valid nodes -> returns None
+        assert graph is None
 
     def test_node_with_no_edges(self, simple_map_data):
         """Test node with no outgoing edges."""
@@ -342,8 +348,8 @@ class TestErrorHandlingWithLogging:
         }
         result = build_graph_from_tmap(invalid_map, logger=logger)
         
-        assert result is not None
-        assert result.number_of_nodes() == 0
+        # Single invalid node -> 0 valid nodes -> returns None
+        assert result is None
         assert len(logger.warnings) >= 1
         assert any("Missing required 'name' field" in w for w in logger.warnings)
 
@@ -359,8 +365,7 @@ class TestErrorHandlingWithLogging:
         }
         result = build_graph_from_tmap(invalid_map, logger=logger)
         
-        assert result is not None
-        assert result.number_of_nodes() == 0
+        assert result is None  # No valid nodes -> returns None
         assert len(logger.warnings) >= 1
         assert any("Missing required 'pose' field" in w for w in logger.warnings)
 
@@ -379,8 +384,7 @@ class TestErrorHandlingWithLogging:
         }
         result = build_graph_from_tmap(invalid_map, logger=logger)
         
-        assert result is not None
-        assert result.number_of_nodes() == 0
+        assert result is None  # No valid nodes -> returns None
         assert len(logger.warnings) >= 1
         assert any("Missing 'position' in pose" in w for w in logger.warnings)
 
@@ -399,8 +403,7 @@ class TestErrorHandlingWithLogging:
         }
         result = build_graph_from_tmap(invalid_map, logger=logger)
         
-        assert result is not None
-        assert result.number_of_nodes() == 0
+        assert result is None  # No valid nodes -> returns None
         assert len(logger.warnings) >= 1
         assert any("Missing 'orientation' in pose" in w for w in logger.warnings)
 
@@ -420,8 +423,7 @@ class TestErrorHandlingWithLogging:
         }
         result = build_graph_from_tmap(invalid_map, logger=logger)
         
-        assert result is not None
-        assert result.number_of_nodes() == 0
+        assert result is None  # No valid nodes -> returns None
         assert len(logger.warnings) >= 1
         assert any("Missing position coordinates" in w for w in logger.warnings)
 
@@ -441,8 +443,7 @@ class TestErrorHandlingWithLogging:
         }
         result = build_graph_from_tmap(invalid_map, logger=logger)
         
-        assert result is not None
-        assert result.number_of_nodes() == 0
+        assert result is None  # No valid nodes -> returns None
         assert len(logger.warnings) >= 1
         assert any("Missing orientation components" in w for w in logger.warnings)
 
@@ -462,8 +463,7 @@ class TestErrorHandlingWithLogging:
         }
         result = build_graph_from_tmap(invalid_map, logger=logger)
         
-        assert result is not None
-        assert result.number_of_nodes() == 0
+        assert result is None  # No valid nodes -> returns None
         assert len(logger.warnings) >= 1
         assert any("Error converting coordinates to float" in w for w in logger.warnings)
 
@@ -734,14 +734,12 @@ class TestKDTreeConstruction:
 
     @pytest.fixture
     def simple_graph(self, simple_map_data):
-        """Build graph from simple map."""
-        from topological_navigation.networkx_utils import build_graph_from_tmap
+        """Build graph from simple map (uses module-level fixture)."""
         return build_graph_from_tmap(simple_map_data)
 
     @pytest.fixture
     def complex_graph(self, complex_map_data):
-        """Build graph from complex map."""
-        from topological_navigation.networkx_utils import build_graph_from_tmap
+        """Build graph from complex map (uses module-level fixture)."""
         return build_graph_from_tmap(complex_map_data)
 
     def test_kdtree_construction_simple(self, simple_graph):
@@ -792,7 +790,7 @@ class TestNearestNodeQuery:
     @pytest.fixture
     def simple_kdtree_setup(self, simple_map_data):
         """Build graph and KD-tree from simple map."""
-        from topological_navigation.networkx_utils import build_graph_from_tmap, build_kdtree_from_graph
+        from topological_navigation.networkx_utils import build_kdtree_from_graph
         graph = build_graph_from_tmap(simple_map_data)
         kdtree, node_names = build_kdtree_from_graph(graph)
         return kdtree, node_names
@@ -850,31 +848,34 @@ class TestPointInPolygon:
         fixture_path = Path(__file__).parent / 'fixtures' / 'polygon_shapes_map.yaml'
         with open(fixture_path, 'r') as f:
             map_data = yaml.safe_load(f)
-        from topological_navigation.networkx_utils import build_graph_from_tmap
         return build_graph_from_tmap(map_data)
 
-    def test_point_inside_square(self, polygon_graph):
-        """Test point inside square influence zone."""
+    def test_point_inside_rectangle(self, polygon_graph):
+        """Test point inside RectangleNode influence zone.
+
+        RectangleNode is at (10, -10) with verts [(-3,-1),(3,-1),(3,1),(-3,1)].
+        So absolute point (10.5, -9.5) is relative (0.5, 0.5) -> inside.
+        """
         from topological_navigation.networkx_utils import point_in_poly_nx
         from geometry_msgs.msg import Pose
         
         pose = Pose()
-        pose.position.x = 0.5
-        pose.position.y = 0.5
+        pose.position.x = 10.5
+        pose.position.y = -9.5
         
-        result = point_in_poly_nx(polygon_graph, 'SquareZone', pose)
+        result = point_in_poly_nx(polygon_graph, 'RectangleNode', pose)
         assert result is True
 
-    def test_point_outside_square(self, polygon_graph):
-        """Test point outside square influence zone."""
+    def test_point_outside_rectangle(self, polygon_graph):
+        """Test point outside RectangleNode influence zone."""
         from topological_navigation.networkx_utils import point_in_poly_nx
         from geometry_msgs.msg import Pose
         
         pose = Pose()
-        pose.position.x = 5.0
-        pose.position.y = 5.0
+        pose.position.x = 50.0
+        pose.position.y = 50.0
         
-        result = point_in_poly_nx(polygon_graph, 'SquareZone', pose)
+        result = point_in_poly_nx(polygon_graph, 'RectangleNode', pose)
         assert result is False
 
     def test_point_in_poly_none_graph(self):
@@ -893,8 +894,7 @@ class TestEdgeDistances:
 
     @pytest.fixture
     def simple_graph(self, simple_map_data):
-        """Build graph from simple map."""
-        from topological_navigation.networkx_utils import build_graph_from_tmap
+        """Build graph from simple map (uses module-level fixture)."""
         return build_graph_from_tmap(simple_map_data)
 
     def test_edge_distances_calculation(self, simple_graph):
@@ -931,9 +931,7 @@ class TestCurrentNodeDetermination:
     @pytest.fixture
     def localization_setup(self, simple_map_data):
         """Build graph and KD-tree for localization."""
-        from topological_navigation.networkx_utils import (
-            build_graph_from_tmap, build_kdtree_from_graph
-        )
+        from topological_navigation.networkx_utils import build_kdtree_from_graph
         graph = build_graph_from_tmap(simple_map_data)
         kdtree, node_names = build_kdtree_from_graph(graph)
         return graph, kdtree, node_names
@@ -985,9 +983,7 @@ class TestClosestNodeDetermination:
     @pytest.fixture
     def localization_setup(self, simple_map_data):
         """Build graph and KD-tree for localization."""
-        from topological_navigation.networkx_utils import (
-            build_graph_from_tmap, build_kdtree_from_graph
-        )
+        from topological_navigation.networkx_utils import build_kdtree_from_graph
         graph = build_graph_from_tmap(simple_map_data)
         kdtree, node_names = build_kdtree_from_graph(graph)
         return graph, kdtree, node_names
@@ -1041,7 +1037,6 @@ class TestTopicBasedLocalization:
     @pytest.fixture
     def complex_graph(self, complex_map_data):
         """Build graph from complex map."""
-        from topological_navigation.networkx_utils import build_graph_from_tmap
         return build_graph_from_tmap(complex_map_data)
 
     def test_update_loc_by_topic(self, complex_graph):
@@ -1062,3 +1057,180 @@ class TestTopicBasedLocalization:
         
         assert nodes == []
         assert names == []
+
+
+# ===========================================================================
+# Graph algorithm wrappers
+# ===========================================================================
+
+
+class TestComputeShortestPath:
+    """Tests for compute_shortest_path."""
+
+    @pytest.fixture
+    def weighted_graph(self):
+        """A -> B (1) -> C (2), A -> C (5)."""
+        from topological_navigation.networkx_utils import compute_shortest_path  # noqa: F401
+        import networkx as nx
+        G = nx.DiGraph()
+        G.add_edge('A', 'B', weight=1.0)
+        G.add_edge('B', 'C', weight=2.0)
+        G.add_edge('A', 'C', weight=5.0)
+        return G
+
+    def test_shortest_via_intermediate(self, weighted_graph):
+        from topological_navigation.networkx_utils import compute_shortest_path
+        path = compute_shortest_path(weighted_graph, 'A', 'C')
+        assert path == ['A', 'B', 'C']
+
+    def test_same_node(self, weighted_graph):
+        from topological_navigation.networkx_utils import compute_shortest_path
+        assert compute_shortest_path(weighted_graph, 'A', 'A') == ['A']
+
+    def test_no_path(self, weighted_graph):
+        """C has no outgoing edges, so C->A should return []."""
+        from topological_navigation.networkx_utils import compute_shortest_path
+        assert compute_shortest_path(weighted_graph, 'C', 'A') == []
+
+    def test_none_graph(self):
+        from topological_navigation.networkx_utils import compute_shortest_path
+        assert compute_shortest_path(None, 'A', 'B') == []
+
+    def test_missing_source(self, weighted_graph):
+        from topological_navigation.networkx_utils import compute_shortest_path
+        assert compute_shortest_path(weighted_graph, 'X', 'A') == []
+
+    def test_missing_target(self, weighted_graph):
+        from topological_navigation.networkx_utils import compute_shortest_path
+        assert compute_shortest_path(weighted_graph, 'A', 'X') == []
+
+
+class TestComputePathLength:
+    """Tests for compute_path_length."""
+
+    @pytest.fixture
+    def weighted_graph(self):
+        import networkx as nx
+        G = nx.DiGraph()
+        G.add_edge('A', 'B', weight=1.5)
+        G.add_edge('B', 'C', weight=2.5)
+        G.add_edge('A', 'C', weight=5.0)
+        return G
+
+    def test_shortest_length(self, weighted_graph):
+        from topological_navigation.networkx_utils import compute_path_length
+        length = compute_path_length(weighted_graph, 'A', 'C')
+        assert length == pytest.approx(4.0)
+
+    def test_same_node_zero(self, weighted_graph):
+        from topological_navigation.networkx_utils import compute_path_length
+        assert compute_path_length(weighted_graph, 'A', 'A') == 0.0
+
+    def test_no_path_inf(self, weighted_graph):
+        from topological_navigation.networkx_utils import compute_path_length
+        assert compute_path_length(weighted_graph, 'C', 'A') == float('inf')
+
+    def test_none_graph_inf(self):
+        from topological_navigation.networkx_utils import compute_path_length
+        assert compute_path_length(None, 'A', 'B') == float('inf')
+
+
+class TestCheckConnectivity:
+    """Tests for check_connectivity."""
+
+    @pytest.fixture
+    def directed_graph(self):
+        import networkx as nx
+        G = nx.DiGraph()
+        G.add_edge('A', 'B')
+        G.add_edge('B', 'C')
+        G.add_node('D')  # isolated
+        return G
+
+    def test_connected(self, directed_graph):
+        from topological_navigation.networkx_utils import check_connectivity
+        assert check_connectivity(directed_graph, 'A', 'C') is True
+
+    def test_not_connected_reverse(self, directed_graph):
+        from topological_navigation.networkx_utils import check_connectivity
+        assert check_connectivity(directed_graph, 'C', 'A') is False
+
+    def test_isolated_node(self, directed_graph):
+        from topological_navigation.networkx_utils import check_connectivity
+        assert check_connectivity(directed_graph, 'A', 'D') is False
+
+    def test_same_node(self, directed_graph):
+        from topological_navigation.networkx_utils import check_connectivity
+        assert check_connectivity(directed_graph, 'A', 'A') is True
+
+    def test_none_graph(self):
+        from topological_navigation.networkx_utils import check_connectivity
+        assert check_connectivity(None, 'A', 'B') is False
+
+    def test_missing_node(self, directed_graph):
+        from topological_navigation.networkx_utils import check_connectivity
+        assert check_connectivity(directed_graph, 'X', 'A') is False
+
+
+class TestGetNeighbors:
+    """Tests for get_neighbors."""
+
+    @pytest.fixture
+    def g(self):
+        import networkx as nx
+        G = nx.DiGraph()
+        G.add_edge('A', 'B')
+        G.add_edge('A', 'C')
+        G.add_edge('B', 'C')
+        return G
+
+    def test_neighbors_of_hub(self, g):
+        from topological_navigation.networkx_utils import get_neighbors
+        assert sorted(get_neighbors(g, 'A')) == ['B', 'C']
+
+    def test_leaf_has_one_neighbor(self, g):
+        from topological_navigation.networkx_utils import get_neighbors
+        assert get_neighbors(g, 'B') == ['C']
+
+    def test_no_outgoing(self, g):
+        from topological_navigation.networkx_utils import get_neighbors
+        assert get_neighbors(g, 'C') == []
+
+    def test_none_graph(self):
+        from topological_navigation.networkx_utils import get_neighbors
+        assert get_neighbors(None, 'A') == []
+
+    def test_missing_node(self, g):
+        from topological_navigation.networkx_utils import get_neighbors
+        assert get_neighbors(g, 'X') == []
+
+
+# ===========================================================================
+# normalize_action_name (navigation_graph)
+# ===========================================================================
+
+
+class TestNormalizeActionName:
+    """Tests for navigation_graph.normalize_action_name."""
+
+    def test_camel_to_canonical(self):
+        from topological_navigation.navigation_graph import normalize_action_name
+        assert normalize_action_name('NavigateToPose') == 'NavigateToPose'
+
+    def test_snake_to_canonical(self):
+        from topological_navigation.navigation_graph import normalize_action_name
+        assert normalize_action_name('navigate_to_pose') == 'NavigateToPose'
+
+    def test_row_traversal_cases(self):
+        from topological_navigation.navigation_graph import normalize_action_name
+        assert normalize_action_name('RowTraversal') == 'row_traversal'
+        assert normalize_action_name('row_traversal') == 'row_traversal'
+
+    def test_goal_align_cases(self):
+        from topological_navigation.navigation_graph import normalize_action_name
+        assert normalize_action_name('GoalAlign') == 'goal_align'
+        assert normalize_action_name('goal_align') == 'goal_align'
+
+    def test_unknown_returned_unchanged(self):
+        from topological_navigation.navigation_graph import normalize_action_name
+        assert normalize_action_name('SomethingNew') == 'SomethingNew'

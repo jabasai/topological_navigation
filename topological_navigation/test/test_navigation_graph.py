@@ -175,14 +175,14 @@ class TestNavStateMachine:
         assert sm.transition(NavState.CANCELLED)
         assert sm.is_terminal()
 
-    def test_execute_to_recovering_to_execute(self):
+    def test_execute_to_different_execute(self):
+        """Can transition directly between executing states (recovery/segment switch)."""
         sm = NavStateMachine()
         sm.transition(NavState.WAITING_FOR_MAP)
         sm.transition(NavState.WAITING_FOR_LOCALISATION)
         sm.transition(NavState.READY)
         sm.transition(NavState.PLANNING)
         sm.transition(NavState.EXECUTING_ROW_TRAVERSAL)
-        assert sm.transition(NavState.RECOVERING)
         assert sm.transition(NavState.EXECUTING_NAVIGATE_TO_POSE)
 
     def test_invalid_transition_returns_false(self):

@@ -34,6 +34,7 @@ if _tn is not None:
 
 import math
 from pathlib import Path
+from threading import Lock
 from unittest.mock import MagicMock, patch, PropertyMock
 
 import numpy as np
@@ -125,6 +126,9 @@ def _make_loc_node(simple_map_data, simple_graph, simple_kdtree):
     loc.closest_edge_ids = []
     loc.closest_edge_dists = []
     loc.current_closest_node_name = ""
+
+    # Thread lock (required by get_edge_distances_to_pose)
+    loc._map_lock = Lock()
 
     # Mock publishers
     loc.wp_pub = MagicMock()
@@ -300,7 +304,8 @@ class TestPublishTopics:
 class TestMapCallback:
     """Test _map_callback builds graph and KD-tree correctly."""
 
-    def test_builds_graph_and_kdtree(self, simple_map_data):
+    def _make_bare_loc(self):
+        """Create a bare TopologicalNavLoc without ROS init."""
         from topological_navigation.scripts.localisation2 import TopologicalNavLoc
 
         with patch.object(TopologicalNavLoc, '__init__', lambda self, *a, **kw: None):
@@ -312,8 +317,15 @@ class TestMapCallback:
         loc._kdtree_node_names = []
         loc.names_by_topic = []
         loc.nodes_by_topic = []
+        loc.loc_by_topic = []
         loc.nogos = []
+        loc.with_tags = False
+        loc._map_lock = Lock()
         loc.get_logger = MagicMock(return_value=MagicMock())
+        return loc
+
+    def test_builds_graph_and_kdtree(self, simple_map_data):
+        loc = self._make_bare_loc()
 
         msg = String()
         msg.data = yaml.dump(simple_map_data)
@@ -326,37 +338,27 @@ class TestMapCallback:
         assert len(loc._kdtree_node_names) == 2
         assert loc.tmap_frame == 'simple_test_map'
 
-    def test_skips_if_already_received(self, simple_map_data):
-        from topological_navigation.scripts.localisation2 import TopologicalNavLoc
+    def test_update_replaces_graph(self, simple_map_data):
+        """Calling _map_callback again should update (not skip)."""
+        loc = self._make_bare_loc()
 
-        with patch.object(TopologicalNavLoc, '__init__', lambda self, *a, **kw: None):
-            loc = TopologicalNavLoc.__new__(TopologicalNavLoc)
-
-        loc.rec_map = True
-        loc.get_logger = MagicMock(return_value=MagicMock())
-
-        # Should return without doing anything
         msg = String()
         msg.data = yaml.dump(simple_map_data)
         loc._map_callback(msg)
+        assert loc.rec_map is True
+        old_graph = loc._graph
+
+        # Second call should update, not skip
+        loc._map_callback(msg)
+        assert loc.rec_map is True
+        assert loc._graph is not None
+        assert loc._graph.number_of_nodes() == 2
 
     def test_handles_bad_map_data(self):
-        from topological_navigation.scripts.localisation2 import TopologicalNavLoc
-
-        with patch.object(TopologicalNavLoc, '__init__', lambda self, *a, **kw: None):
-            loc = TopologicalNavLoc.__new__(TopologicalNavLoc)
-
-        loc.rec_map = False
-        loc._graph = None
-        loc._kdtree = None
-        loc._kdtree_node_names = []
-        loc.names_by_topic = []
-        loc.nodes_by_topic = []
-        loc.nogos = []
-        loc.get_logger = MagicMock(return_value=MagicMock())
+        loc = self._make_bare_loc()
 
         msg = String()
-        msg.data = yaml.dump({'transformation': {'child': 'test'}, 'nodes': []})
+        msg.data = yaml.dump({'transformation': {'topo_frame_id': 'test'}, 'nodes': []})
         loc._map_callback(msg)
 
         # Should not set rec_map because graph build returned None (empty nodes)

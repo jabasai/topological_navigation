@@ -532,22 +532,18 @@ def query_nearest_nodes(kdtree: Optional[KDTree], node_names: List[str], pose, k
         # Query k-nearest neighbors from KD-tree
         distances, indices = kdtree.query(query_point, k=k_actual)
         
-        # Handle single result case (k=1)
-        # scipy returns scalar for k=1, array for k>1
-        if k_actual == 1:
-            distances = [distances]
-            indices = [indices]
-        else:
-            # For k>1, results are in shape (1, k) - extract first row
-            distances = distances[0]
-            indices = indices[0]
+        # Ensure distances and indices are 1-D arrays.
+        # scipy returns shape (1,) for k=1 and shape (1, k) for k>1
+        # when query_point has shape (1, 2).
+        distances = np.atleast_1d(distances).flatten()
+        indices = np.atleast_1d(indices).flatten()
         
         # Build result list with node names and distances
         results = []
         for dist, idx in zip(distances, indices):
             results.append({
-                'node': node_names[idx],
-                'dist': float(dist)  # Convert numpy float to Python float
+                'node': node_names[int(idx)],
+                'dist': float(dist)
             })
         
         # Results are already sorted by distance (KD-tree returns sorted results)
