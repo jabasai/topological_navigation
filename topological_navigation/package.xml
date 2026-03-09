@@ -2,8 +2,8 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>topological_navigation</name>
-  <version>4.0.0</version>
-  <description>The ros2 topological_navigation package (ROS1 support removed in v4.0.0)</description>
+  <version>5.0.0</version>
+  <description>The ros2 topological_navigation package (ROS1 support removed in v5.0.0)</description>
 
 
   <maintainer email="marc@hanheide.net">Marc Hanheide</maintainer>
