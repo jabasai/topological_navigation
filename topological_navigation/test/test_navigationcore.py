@@ -8,6 +8,7 @@ import launch_ros
 import pytest
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy, HistoryPolicy
 from std_msgs.msg import String
 
 @launch_pytest.fixture
@@ -86,9 +87,21 @@ class NavigationClient(Node):
         self.current_node_event_object = Event()
 
     def initialize(self):
-        self.topmap_sub = self.create_subscription(String, '/topological_map_2', self.topmap_sub_callback, 1)
-        self.closest_node_sub = self.create_subscription(String, 'closest_node', self.closest_node_callback, 1)
-        self.current_node_sub = self.create_subscription(String, 'current_node', self.current_node_callback, 1)
+        # Match the TRANSIENT_LOCAL durability used by the publishers
+        # (map_manager2, localisation2) so late-joining subscribers
+        # receive the last published message.
+        latched_qos = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            history=HistoryPolicy.KEEP_LAST,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self.topmap_sub = self.create_subscription(
+            String, '/topological_map_2', self.topmap_sub_callback, latched_qos)
+        self.closest_node_sub = self.create_subscription(
+            String, 'closest_node', self.closest_node_callback, latched_qos)
+        self.current_node_sub = self.create_subscription(
+            String, 'current_node', self.current_node_callback, latched_qos)
 
         self.ros_spin_thread = Thread(target=lambda node: rclpy.spin(node), args=(self,))
         self.ros_spin_thread.start()
