@@ -52,12 +52,9 @@ jobs:
     strategy:
       matrix:
         include:
-          # ROS 2 Humble Hawksbill (Ubuntu 22.04)
           - docker_image: ubuntu:jammy
             ros_distribution: humble
             ros_version: 2
-
-          # ROS 2 Jazzy Jalisco (Ubuntu 24.04)
           - docker_image: ubuntu:noble
             ros_distribution: jazzy
             ros_version: 2
@@ -66,6 +63,13 @@ jobs:
       image: ${{ matrix.docker_image }}
 
     steps:
+      - uses: actions/checkout@v4
+
+      - name: Install rosdep
+        run: |
+          apt-get update
+          apt-get install -y python3-rosdep
+
       - name: setup ROS environment
         uses: LCAS/setup-ros@master
         with:
