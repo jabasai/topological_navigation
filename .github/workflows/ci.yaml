@@ -68,7 +68,10 @@ jobs:
       - name: Install rosdep
         run: |
           apt-get update
-          apt-get install -y python3-rosdep
+          apt-get install -y python3-pip
+          pip3 install rosdep
+          rosdep init || true
+          rosdep update
 
       - name: setup ROS environment
         uses: LCAS/setup-ros@master
@@ -76,7 +79,6 @@ jobs:
           required-ros-distributions: ${{ matrix.ros_distribution }}
 
       - name: build and test ROS 2
-        if: ${{ matrix.ros_version == 2 }}
         uses: ros-tooling/action-ros-ci@v0.3
         with:
           target-ros2-distro: ${{ matrix.ros_distribution }}
