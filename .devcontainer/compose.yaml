@@ -1,0 +1,38 @@
+services:
+  vnc:
+    image: lcas.lincoln.ac.uk/vnc:staging
+    # renable if you want to run standalone
+    # ports: 
+    # - "5801:5801"
+    volumes:
+      - x11:/tmp/.X11-unix
+    devices:
+      - /dev/dri:/dev/dri
+    networks:
+      - ros_net
+    shm_size: '2gb'
+    stdin_open: true
+    tty: true
+
+  topo-nav:
+    build:
+      context: ../
+      dockerfile: .devcontainer/Dockerfile
+    volumes:
+      - x11:/tmp/.X11-unix
+      - ../:/home/ros/workspace:cached
+    stdin_open: true
+    tty: true
+    networks:
+      - ros_net
+    depends_on: 
+      - vnc
+    environment:
+      - DISPLAY=:1.0
+      - ROS_DOMAIN_ID=10
+
+volumes:
+  x11:
+
+networks:
+  ros_net:

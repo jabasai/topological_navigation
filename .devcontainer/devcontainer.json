@@ -1,27 +1,16 @@
 {
 	"name": "topological_navigation",
-	"build": {
-		"dockerfile": "Dockerfile",
-		"context": "."
-	},
+	"dockerComposeFile": "compose.yaml",
+	"service": "topo-nav",
+	"workspaceFolder": "/home/ros/workspace",
 
-	"features": {
-		"ghcr.io/devcontainers/features/desktop-lite:1": {}
-	},
+	// "forwardPorts": ["vnc:5801"],
+	// "portsAttributes": {
+	// 	"vnc:5801": { "label": "novnc" }
+	// },
 
-	"forwardPorts": [6080],
-	"portsAttributes": {
-		"6080": { "label": "novnc" }
-	},
-
-	"postCreateCommand": "bash .devcontainer/run.sh",
-	"containerUser": "lcas",
-	"runArgs": ["--security-opt", "seccomp=unconfined"],
-
-	"containerEnv": {
-		"ROS_LOCALHOST_ONLY": "0",
-		"LIBGL_ALWAYS_SOFTWARE": "1"
-	},
+	// "postCreateCommand": "bash .devcontainer/run.sh",
+	"containerUser": "ros",
 
 	"customizations": {
 		"vscode": {
