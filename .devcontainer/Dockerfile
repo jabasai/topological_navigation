@@ -18,8 +18,12 @@ RUN rm -rf /var/lib/apt/lists/* \
         python3-vcstool \
         python3-rosdep \
     && rm -rf /var/lib/apt/lists/*
-
-# RUN rosdep update --rosdistro ${ROS_DISTRO} && apt-get update \
-#     && rosdep install --from-paths /home/ros/workspace --ignore-src -r -y
-
+    
 USER ${USERNAME}
+    
+RUN rosdep update --rosdistro ${ROS_DISTRO} &&\
+    sudo apt-get update && \
+    rosdep install --from-paths /home/ros/workspace/src --ignore-src -r -y
+
+WORKDIR /home/ros/workspace
+RUN colcon build --symlink-install
