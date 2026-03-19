@@ -20,7 +20,7 @@ services:
       dockerfile: .devcontainer/Dockerfile
     volumes:
       - x11:/tmp/.X11-unix
-      - ../:/home/ros/workspace
+      # - ../:/home/ros/workspace
     stdin_open: true
     tty: true
     networks:
