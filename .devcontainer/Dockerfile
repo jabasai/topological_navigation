@@ -21,11 +21,21 @@ USER ros
 COPY ./ /home/ros/workspace/
 
 WORKDIR /home/ros/workspace
-RUN sudo rm -rf log/ build/ install/ 
-# && \    mkdir log build install
+RUN sudo rm -rf log/ build/ install/  && \    
+    sudo chown -R ros:ros /home/ros/workspace
+
+ENV ROS2_WS=/home/ros/workspace
 
 RUN rosdep update --rosdistro ${ROS_DISTRO} &&\
     sudo apt-get update && \
     rosdep install --from-paths ./src --ignore-src -r -y
 
-# RUN colcon build --symlink-install
+RUN /bin/bash -lc "source /opt/ros/${ROS_DISTRO}/setup.bash && source /home/ros/.bashrc && colcon build --continue-on-error"
+
+
+# ----------------------------------------------------------------------------------------------------
+FROM devcontainer AS demo
+
+RUN /bin/bash -lc "source /opt/ros/${ROS_DISTRO}/setup.bash && source /home/ros/.bashrc && colcon build"
+
+CMD ["/bin/bash", "-lc", "source /home/ros/workspace/install/setup.bash && exec ros2 launch topological_navigation topological_navigation.launch.py"]

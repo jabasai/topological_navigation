@@ -1,9 +1,8 @@
 services:
   vnc:
     image: lcas.lincoln.ac.uk/vnc:staging
-    # renable if you want to run standalone
-    # ports: 
-    # - "5801:5801"
+    ports: 
+    - "5801:5801"
     volumes:
       - x11:/tmp/.X11-unix
     devices:
@@ -16,15 +15,11 @@ services:
 
   topo-nav:
     build:
-      context: ../
+      context: .
       dockerfile: .devcontainer/Dockerfile
-      target: devcontainer
+      target: demo
     volumes:
       - x11:/tmp/.X11-unix
-      - ../:/home/ros/workspace
-      - colcon_build:/home/ros/workspace/build
-      - colcon_install:/home/ros/workspace/install
-      - colcon_log:/home/ros/workspace/log
     stdin_open: true
     tty: true
     networks:
@@ -37,9 +32,6 @@ services:
 
 volumes:
   x11:
-  colcon_build:
-  colcon_install:
-  colcon_log:
 
 networks:
   ros_net:
