@@ -8,11 +8,10 @@ USER root
 RUN rm -rf /var/lib/apt/lists/* \
     && apt-get update --fix-missing \
     && apt-get -y install --no-install-recommends --fix-missing \
-    ros-${ROS_DISTRO}-desktop \
+    ros-${ROS_DISTRO}-rviz2 \
     bash-completion \
     python3-colcon-common-extensions \
     python3-pip \
-    python3-vcstool \
     python3-rosdep \
     && rm -rf /var/lib/apt/lists/*
 
@@ -30,12 +29,14 @@ RUN rosdep update --rosdistro ${ROS_DISTRO} &&\
     sudo apt-get update && \
     rosdep install --from-paths ./src --ignore-src -r -y
 
+# Do an initial build to speed up development
 RUN /bin/bash -lc "source /opt/ros/${ROS_DISTRO}/setup.bash && source /home/ros/.bashrc && colcon build --continue-on-error"
 
 
 # ----------------------------------------------------------------------------------------------------
-FROM devcontainer AS demo
+FROM devcontainer AS final
 
 RUN /bin/bash -lc "source /opt/ros/${ROS_DISTRO}/setup.bash && source /home/ros/.bashrc && colcon build"
 
-CMD ["/bin/bash", "-lc", "source /home/ros/workspace/install/setup.bash && exec ros2 launch topological_navigation topological_navigation.launch.py"]
+ENV MAP_FILE=/home/ros/workspace/src/topological_navigation/config/test_simple_tmap2.yaml 
+CMD ["/bin/bash", "-lc", "source /home/ros/workspace/install/setup.bash && exec ros2 launch topological_navigation topological_navigation.launch.py map_path:=$MAP_FILE"]

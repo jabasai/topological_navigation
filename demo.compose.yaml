@@ -17,7 +17,7 @@ services:
     build:
       context: .
       dockerfile: .devcontainer/Dockerfile
-      target: demo
+      target: final
     volumes:
       - x11:/tmp/.X11-unix
     stdin_open: true
@@ -29,6 +29,8 @@ services:
     environment:
       - DISPLAY=:1.0
       - ROS_DOMAIN_ID=10
+      - MAP_FILE=/home/ros/workspace/src/topological_navigation/config/test_complex_tmap2.yaml
+      - FAKE_ROBOT=true
 
 volumes:
   x11:
