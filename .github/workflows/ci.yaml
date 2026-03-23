@@ -6,7 +6,6 @@ on:
     tags:     # Also run CI on tags.
       - '*'
   pull_request:
-    branches: [ humble-dev, aoc ]
 
 jobs:
   # -------------------------------------------------------------------
