@@ -49,16 +49,23 @@ jobs:
   # Full ROS 2 build + colcon test
   # -------------------------------------------------------------------
   test_docker:
+    name: ROS Testing ${{ matrix.ros_distribution }}
     runs-on: ubuntu-latest
     strategy:
       matrix:
         ros_distribution:
           - humble
+          - jazzy
 
         include:
           # Humble Hawksbill (May 2022 - May 2027)
           - docker_image: ubuntu:jammy
             ros_distribution: humble
+            ros_version: 2
+
+          # Jazzy Jalisco (May 2024 - May 2029)
+          - docker_image: ubuntu:noble
+            ros_distribution: jazzy
             ros_version: 2
 
     container:
