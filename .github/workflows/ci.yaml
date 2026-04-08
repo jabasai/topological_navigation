@@ -65,7 +65,7 @@ jobs:
       image: ${{ matrix.docker_image }}
     steps:
       - name: setup ROS environment
-        uses: LCAS/setup-ros@master
+        uses: ros-tooling/setup-ros@main
         with:
           required-ros-distributions: ${{ matrix.ros_distribution }}
       - name: build and test ROS 2
