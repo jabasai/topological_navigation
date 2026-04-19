@@ -95,14 +95,6 @@ def _node2pose(pose_dict) -> Pose:
     return p
 
 
-def _get_node(nodes_list, name):
-    """Look up a node dict by name from the tmap2 node list."""
-    for entry in nodes_list:
-        if entry['node']['name'] == name:
-            return entry['node']
-    return None
-
-
 # ══════════════════════════════════════════════════════════════════
 #  Main visualiser node
 # ══════════════════════════════════════════════════════════════════
@@ -131,6 +123,17 @@ class TopologicalMapVisualiser(Node):
         self.tmap = None
         self._graph = None
         self._map_dirty = False
+        self._node_entries_by_name: dict[str, dict] = {}
+        self._incoming_edges_by_target: dict[str, list[tuple[dict, dict]]] = {}
+        self._action_names: list[str] = []
+        self._action_index: dict[str, int] = {}
+        self._marker_ids = {
+            'nodes': {},
+            'names': {},
+            'zones': {},
+            'edges': {},
+            'legend': {},
+        }
         self._navigating_to: str | None = None
         self._current_node: str = 'none'
         self._closest_node: str = 'none'
@@ -252,6 +255,48 @@ class TopologicalMapVisualiser(Node):
         self.get_logger().info(
             'Call /<node>/save_map service to persist changes'
         )
+
+    def _refresh_visual_cache(self):
+        """Build lookup tables used by static-marker updates."""
+        self._node_entries_by_name = {}
+        self._incoming_edges_by_target = {}
+        self._action_names = []
+        self._action_index = {}
+
+        if self.tmap is None:
+            return
+
+        seen_actions = set()
+        nodes = self.tmap.get('nodes', [])
+        for entry in nodes:
+            node = entry['node']
+            self._node_entries_by_name[node['name']] = node
+
+        for entry in nodes:
+            node = entry['node']
+            for edge in node.get('edges', []):
+                target = edge.get('node', '')
+                if target:
+                    self._incoming_edges_by_target.setdefault(
+                        target, []
+                    ).append((node, edge))
+
+                action = edge.get('action', '')
+                if action and action not in seen_actions:
+                    seen_actions.add(action)
+                    self._action_names.append(action)
+
+        self._action_index = {
+            action: idx for idx, action in enumerate(self._action_names)
+        }
+
+    @staticmethod
+    def _edge_key(source_name: str, edge: dict) -> str:
+        """Return a stable key for an edge marker."""
+        edge_id = edge.get('edge_id', '')
+        if edge_id:
+            return edge_id
+        return f'{source_name}->{edge.get("node", "")}'
 
     # ──────────────────────────────────────────────────────────────
     #  Map loading / saving
@@ -511,14 +556,13 @@ class TopologicalMapVisualiser(Node):
         if not self._route_nodes or self.tmap is None:
             return
 
-        nodes = self.tmap.get('nodes', [])
         marker_array = MarkerArray()
         idn = 0
         scale = self.marker_scale
 
         # Highlight nodes on the route
         for node_name in self._route_nodes:
-            node_data = _get_node(nodes, node_name)
+            node_data = self._node_entries_by_name.get(node_name)
             if node_data is None:
                 continue
             m = Marker()
@@ -542,8 +586,8 @@ class TopologicalMapVisualiser(Node):
         for i in range(len(self._route_nodes) - 1):
             src_name = self._route_nodes[i]
             dst_name = self._route_nodes[i + 1]
-            src_data = _get_node(nodes, src_name)
-            dst_data = _get_node(nodes, dst_name)
+            src_data = self._node_entries_by_name.get(src_name)
+            dst_data = self._node_entries_by_name.get(dst_name)
             if src_data is None or dst_data is None:
                 continue
 
@@ -569,7 +613,7 @@ class TopologicalMapVisualiser(Node):
             idn += 1
 
         # Source node highlight (cyan)
-        src_data = _get_node(nodes, self._route_nodes[0])
+        src_data = self._node_entries_by_name.get(self._route_nodes[0])
         if src_data is not None:
             m = Marker()
             m.id = idn
@@ -589,7 +633,7 @@ class TopologicalMapVisualiser(Node):
             idn += 1
 
         # Target node highlight (yellow)
-        tgt_data = _get_node(nodes, self._route_nodes[-1])
+        tgt_data = self._node_entries_by_name.get(self._route_nodes[-1])
         if tgt_data is not None:
             m = Marker()
             m.id = idn
@@ -664,44 +708,9 @@ class TopologicalMapVisualiser(Node):
         if self.tmap is None:
             return
 
+        self._refresh_visual_cache()
         nodes = self.tmap.get('nodes', [])
-        marker_array = MarkerArray()
-        actions_seen: list = []
-        idn = 0
-
-        for entry in nodes:
-            node = entry['node']
-
-            # Collect unique edge actions for the legend
-            for edge in node.get('edges', []):
-                act = edge.get('action', '')
-                if act and act not in actions_seen:
-                    actions_seen.append(act)
-
-            # Node sphere
-            marker_array.markers.append(self._mk_node(node, idn))
-            idn += 1
-            # Name label
-            marker_array.markers.append(self._mk_name(node, idn))
-            idn += 1
-            # Influence zone
-            if node.get('verts'):
-                marker_array.markers.append(self._mk_zone(node, idn))
-                idn += 1
-            # Edges
-            for edge in node.get('edges', []):
-                m = self._mk_edge(node, edge, actions_seen)
-                if m is not None:
-                    m.id = idn
-                    marker_array.markers.append(m)
-                    idn += 1
-
-        # Legend
-        for row, action_name in enumerate(actions_seen):
-            marker_array.markers.append(
-                self._mk_legend(action_name, row, actions_seen, idn)
-            )
-            idn += 1
+        marker_array = self._build_full_static_marker_array()
 
         self.map_marker_pub.publish(marker_array)
 
@@ -711,7 +720,7 @@ class TopologicalMapVisualiser(Node):
 
         self.get_logger().info(
             f'Visualisation published ({len(nodes)} nodes, '
-            f'{idn} markers)'
+            f'{len(marker_array.markers)} markers)'
         )
 
     # ──────────────────────────────────────────────────────────────
@@ -857,11 +866,12 @@ class TopologicalMapVisualiser(Node):
             return
 
         name = feedback.marker_name
-        for entry in self.tmap.get('nodes', []):
-            if entry['node']['name'] != name:
-                continue
+        node = self._node_entries_by_name.get(name)
+        if node is None:
+            self._refresh_visual_cache()
+            node = self._node_entries_by_name.get(name)
 
-            node = entry['node']
+        if node is not None:
             node['pose']['position']['x'] = float(
                 feedback.pose.position.x
             )
@@ -889,10 +899,9 @@ class TopologicalMapVisualiser(Node):
                 f'{name}: pos=({feedback.pose.position.x:.2f}, '
                 f'{feedback.pose.position.y:.2f}), yaw={yaw_deg:.1f}°'
             )
-            break
 
-        # Refresh the static markers (edges, zones) to reflect the move
-        self._rebuild_static_markers()
+        # Refresh only the moved node and directly connected edges.
+        self._publish_incremental_node_update(name)
         self._im_server.applyChanges()
 
         # Schedule a debounced republish so downstream nodes
@@ -957,39 +966,113 @@ class TopologicalMapVisualiser(Node):
         if self.tmap is None:
             return
 
-        nodes = self.tmap.get('nodes', [])
+        self._refresh_visual_cache()
+        marker_array = self._build_full_static_marker_array()
+        self.map_marker_pub.publish(marker_array)
+
+    def _build_full_static_marker_array(self) -> MarkerArray:
+        """Build the full static marker set and refresh marker IDs."""
         marker_array = MarkerArray()
-        actions_seen: list = []
+        self._marker_ids = {
+            'nodes': {},
+            'names': {},
+            'zones': {},
+            'edges': {},
+            'legend': {},
+        }
         idn = 0
 
-        for entry in nodes:
+        for entry in self.tmap.get('nodes', []):
             node = entry['node']
-            for edge in node.get('edges', []):
-                act = edge.get('action', '')
-                if act and act not in actions_seen:
-                    actions_seen.append(act)
+            node_name = node['name']
 
+            self._marker_ids['nodes'][node_name] = idn
             marker_array.markers.append(self._mk_node(node, idn))
             idn += 1
+
+            self._marker_ids['names'][node_name] = idn
             marker_array.markers.append(self._mk_name(node, idn))
             idn += 1
+
             if node.get('verts'):
+                self._marker_ids['zones'][node_name] = idn
                 marker_array.markers.append(self._mk_zone(node, idn))
                 idn += 1
-            for edge in node.get('edges', []):
-                m = self._mk_edge(node, edge, actions_seen)
-                if m is not None:
-                    m.id = idn
-                    marker_array.markers.append(m)
-                    idn += 1
 
-        for row, action_name in enumerate(actions_seen):
+            for edge in node.get('edges', []):
+                m = self._mk_edge(node, edge)
+                if m is None:
+                    continue
+                edge_key = self._edge_key(node_name, edge)
+                self._marker_ids['edges'][edge_key] = idn
+                m.id = idn
+                marker_array.markers.append(m)
+                idn += 1
+
+        for row, action_name in enumerate(self._action_names):
+            self._marker_ids['legend'][action_name] = idn
             marker_array.markers.append(
-                self._mk_legend(action_name, row, actions_seen, idn)
+                self._mk_legend(action_name, row, idn)
             )
             idn += 1
 
+        return marker_array
+
+    def _publish_incremental_node_update(self, node_name: str):
+        """Publish only the markers affected by a dragged node."""
+        node = self._node_entries_by_name.get(node_name)
+        if node is None:
+            self._rebuild_static_markers()
+            return
+
+        marker_array = MarkerArray()
+        marker_ids = self._marker_ids
+        seen_edges = set()
+
+        node_id = marker_ids['nodes'].get(node_name)
+        name_id = marker_ids['names'].get(node_name)
+        if node_id is None or name_id is None:
+            self._rebuild_static_markers()
+            return
+
+        marker_array.markers.append(self._mk_node(node, node_id))
+        marker_array.markers.append(self._mk_name(node, name_id))
+
+        zone_id = marker_ids['zones'].get(node_name)
+        if node.get('verts') and zone_id is not None:
+            marker_array.markers.append(self._mk_zone(node, zone_id))
+
+        for edge in node.get('edges', []):
+            edge_key = self._edge_key(node_name, edge)
+            edge_id = marker_ids['edges'].get(edge_key)
+            if edge_id is None:
+                continue
+            marker = self._mk_edge(node, edge)
+            if marker is None:
+                continue
+            marker.id = edge_id
+            marker_array.markers.append(marker)
+            seen_edges.add(edge_key)
+
+        for source_node, edge in self._incoming_edges_by_target.get(node_name, []):
+            source_name = source_node['name']
+            edge_key = self._edge_key(source_name, edge)
+            if edge_key in seen_edges:
+                continue
+            edge_id = marker_ids['edges'].get(edge_key)
+            if edge_id is None:
+                continue
+            marker = self._mk_edge(source_node, edge)
+            if marker is None:
+                continue
+            marker.id = edge_id
+            marker_array.markers.append(marker)
+            seen_edges.add(edge_key)
+
         self.map_marker_pub.publish(marker_array)
+
+        if self._route_nodes and node_name in self._route_nodes:
+            self._publish_route_markers()
 
     # ──────────────────────────────────────────────────────────────
     #  Marker factory helpers
@@ -1062,9 +1145,9 @@ class TopologicalMapVisualiser(Node):
         return m
 
     def _mk_edge(
-        self, node: dict, edge: dict, actions: list
+        self, node: dict, edge: dict
     ) -> Marker | None:
-        to_node = _get_node(self.tmap['nodes'], edge['node'])
+        to_node = self._node_entries_by_name.get(edge['node'])
         if to_node is None:
             self.get_logger().warn(
                 f"Edge target node '{edge['node']}' not found"
@@ -1072,7 +1155,7 @@ class TopologicalMapVisualiser(Node):
             return None
 
         action = edge.get('action', '')
-        col_idx = actions.index(action) if action in actions else 0
+        col_idx = self._action_index.get(action, 0)
         col = _colour(col_idx)
 
         m = Marker()
@@ -1096,9 +1179,9 @@ class TopologicalMapVisualiser(Node):
         return m
 
     def _mk_legend(
-        self, action: str, row: int, actions: list, idn: int
+        self, action: str, row: int, idn: int
     ) -> Marker:
-        col_idx = actions.index(action) if action in actions else 0
+        col_idx = self._action_index.get(action, 0)
         col = _colour(col_idx)
         m = Marker()
         m.id = idn

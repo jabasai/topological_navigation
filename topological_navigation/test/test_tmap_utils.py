@@ -1,17 +1,16 @@
-"""Tests for tmap_utils module.
+"""Tests for tmap_utils module."""
 
-Covers CustomSafeLoader, NoAliasDumper, get_node_from_tmap2,
-and get_edge_from_id_tmap2.
-"""
-
-import yaml
 import pytest
+import yaml
 
 from topological_navigation.tmap_utils import (
+    NAVIGATION_CONFIG_FILE_KEY,
     CustomSafeLoader,
     NoAliasDumper,
-    get_node_from_tmap2,
     get_edge_from_id_tmap2,
+    get_node_from_tmap2,
+    load_tmap2_file,
+    save_tmap2_file,
 )
 
 
@@ -118,6 +117,173 @@ class TestNoAliasDumper:
         output = yaml.dump(data, Dumper=NoAliasDumper)
         loaded = yaml.safe_load(output)
         assert loaded == data
+
+
+# ---------- split map IO -----------------------------------------------
+
+class TestSplitMapIo:
+    """Tests for split map loading and saving."""
+
+    def test_load_tmap2_file_merges_navigation_config(self, tmp_path):
+        """Definitions/actions can be loaded from a sidecar YAML file."""
+        config_path = tmp_path / "nav_config.yaml"
+        config_path.write_text(
+            yaml.safe_dump(
+                {
+                    "definitions": {"default_bt": "<root/>"},
+                    "actions": {
+                        "navigate_to_pose": {
+                            "action_type": "nav2_msgs.action.NavigateToPose",
+                            "action_server": "/navigate_to_pose",
+                            "composable": False,
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        main_path = tmp_path / "map.tmap2.yaml"
+        main_path.write_text(
+            yaml.safe_dump(
+                {
+                    NAVIGATION_CONFIG_FILE_KEY: "nav_config.yaml",
+                    "meta": {"last_updated": "01-01-2026_00-00-00"},
+                    "metric_map": "test_map",
+                    "name": "test_map",
+                    "pointset": "test_map",
+                    "nodes": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        loaded, layout = load_tmap2_file(main_path, return_layout=True)
+
+        assert loaded["definitions"]["default_bt"] == "<root/>"
+        assert "navigate_to_pose" in loaded["actions"]
+        assert loaded[NAVIGATION_CONFIG_FILE_KEY] == "nav_config.yaml"
+        assert layout["section_sources"] == {
+            "definitions": "external",
+            "actions": "external",
+        }
+
+    def test_main_map_sections_take_precedence(self, tmp_path):
+        """Inline definitions/actions are kept when a sidecar file is present."""
+        config_path = tmp_path / "nav_config.yaml"
+        config_path.write_text(
+            yaml.safe_dump(
+                {
+                    "definitions": {"default_bt": "<external/>"},
+                    "actions": {"navigate_to_pose": {"action_server": "/external"}},
+                }
+            ),
+            encoding="utf-8",
+        )
+        main_path = tmp_path / "map.tmap2.yaml"
+        main_path.write_text(
+            yaml.safe_dump(
+                {
+                    NAVIGATION_CONFIG_FILE_KEY: "nav_config.yaml",
+                    "meta": {"last_updated": "01-01-2026_00-00-00"},
+                    "metric_map": "test_map",
+                    "name": "test_map",
+                    "pointset": "test_map",
+                    "definitions": {"default_bt": "<inline/>"},
+                    "actions": {"navigate_to_pose": {"action_server": "/inline"}},
+                    "nodes": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        loaded, layout = load_tmap2_file(main_path, return_layout=True)
+
+        assert loaded["definitions"]["default_bt"] == "<inline/>"
+        assert loaded["actions"]["navigate_to_pose"]["action_server"] == "/inline"
+        assert layout["section_sources"] == {
+            "definitions": "main",
+            "actions": "main",
+        }
+
+    def test_save_tmap2_file_preserves_split_layout(self, tmp_path):
+        """Saving a split map keeps definitions/actions in the sidecar file."""
+        main_path = tmp_path / "map.tmap2.yaml"
+        config_path = tmp_path / "nav_config.yaml"
+        tmap = {
+            NAVIGATION_CONFIG_FILE_KEY: "nav_config.yaml",
+            "meta": {"last_updated": "01-01-2026_00-00-00"},
+            "metric_map": "test_map",
+            "name": "test_map",
+            "pointset": "test_map",
+            "definitions": {"default_bt": "<root/>"},
+            "actions": {
+                "navigate_to_pose": {
+                    "action_type": "nav2_msgs.action.NavigateToPose",
+                    "action_server": "/navigate_to_pose",
+                    "composable": False,
+                }
+            },
+            "nodes": [],
+        }
+        layout = {
+            "main_path": str(main_path),
+            NAVIGATION_CONFIG_FILE_KEY: "nav_config.yaml",
+            "config_path": str(config_path),
+            "section_sources": {
+                "definitions": "external",
+                "actions": "external",
+            },
+        }
+
+        save_tmap2_file(tmap, main_path, layout=layout)
+
+        main_data = yaml.safe_load(main_path.read_text(encoding="utf-8"))
+        config_data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        reloaded = load_tmap2_file(main_path)
+
+        assert main_data[NAVIGATION_CONFIG_FILE_KEY] == "nav_config.yaml"
+        assert "definitions" not in main_data
+        assert "actions" not in main_data
+        assert config_data["definitions"]["default_bt"] == "<root/>"
+        assert "navigate_to_pose" in config_data["actions"]
+        assert reloaded == tmap
+
+    def test_save_tmap2_file_keeps_inline_sections_inline(self, tmp_path):
+        """Existing sidecar files are left alone when sections are sourced inline."""
+        main_path = tmp_path / "map.tmap2.yaml"
+        config_path = tmp_path / "nav_config.yaml"
+        config_path.write_text(
+            yaml.safe_dump({"definitions": {"default_bt": "<external/>"}}),
+            encoding="utf-8",
+        )
+        tmap = {
+            NAVIGATION_CONFIG_FILE_KEY: "nav_config.yaml",
+            "meta": {"last_updated": "01-01-2026_00-00-00"},
+            "metric_map": "test_map",
+            "name": "test_map",
+            "pointset": "test_map",
+            "definitions": {"default_bt": "<inline/>"},
+            "actions": {"navigate_to_pose": {"action_server": "/inline"}},
+            "nodes": [],
+        }
+        layout = {
+            "main_path": str(main_path),
+            NAVIGATION_CONFIG_FILE_KEY: "nav_config.yaml",
+            "config_path": str(config_path),
+            "section_sources": {
+                "definitions": "main",
+                "actions": "main",
+            },
+        }
+
+        save_tmap2_file(tmap, main_path, layout=layout)
+
+        main_data = yaml.safe_load(main_path.read_text(encoding="utf-8"))
+        config_data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+
+        assert main_data["definitions"]["default_bt"] == "<inline/>"
+        assert main_data["actions"]["navigate_to_pose"]["action_server"] == "/inline"
+        assert config_data["definitions"]["default_bt"] == "<external/>"
 
 
 # ---------- get_node_from_tmap2 ----------------------------------------

@@ -204,7 +204,13 @@ Although validation is performed upstream in map manager, `navigation2.py` expec
 - `nodes[*].node.edges[*].{edge_id,node,action}`
 - `actions` dictionary with per-action config
 - Optional `definitions` dictionary for inline BT XML
+- Optional `navigation_config_file` path pointing at a second YAML file
+  that contains the top-level `definitions` and/or `actions` sections
 - `transformation.topo_frame_id` (or fallback) for pose frame defaults
+
+When `navigation_config_file` is present, the main map file is still the only
+file passed to launch or CLI tools. The sidecar path is resolved relative to
+that main map file unless an absolute path is provided.
 
 Action config shape (typical):
 

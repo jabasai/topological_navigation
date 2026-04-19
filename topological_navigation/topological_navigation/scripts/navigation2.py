@@ -65,7 +65,7 @@ from rcl_interfaces.msg import Parameter as RclParameter
 from rcl_interfaces.msg import ParameterType, ParameterValue
 from rcl_interfaces.srv import SetParameters
 from rclpy import Parameter
-from rclpy.action import ActionClient, ActionServer
+from rclpy.action import ActionClient, ActionServer, CancelResponse
 from rclpy.callback_groups import (
     MutuallyExclusiveCallbackGroup,
     ReentrantCallbackGroup,
@@ -98,8 +98,6 @@ from topological_navigation.tmap_utils import (
 from topological_navigation_msgs.action import ExecutePolicyMode, GotoNode
 from topological_navigation_msgs.msg import (
     ClosestEdges,
-    ExecutePolicyModeFeedback,
-    GotoNodeFeedback,
     NavStatistics,
     TopologicalRoute,
 )
@@ -318,9 +316,6 @@ class TopologicalNavServer(rclpy.node.Node):
         while rclpy.ok() and not self._map_received:
             rclpy.spin_once(self)
 
-        # Parse map-driven config (definitions, actions, clients)
-        self._load_map_config()
-
         self.get_logger().info(
             "[INIT] Map '%s' -- %d nodes, %d edges"
             % (
@@ -366,10 +361,6 @@ class TopologicalNavServer(rclpy.node.Node):
             cancel_callback=self._cancel_goto_cb,
             callback_group=cb_goto,
         )
-        self._goto_fb_pub = self.create_publisher(
-            GotoNodeFeedback, "/" + name + "/feedback",
-            qos_profile=self._latch,
-        )
 
         self._as_policy = ActionServer(
             self, ExecutePolicyMode,
@@ -377,11 +368,6 @@ class TopologicalNavServer(rclpy.node.Node):
             execute_callback=self._exec_policy_cb,
             cancel_callback=self._cancel_policy_cb,
             callback_group=cb_policy,
-        )
-        self._policy_fb_pub = self.create_publisher(
-            ExecutePolicyModeFeedback,
-            "topological_navigation/execute_policy_mode/feedback",
-            qos_profile=self._latch,
         )
 
         # -- Goal checker service client ---------------------------
@@ -478,6 +464,8 @@ class TopologicalNavServer(rclpy.node.Node):
         """
         self._map_definitions = self._tmap.get('definitions', {})
         self._map_actions = self._tmap.get('actions', {})
+        self._bt_files = {}
+        self._action_clients = {}
 
         if not self._map_actions:
             self.get_logger().warning(
@@ -489,7 +477,6 @@ class TopologicalNavServer(rclpy.node.Node):
         bt_dir = os.path.join(tempfile.gettempdir(), 'topo_nav_bt')
         os.makedirs(bt_dir, exist_ok=True)
 
-        self._bt_files = {}
         for name, content in self._map_definitions.items():
             path = os.path.join(bt_dir, '%s.xml' % name)
             with open(path, 'w') as fh:
@@ -793,6 +780,25 @@ class TopologicalNavServer(rclpy.node.Node):
         msg = String()
         msg.data = json.dumps(d)
         self._move_status_pub.publish(msg)
+
+    def _publish_goto_feedback(self, goal_handle, route_text):
+        """Publish ``GotoNode`` feedback through the action server."""
+        if goal_handle is None:
+            return
+        fb = GotoNode.Feedback()
+        fb.route = route_text
+        goal_handle.publish_feedback(fb)
+
+    def _publish_policy_feedback(
+        self, goal_handle, current_wp, status=GoalStatus.STATUS_EXECUTING,
+    ):
+        """Publish ``ExecutePolicyMode`` feedback through the action server."""
+        if goal_handle is None:
+            return
+        fb = ExecutePolicyMode.Feedback()
+        fb.current_wp = current_wp
+        fb.status = int(status)
+        goal_handle.publish_feedback(fb)
 
     # =================================================================
     # Pose construction
@@ -1192,6 +1198,9 @@ class TopologicalNavServer(rclpy.node.Node):
             for info in self._action_clients.values():
                 action_client = info['client']
                 break
+        if goal is None:
+            self.get_logger().error("[NAV2] No goal constructed")
+            return GoalStatus.STATUS_ABORTED
         if action_client is None:
             self.get_logger().error("[NAV2] No action client available")
             return GoalStatus.STATUS_ABORTED
@@ -1243,15 +1252,15 @@ class TopologicalNavServer(rclpy.node.Node):
 
     def _cancel_nav2_goal(self, timeout_sec=None):
         """Cancel the active Nav2 goal (fire-and-forget)."""
-        if self._goal_handle is None:
+        goal_handle = self._goal_handle
+        self._goal_handle = None
+        if goal_handle is None:
             return
         try:
-            self._goal_handle.cancel_goal_async()
+            goal_handle.cancel_goal_async()
             self.get_logger().info("[NAV2] Cancel requested")
         except Exception as exc:
             self.get_logger().error("[NAV2] Cancel error: %s" % exc)
-        finally:
-            self._goal_handle = None
 
     # =================================================================
     # Action-server callbacks
@@ -1288,9 +1297,7 @@ class TopologicalNavServer(rclpy.node.Node):
         self._preempted = False
         self._no_orientation = goal_handle.request.no_orientation
 
-        fb = GotoNodeFeedback()
-        fb.route = "Planning..."
-        self._goto_fb_pub.publish(fb)
+        self._publish_goto_feedback(goal_handle, "Planning...")
 
         success = self._navigate(target)
         self._navigation_activated = False
@@ -1300,11 +1307,15 @@ class TopologicalNavServer(rclpy.node.Node):
         if success:
             goal_handle.succeed()
             self.get_logger().info("[GOTO] SUCCEEDED -> '%s'" % target)
+        elif self._cancelled or self._preempted:
+            goal_handle.canceled()
+            self.get_logger().warning(
+                "[GOTO] CANCELLED -> '%s'" % target,
+            )
         else:
             goal_handle.abort()
             self.get_logger().warning(
-                "[GOTO] %s -> '%s'"
-                % ("CANCELLED" if self._preempted else "FAILED", target),
+                "[GOTO] FAILED -> '%s'" % target,
             )
         if self._sm.is_terminal():
             self._sm.reset()
@@ -1344,7 +1355,7 @@ class TopologicalNavServer(rclpy.node.Node):
         ):
             self.get_logger().error("[POLICY] Invalid route data")
             self._navigation_activated = False
-            goal_handle.succeed()
+            goal_handle.abort()
             return ExecutePolicyMode.Result(success=False)
 
         if (
@@ -1356,7 +1367,7 @@ class TopologicalNavServer(rclpy.node.Node):
                 % (route.source[0], self._current_node),
             )
             self._navigation_activated = False
-            goal_handle.succeed()
+            goal_handle.abort()
             return ExecutePolicyMode.Result(success=False)
 
         route_nodes = list(route.source)
@@ -1370,30 +1381,49 @@ class TopologicalNavServer(rclpy.node.Node):
                     route_nodes.append(ft)
 
         target = route_nodes[-1]
+        self._target = target
+        self._sm.transition(NavState.PLANNING)
+        self._publish_status("PLANNING")
         self.get_logger().info(
             "[POLICY] Route: %s" % " -> ".join(route_nodes),
+        )
+        self._publish_policy_feedback(
+            goal_handle, route_nodes[0], GoalStatus.STATUS_EXECUTING,
         )
         self._publish_route(route_nodes)
         success = self._execute_route(route_nodes, target)
 
         self._navigation_activated = False
+        result = ExecutePolicyMode.Result(success=success)
         if self._sm.is_terminal():
             self._sm.reset()
-        goal_handle.succeed()
+        if success:
+            goal_handle.succeed()
+        elif self._cancelled or self._preempted:
+            goal_handle.canceled()
+        else:
+            goal_handle.abort()
         self.get_logger().info(
-            "[POLICY] %s" % ("SUCCEEDED" if success else "FAILED"),
+            "[POLICY] %s"
+            % (
+                "SUCCEEDED"
+                if success else
+                ("CANCELLED" if self._cancelled or self._preempted else "FAILED")
+            ),
         )
-        return ExecutePolicyMode.Result(success=success)
+        return result
 
     def _cancel_goto_cb(self, _gh):
         self.get_logger().warning("[GOTO] Cancel requested")
-        self._preempted = True
+        self._cancelled = True
         self._cancel_nav2_goal()
+        return CancelResponse.ACCEPT
 
     def _cancel_policy_cb(self, _gh):
         self.get_logger().warning("[POLICY] Cancel requested")
-        self._preempted = True
+        self._cancelled = True
         self._cancel_nav2_goal()
+        return CancelResponse.ACCEPT
 
     # =================================================================
     # Core navigation
@@ -1829,15 +1859,35 @@ class TopologicalNavServer(rclpy.node.Node):
 
 def main():
     rclpy.init(args=None)
-    node = TopologicalNavServer('topological_navigation')
-    executor = MultiThreadedExecutor()
-    executor.add_node(node)
+    node = None
+    executor = None
     try:
+        node = TopologicalNavServer('topological_navigation')
+        executor = MultiThreadedExecutor()
+        executor.add_node(node)
         executor.spin()
     except KeyboardInterrupt:
-        node.get_logger().info("[SHUTDOWN] Keyboard interrupt")
-    node.destroy_node()
-    rclpy.shutdown()
+        try:
+            if node is not None and rclpy.ok():
+                node.get_logger().info("[SHUTDOWN] Keyboard interrupt")
+        except Exception:
+            pass
+    finally:
+        try:
+            if executor is not None and node is not None:
+                executor.remove_node(node)
+        except Exception:
+            pass
+        try:
+            if node is not None:
+                node.destroy_node()
+        except Exception:
+            pass
+        try:
+            if rclpy.ok():
+                rclpy.shutdown()
+        except Exception:
+            pass
 
 
 if __name__ == '__main__':

@@ -501,19 +501,38 @@ class TopologicalNavLoc(rclpy.node.Node):
 # =====================================================================
 
 def main(args=None):
+    node = None
+    executor = None
     rclpy.init(args=args)
-    node = TopologicalNavLoc('topological_localisation', with_tags=True)
-    executor = MultiThreadedExecutor()
-    executor.add_node(node)
     try:
+        node = TopologicalNavLoc('topological_localisation', with_tags=True)
+        executor = MultiThreadedExecutor()
+        executor.add_node(node)
         executor.spin()
     except KeyboardInterrupt:
-        node.get_logger().info("Shutting down localisation node")
-    node.destroy_node()
-    rclpy.shutdown()
+        try:
+            if node is not None and rclpy.ok():
+                node.get_logger().info("Shutting down localisation node")
+        except Exception:
+            pass
+    finally:
+        try:
+            if executor is not None and node is not None:
+                executor.remove_node(node)
+        except Exception:
+            pass
+        try:
+            if node is not None:
+                node.destroy_node()
+        except Exception:
+            pass
+        try:
+            if rclpy.ok():
+                rclpy.shutdown()
+        except Exception:
+            pass
 
 
 if __name__ == '__main__':
     main()
-
 

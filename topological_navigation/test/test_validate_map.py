@@ -10,6 +10,7 @@ import textwrap
 import pytest
 import yaml
 
+from topological_navigation.tmap_utils import NAVIGATION_CONFIG_FILE_KEY
 from topological_navigation.validate_map import (
     find_schema_file,
     load_yaml_file,
@@ -168,3 +169,40 @@ class TestValidateMap:
                 assert "non-existent" in msg.lower() or "Warning" in msg
         finally:
             os.unlink(path)
+
+    def test_split_map_valid(self, tmp_path):
+        """A main map can validate when actions/definitions live in a sidecar file."""
+        config_path = tmp_path / "nav_config.yaml"
+        config_path.write_text(
+            yaml.safe_dump(
+                {
+                    "definitions": {"default_bt": "<root/>"},
+                    "actions": {
+                        "navigate_to_pose": {
+                            "action_type": "nav2_msgs.action.NavigateToPose",
+                            "action_server": "/navigate_to_pose",
+                            "composable": False,
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        main_path = tmp_path / "split_map.tmap2.yaml"
+        main_path.write_text(
+            yaml.safe_dump(
+                {
+                    NAVIGATION_CONFIG_FILE_KEY: "nav_config.yaml",
+                    "meta": {"last_updated": "01-01-2026_00-00-00"},
+                    "metric_map": "test_map",
+                    "name": "test_map",
+                    "pointset": "test_map",
+                    "nodes": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        is_valid, msg = validate_map(str(main_path), _SCHEMA)
+
+        assert is_valid, msg

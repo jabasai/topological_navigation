@@ -22,6 +22,9 @@ properties:
     type: string
   name:
     type: string
+  navigation_config_file:
+    type: string
+    description: Optional path to a sidecar YAML file containing the top-level definitions and actions sections.
   nodes:
     type: array
     items:

@@ -1935,7 +1935,8 @@ def main():
     import argparse
     import os
     import sys
-    import yaml
+
+    from topological_navigation.tmap_utils import load_tmap2_file
 
     # ------------------------------------------------------------------
     # CLI
@@ -1997,8 +1998,7 @@ def main():
         print("=" * 60)
 
         # 1. Load YAML
-        with open(map_path) as f:
-            tmap_data = yaml.safe_load(f)
+        tmap_data = load_tmap2_file(map_path)
 
         if tmap_data is None:
             print("  [SKIP] empty YAML file")

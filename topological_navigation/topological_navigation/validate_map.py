@@ -33,6 +33,8 @@ except ImportError:
     print("Error: jsonschema is required. Install with: pip install jsonschema")
     sys.exit(2)
 
+from topological_navigation.tmap_utils import load_tmap2_file
+
 
 def find_schema_file():
     """Find the schema file in standard locations."""
@@ -105,7 +107,7 @@ def validate_map(map_file, schema_file=None, verbose=False):
     
     # Load map
     try:
-        tmap = load_yaml_file(map_file)
+        tmap = load_tmap2_file(map_file)
     except Exception as e:
         return False, f"Error loading map: {e}"
     

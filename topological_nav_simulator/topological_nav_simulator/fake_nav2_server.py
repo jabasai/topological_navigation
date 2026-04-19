@@ -428,18 +428,32 @@ class FakeNav2Server(Node):
 def main(args=None):
     """Entry point."""
     rclpy.init(args=args)
-    node = FakeNav2Server()
-
-    executor = MultiThreadedExecutor(num_threads=4)
-    executor.add_node(node)
+    node = None
+    executor = None
 
     try:
+        node = FakeNav2Server()
+        executor = MultiThreadedExecutor(num_threads=4)
+        executor.add_node(node)
         executor.spin()
     except KeyboardInterrupt:
         pass
     finally:
-        node.destroy_node()
-        rclpy.shutdown()
+        try:
+            if executor is not None and node is not None:
+                executor.remove_node(node)
+        except Exception:
+            pass
+        try:
+            if node is not None:
+                node.destroy_node()
+        except Exception:
+            pass
+        try:
+            if rclpy.ok():
+                rclpy.shutdown()
+        except Exception:
+            pass
 
 
 if __name__ == '__main__':

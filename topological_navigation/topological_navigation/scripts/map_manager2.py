@@ -30,7 +30,7 @@ from geometry_msgs.msg import Vector3, Quaternion, TransformStamped
 from std_srvs.srv import Trigger
 import topological_navigation_msgs.srv as tn_srv
 
-from topological_navigation.tmap_utils import CustomSafeLoader, NoAliasDumper
+from topological_navigation.tmap_utils import load_tmap2_file, save_tmap2_file
 
 try:
     import jsonschema
@@ -98,6 +98,7 @@ class map_manager_2(rclpy.node.Node):
 
         # Initialise an empty tmap dict
         self.tmap = self._empty_tmap()
+        self._tmap_io_layout = None
 
         # Latched QoS for map and schema publishers
         latched_qos = QoSProfile(
@@ -221,10 +222,11 @@ class map_manager_2(rclpy.node.Node):
         """Load a topological map YAML file, validate, and sync state."""
         self.get_logger().info(f"Loading topological map: {filename}")
         try:
-            with open(filename, 'r') as f:
-                loaded = yaml.load(f, Loader=CustomSafeLoader)
-            if not isinstance(loaded, dict):
-                raise MapValidationError(f"Expected dict, got {type(loaded)}")
+            loaded, self._tmap_io_layout = load_tmap2_file(
+                filename,
+                logger=self.get_logger(),
+                return_layout=True,
+            )
             self.tmap = loaded
             self.validate()
             self._sync_from_tmap()
@@ -250,9 +252,13 @@ class map_manager_2(rclpy.node.Node):
         self.get_logger().info(f"Saving map to {filename}")
         if "nodes" in self.tmap:
             self.tmap["nodes"].sort(key=lambda n: n["node"]["name"])
-        dumper = NoAliasDumper if no_alias else yaml.SafeDumper
-        with open(filename, 'w') as fh:
-            yaml.dump(self.tmap, fh, default_flow_style=False, Dumper=dumper)
+        save_tmap2_file(
+            self.tmap,
+            filename,
+            no_alias=no_alias,
+            layout=self._tmap_io_layout,
+            logger=self.get_logger(),
+        )
         self.get_logger().info("Map saved successfully.")
 
     def _sync_from_tmap(self):
@@ -465,6 +471,7 @@ Examples:
 
 
 def main(args=None):
+    manager = None
     try:
         map_file, load, verbose = parse_arguments()
         rclpy.init(args=args)
@@ -489,8 +496,16 @@ def main(args=None):
         except KeyboardInterrupt:
             pass
         finally:
-            manager.destroy_node()
-            rclpy.shutdown()
+            try:
+                if manager is not None:
+                    manager.destroy_node()
+            except Exception:
+                pass
+            try:
+                if rclpy.ok():
+                    rclpy.shutdown()
+            except Exception:
+                pass
 
         return 0
 
