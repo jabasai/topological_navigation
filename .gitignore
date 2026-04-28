@@ -67,3 +67,8 @@ coverage.xml
 # Nano auto-backups
 **/*.*~
 **/*.*.swp
+.DS_Store
+
+install/*
+log/*
+test.py
