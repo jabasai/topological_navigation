@@ -24,7 +24,10 @@ properties:
     type: string
   navigation_config_file:
     type: string
-    description: Optional path to a sidecar YAML file containing the top-level definitions and actions sections.
+    description: >
+      Optional path to a sidecar YAML file, conventionally named
+      topological_navigation_config.yaml, containing the top-level definitions
+      and actions sections.
   nodes:
     type: array
     items:

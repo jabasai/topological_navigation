@@ -20,6 +20,12 @@ Custom map file::
 
     ros2 launch topological_navigation topological_navigation.launch.py \
         map_path:=/absolute/path/to/my_map.tmap2.yaml
+
+Split map and navigation config files::
+
+    ros2 launch topological_navigation topological_navigation.launch.py \
+        map_path:=/absolute/path/to/my_map.tmap2.yaml \
+        navigation_config_file:=/absolute/path/to/topological_navigation_config.yaml
 """
 
 import os
@@ -51,6 +57,14 @@ def generate_launch_description():
             description='Absolute path to a .tmap2.yaml topological map',
         ),
         DeclareLaunchArgument(
+            'navigation_config_file',
+            default_value='',
+            description=(
+                'Optional path to topological_navigation_config.yaml containing '
+                'the actions and definitions sections'
+            ),
+        ),
+        DeclareLaunchArgument(
             'rviz_config', default_value=default_rviz,
             description='Path to the RViz config file',
         ),
@@ -75,7 +89,11 @@ def generate_launch_description():
             executable='map_manager2.py',
             name='topological_map_manager_2',
             output='screen',
-            arguments=[LaunchConfiguration('map_path')],
+            arguments=[
+                LaunchConfiguration('map_path'),
+                '--navigation-config-file',
+                LaunchConfiguration('navigation_config_file'),
+            ],
         ),
 
         # =============================================================
