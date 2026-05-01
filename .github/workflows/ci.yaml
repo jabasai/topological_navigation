@@ -2,11 +2,11 @@ name: ros CI
 
 on:
   push:
-    branches: [ humble-dev, aoc ]
+    branches: [ humble ]
     tags:     # Also run CI on tags.
       - '*'
   pull_request:
-    branches: [ humble-dev, aoc ]
+    branches: [ humble ]
 
 jobs:
   # -------------------------------------------------------------------
