@@ -2,11 +2,10 @@ name: ros CI
 
 on:
   push:
-    branches: [ humble-dev, aoc ]
+    branches: [ humble ]
     tags:     # Also run CI on tags.
       - '*'
   pull_request:
-    branches: [ humble-dev, aoc ]
 
 jobs:
   # -------------------------------------------------------------------
@@ -50,23 +49,38 @@ jobs:
   # Full ROS 2 build + colcon test
   # -------------------------------------------------------------------
   test_docker:
+    name: ROS Testing ${{ matrix.ros_distribution }}
     runs-on: ubuntu-latest
     strategy:
       matrix:
         ros_distribution:
           - humble
+          - jazzy
 
         include:
           # Humble Hawksbill (May 2022 - May 2027)
-          - docker_image: ubuntu:jammy
+          - docker_image: ros:humble-ros-base
             ros_distribution: humble
+            ros_version: 2
+
+          # Jazzy Jalisco (May 2024 - May 2029)
+          - docker_image: ros:jazzy-ros-base
+            ros_distribution: jazzy
             ros_version: 2
 
     container:
       image: ${{ matrix.docker_image }}
     steps:
+      - name: Configure apt retries
+        run: |
+          printf '%s\n' \
+            'Acquire::Retries "5";' \
+            'Acquire::http::Timeout "30";' \
+            'Acquire::https::Timeout "30";' \
+            > /etc/apt/apt.conf.d/80-retries
+
       - name: setup ROS environment
-        uses: LCAS/setup-ros@master
+        uses: ros-tooling/setup-ros@main
         with:
           required-ros-distributions: ${{ matrix.ros_distribution }}
       - name: build and test ROS 2

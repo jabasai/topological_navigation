@@ -205,12 +205,14 @@ Although validation is performed upstream in map manager, `navigation2.py` expec
 - `actions` dictionary with per-action config
 - Optional `definitions` dictionary for inline BT XML
 - Optional `navigation_config_file` path pointing at a second YAML file
-  that contains the top-level `definitions` and/or `actions` sections
+  that contains the top-level `definitions` and `actions` sections
 - `transformation.topo_frame_id` (or fallback) for pose frame defaults
 
-When `navigation_config_file` is present, the main map file is still the only
-file passed to launch or CLI tools. The sidecar path is resolved relative to
-that main map file unless an absolute path is provided.
+The recommended sidecar name is `topological_navigation_config.yaml`. It can
+be referenced from the map with `navigation_config_file` or passed explicitly
+to launch/CLI tools with `navigation_config_file` /
+`--navigation-config-file`. Relative sidecar paths are resolved against the
+main map file.
 
 Action config shape (typical):
 
