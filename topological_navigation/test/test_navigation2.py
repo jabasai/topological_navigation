@@ -154,7 +154,7 @@ def test_exec_goto_success_publishes_feedback_and_succeeds():
     assert goal_handle.final_state == 'succeeded'
     assert goal_handle.feedback
     assert goal_handle.feedback[0].route == 'Planning...'
-    assert goal_handle.feedback[0].__class__.__name__.endswith('_Feedback')
+    assert goal_handle.feedback[0].__class__.__name__.endswith('Feedback')
 
 
 def test_exec_goto_cancelled_marks_goal_canceled():
