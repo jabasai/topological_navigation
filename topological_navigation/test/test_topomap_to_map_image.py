@@ -3,6 +3,9 @@
 import yaml
 
 from topological_navigation.topomap_to_map_image import (
+    OCCUPIED_VALUE,
+    FREE_VALUE,
+    UNKNOWN_VALUE,
     geometry_from_tmap,
     rasterize_geometry,
     write_map_yaml,
@@ -59,11 +62,12 @@ def test_geometry_extracts_edges_and_applies_transform():
     assert geometry.edges == (("A", "B"),)
 
 
-def test_rasterize_whitens_edge_corridor_and_keeps_background_black():
+def test_rasterize_draws_white_corridor_black_border_and_grey_background():
     geometry = geometry_from_tmap(_simple_tmap(), apply_transform=False)
     raster = rasterize_geometry(
         geometry,
         white_extension_m=1.0,
+        border_width_m=1.0,
         resolution=1.0,
         padding_m=1.0,
         include_node_polygons=False,
@@ -78,9 +82,10 @@ def test_rasterize_whitens_edge_corridor_and_keeps_background_black():
         py = int(round((top_y - world_y) / raster.resolution))
         return image.getpixel((px, py))
 
-    assert pixel_at(5.0, 0.0) == 255
-    assert pixel_at(5.0, 1.0) == 255
-    assert image.getpixel((0, 0)) == 0
+    assert pixel_at(5.0, 0.0) == FREE_VALUE
+    assert pixel_at(5.0, 1.0) == FREE_VALUE
+    assert pixel_at(5.0, 2.0) == OCCUPIED_VALUE
+    assert image.getpixel((0, 0)) == UNKNOWN_VALUE
 
 
 def test_write_map_yaml_uses_relative_image_path(tmp_path):

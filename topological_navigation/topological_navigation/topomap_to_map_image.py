@@ -2,9 +2,9 @@
 """Generate a Nav2 map image from a topological map.
 
 The generated image uses the occupancy-map convention expected by Nav2:
-white pixels are free space and black pixels are occupied/unknown.  Free
-space is produced by buffering the topological graph edges by a configured
-distance in metres.
+white pixels are free space, black pixels are occupied borders, and grey
+pixels are unknown outer space.  Free space is produced by buffering the
+topological graph edges by a configured distance in metres.
 """
 
 import argparse
@@ -20,6 +20,10 @@ import yaml
 
 Point = Tuple[float, float]
 Edge = Tuple[str, str]
+
+UNKNOWN_VALUE = 205
+OCCUPIED_VALUE = 0
+FREE_VALUE = 255
 
 
 @dataclass(frozen=True)
@@ -185,40 +189,54 @@ def _draw_line_with_round_caps(
     start: Tuple[int, int],
     end: Tuple[int, int],
     radius_px: int,
+    fill_value: int,
 ) -> None:
     width_px = max(1, (2 * radius_px) + 1)
-    draw.line([start, end], fill=255, width=width_px)
+    draw.line([start, end], fill=fill_value, width=width_px)
     if radius_px > 0:
         for x, y in (start, end):
             draw.ellipse(
                 [x - radius_px, y - radius_px, x + radius_px, y + radius_px],
-                fill=255,
+                fill=fill_value,
             )
 
 
 def rasterize_geometry(
     geometry: MapGeometry,
     white_extension_m: float,
+    border_width_m: float = 0.25,
     resolution: float = 0.05,
     padding_m: Optional[float] = None,
-    include_node_polygons: bool = True,
+    include_node_polygons: bool = False,
+    unknown_value: int = UNKNOWN_VALUE,
+    occupied_value: int = OCCUPIED_VALUE,
+    free_value: int = FREE_VALUE,
 ) -> RasterResult:
-    """Rasterize topomap geometry into a black/white image."""
+    """Rasterize topomap geometry into a Nav2 occupancy-style image."""
 
     if white_extension_m < 0.0:
         raise ValueError("white_extension_m must be >= 0")
+    if border_width_m < 0.0:
+        raise ValueError("border_width_m must be >= 0")
     if resolution <= 0.0:
         raise ValueError("resolution must be > 0")
     if padding_m is None:
         padding_m = white_extension_m
     if padding_m < 0.0:
         raise ValueError("padding_m must be >= 0")
+    for name, value in (
+        ("unknown_value", unknown_value),
+        ("occupied_value", occupied_value),
+        ("free_value", free_value),
+    ):
+        if value < 0 or value > 255:
+            raise ValueError(f"{name} must be in the range [0, 255]")
 
     points = list(_all_geometry_points(geometry, include_node_polygons))
     if not points:
         raise ValueError("No drawable geometry found in topological map")
 
-    bounds_margin = white_extension_m + padding_m
+    bounds_margin = white_extension_m + border_width_m + padding_m
     min_x = min(point[0] for point in points) - bounds_margin
     max_x = max(point[0] for point in points) + bounds_margin
     min_y = min(point[1] for point in points) - bounds_margin
@@ -233,26 +251,45 @@ def rasterize_geometry(
         py = int(round((image_top_y - point[1]) / resolution))
         return px, py
 
-    image = Image.new("L", (width, height), 0)
+    image = Image.new("L", (width, height), unknown_value)
     draw = ImageDraw.Draw(image)
-    radius_px = int(math.ceil(white_extension_m / resolution))
+    white_radius_px = int(math.ceil(white_extension_m / resolution))
+    border_radius_px = int(math.ceil((white_extension_m + border_width_m) / resolution))
 
     if include_node_polygons:
         for node in geometry.nodes.values():
             if len(node.verts) < 3:
                 continue
             pixels = [world_to_pixel(point) for point in node.verts]
-            draw.polygon(pixels, fill=255)
+            draw.polygon(pixels, fill=occupied_value)
             for index, start in enumerate(pixels):
                 end = pixels[(index + 1) % len(pixels)]
-                _draw_line_with_round_caps(draw, start, end, radius_px)
+                _draw_line_with_round_caps(
+                    draw, start, end, border_radius_px, occupied_value
+                )
+            draw.polygon(pixels, fill=free_value)
+            for index, start in enumerate(pixels):
+                end = pixels[(index + 1) % len(pixels)]
+                _draw_line_with_round_caps(
+                    draw, start, end, white_radius_px, free_value
+                )
 
     for source, target in geometry.edges:
         _draw_line_with_round_caps(
             draw,
             world_to_pixel(geometry.nodes[source].point),
             world_to_pixel(geometry.nodes[target].point),
-            radius_px,
+            border_radius_px,
+            occupied_value,
+        )
+
+    for source, target in geometry.edges:
+        _draw_line_with_round_caps(
+            draw,
+            world_to_pixel(geometry.nodes[source].point),
+            world_to_pixel(geometry.nodes[target].point),
+            white_radius_px,
+            free_value,
         )
 
     return RasterResult(image=image, origin=(min_x, min_y), resolution=resolution)
@@ -286,9 +323,10 @@ def generate_map_image(
     tmap_path: str,
     image_path: str,
     white_extension_m: float,
+    border_width_m: float = 0.25,
     resolution: float = 0.05,
     padding_m: Optional[float] = None,
-    include_node_polygons: bool = True,
+    include_node_polygons: bool = False,
     apply_transform: bool = True,
 ) -> RasterResult:
     """Load a topological map and write the generated PNG image."""
@@ -300,6 +338,7 @@ def generate_map_image(
     raster = rasterize_geometry(
         geometry,
         white_extension_m=white_extension_m,
+        border_width_m=border_width_m,
         resolution=resolution,
         padding_m=padding_m,
         include_node_polygons=include_node_polygons,
@@ -324,9 +363,9 @@ def _default_yaml_path(image_path: str) -> str:
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Generate a black/white Nav2 map image from topological map edges. "
-            "White pixels mark the buffered topomap corridors; black pixels "
-            "are occupied/unknown."
+            "Generate a Nav2 map image from topological map edges. White "
+            "pixels mark buffered topomap corridors, black pixels mark "
+            "occupied borders, and grey pixels mark unknown outer space."
         )
     )
     parser.add_argument("tmap", help="Path to a .tmap2.yaml or .tmap3.yaml file")
@@ -351,11 +390,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Output map resolution in metres per pixel.",
     )
     parser.add_argument(
+        "--border-width-m",
+        type=float,
+        default=0.25,
+        help="Metres of black occupied border outside the white topomap corridor.",
+    )
+    parser.add_argument(
         "--padding-m",
         type=float,
         default=None,
         help=(
-            "Extra black padding around the generated map in metres. "
+            "Extra grey padding around the generated map in metres. "
             "Defaults to the white extension distance."
         ),
     )
@@ -370,9 +415,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Only write the PNG image.",
     )
     parser.add_argument(
-        "--no-node-polygons",
+        "--include-node-polygons",
         action="store_true",
-        help="Do not also whiten topological node influence polygons.",
+        help="Also draw topological node influence polygons.",
     )
     parser.add_argument(
         "--no-transform",
@@ -394,9 +439,10 @@ def main(args: Optional[Sequence[str]] = None) -> int:
             parsed.tmap,
             image_path,
             white_extension_m=parsed.white_extension_m,
+            border_width_m=parsed.border_width_m,
             resolution=parsed.resolution,
             padding_m=parsed.padding_m,
-            include_node_polygons=not parsed.no_node_polygons,
+            include_node_polygons=parsed.include_node_polygons,
             apply_transform=not parsed.no_transform,
         )
 
