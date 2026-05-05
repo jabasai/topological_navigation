@@ -1,6 +1,17 @@
 #!/usr/bin/env python3
 """Generate a Nav2 map image from a topological map.
 
+Usage:
+    ros2 run topological_navigation topomap_to_map_image.py input.tmap3.yaml \
+        --white-extension-m 2.0 \
+        --border-width-m 0.25 \
+        -o output.png \
+        --map-yaml output.yaml
+
+The output YAML can be passed to Nav2/localization as the map file.  Increase
+``--white-extension-m`` to widen the free corridor around topomap edges, and
+increase ``--border-width-m`` to thicken the black occupied border.
+
 The generated image uses the occupancy-map convention expected by Nav2:
 white pixels are free space, black pixels are occupied borders, and grey
 pixels are unknown outer space.  Free space is produced by buffering the
