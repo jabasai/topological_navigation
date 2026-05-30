@@ -104,10 +104,26 @@ def _install_ros_test_stubs():
     rcl_interfaces.srv = _module('rcl_interfaces.srv')
 
     class ParameterType:
+        PARAMETER_NOT_SET = 0
+        PARAMETER_BOOL = 1
+        PARAMETER_INTEGER = 2
         PARAMETER_DOUBLE = 3
+        PARAMETER_STRING = 4
+        PARAMETER_BYTE_ARRAY = 5
+        PARAMETER_BOOL_ARRAY = 6
+        PARAMETER_INTEGER_ARRAY = 7
+        PARAMETER_DOUBLE_ARRAY = 8
+        PARAMETER_STRING_ARRAY = 9
 
     class ParameterValue(_BaseMsg):
-        pass
+        def __init__(self, **kwargs):
+            self.type = ParameterType.PARAMETER_NOT_SET
+            self.bool_value = False
+            self.integer_value = 0
+            self.double_value = 0.0
+            self.string_value = ''
+            for key, value in kwargs.items():
+                setattr(self, key, value)
 
     class RclParameter(_BaseMsg):
         pass
@@ -117,10 +133,24 @@ def _install_ros_test_stubs():
             def __init__(self):
                 super().__init__(parameters=[])
 
+        class Response(_BaseMsg):
+            def __init__(self):
+                super().__init__(results=[])
+
+    class GetParameters:
+        class Request(_BaseMsg):
+            def __init__(self):
+                super().__init__(names=[])
+
+        class Response(_BaseMsg):
+            def __init__(self):
+                super().__init__(values=[])
+
     rcl_interfaces.msg.Parameter = RclParameter
     rcl_interfaces.msg.ParameterType = ParameterType
     rcl_interfaces.msg.ParameterValue = ParameterValue
     rcl_interfaces.srv.SetParameters = SetParameters
+    rcl_interfaces.srv.GetParameters = GetParameters
 
     # rclpy -----------------------------------------------------------
     rclpy = _module('rclpy')
