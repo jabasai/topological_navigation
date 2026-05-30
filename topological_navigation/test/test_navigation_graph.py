@@ -497,14 +497,48 @@ class TestMergeActionSegmentsPropertySplitting:
         segments = merge_action_segments(edges)
         assert len(segments) == 2
 
-    def test_empty_and_nonempty_props_split(self):
-        """Empty ({}) and non-empty properties must not be merged."""
+    def test_empty_and_nonempty_props_merge(self):
+        """Empty ({}) properties are transparent and merge with non-empty."""
         edges = [
             self._make_edge('A', 'B', 'row_traversal', {}),
             self._make_edge('B', 'C', 'row_traversal', {'speed': 0.5}),
         ]
         segments = merge_action_segments(edges)
+        assert len(segments) == 1
+        assert segments[0].parameters == {'speed': 0.5}
+
+    def test_nonempty_then_empty_props_merge(self):
+        """Non-empty followed by empty merges; parameters come from non-empty edge."""
+        edges = [
+            self._make_edge('A', 'B', 'row_traversal', {'speed': 0.5}),
+            self._make_edge('B', 'C', 'row_traversal', {}),
+        ]
+        segments = merge_action_segments(edges)
+        assert len(segments) == 1
+        assert segments[0].parameters == {'speed': 0.5}
+
+    def test_empty_between_same_nonempty_merge(self):
+        """Empty edge between two edges with the same non-empty params stays one segment."""
+        edges = [
+            self._make_edge('A', 'B', 'row_traversal', {'speed': 0.5}),
+            self._make_edge('B', 'C', 'row_traversal', {}),
+            self._make_edge('C', 'D', 'row_traversal', {'speed': 0.5}),
+        ]
+        segments = merge_action_segments(edges)
+        assert len(segments) == 1
+        assert segments[0].parameters == {'speed': 0.5}
+
+    def test_empty_between_different_nonempty_split(self):
+        """Empty edge between two edges with different non-empty params still splits."""
+        edges = [
+            self._make_edge('A', 'B', 'row_traversal', {'speed': 0.5}),
+            self._make_edge('B', 'C', 'row_traversal', {}),
+            self._make_edge('C', 'D', 'row_traversal', {'speed': 0.3}),
+        ]
+        segments = merge_action_segments(edges)
         assert len(segments) == 2
+        assert segments[0].parameters == {'speed': 0.5}
+        assert segments[1].parameters == {'speed': 0.3}
 
 
 # =====================================================================
