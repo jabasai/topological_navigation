@@ -750,6 +750,17 @@ class TopologicalNavServer(rclpy.node.Node):
             self._map_received = True
             self._load_map_config()
 
+            # Persist the map to the stats database so that every traversal
+            # recorded for this map version has the map available for lookup.
+            if self._stats_db is not None:
+                try:
+                    self._stats_db.store_map(msg.data)
+                except Exception as exc:
+                    self.get_logger().error(
+                        "[STATS] Failed to store map '%s': %s"
+                        % (self._topol_map, exc),
+                    )
+
             self.get_logger().info(
                 "[MAP] Applied update '%s' -- %d nodes, %d edges"
                 % (

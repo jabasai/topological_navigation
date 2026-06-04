@@ -265,3 +265,117 @@ def test_edge_stats_with_filter(tmp_db):
     s = tmp_db.edge_stats("A_B", where="map_name = 'mapA'")
     assert s["total"] == 1
     assert s["success"] == 1
+
+
+# ---------------------------------------------------------------------------
+# store_map / get_map / list_maps / delete_map
+# ---------------------------------------------------------------------------
+
+_SIMPLE_YAML = """\
+meta:
+  origin:
+    latitude: 51.2096
+    longitude: 0.4946
+name: Test Field
+pointset: test_field
+nodes: []
+"""
+
+_ANOTHER_YAML = """\
+meta:
+  origin:
+    latitude: 53.2686
+    longitude: -0.5245
+name: Another Map
+pointset: another_map
+nodes: []
+"""
+
+
+def test_store_map_returns_hash(tmp_db):
+    h = tmp_db.store_map(_SIMPLE_YAML)
+    expected = compute_map_hash(_SIMPLE_YAML)
+    assert h == expected
+
+
+def test_store_map_idempotent(tmp_db):
+    """Storing the same map twice should produce exactly one row."""
+    tmp_db.store_map(_SIMPLE_YAML)
+    tmp_db.store_map(_SIMPLE_YAML)
+    rows = tmp_db.query("SELECT COUNT(*) AS cnt FROM topological_maps")
+    assert rows[0]["cnt"] == 1
+
+
+def test_store_map_extracts_metadata(tmp_db):
+    tmp_db.store_map(_SIMPLE_YAML)
+    rows = tmp_db.query("SELECT * FROM topological_maps")
+    assert len(rows) == 1
+    r = rows[0]
+    assert r["map_name"] == "Test Field"
+    assert abs(r["latitude"] - 51.2096) < 1e-4
+    assert abs(r["longitude"] - 0.4946) < 1e-4
+
+
+def test_store_map_stores_full_yaml(tmp_db):
+    tmp_db.store_map(_SIMPLE_YAML)
+    rows = tmp_db.query("SELECT map_data FROM topological_maps")
+    assert rows[0]["map_data"] == _SIMPLE_YAML
+
+
+def test_get_map_by_hash(tmp_db):
+    h = tmp_db.store_map(_SIMPLE_YAML)
+    m = tmp_db.get_map(h)
+    assert m is not None
+    assert m["map_hash"] == h
+    assert m["map_name"] == "Test Field"
+
+
+def test_get_map_by_name(tmp_db):
+    tmp_db.store_map(_SIMPLE_YAML)
+    m = tmp_db.get_map("Test Field")
+    assert m is not None
+    assert m["map_name"] == "Test Field"
+
+
+def test_get_map_not_found(tmp_db):
+    assert tmp_db.get_map("nonexistent") is None
+
+
+def test_list_maps_empty(tmp_db):
+    assert tmp_db.list_maps() == []
+
+
+def test_list_maps_multiple(tmp_db):
+    tmp_db.store_map(_SIMPLE_YAML)
+    tmp_db.store_map(_ANOTHER_YAML)
+    maps = tmp_db.list_maps()
+    assert len(maps) == 2
+    names = {m["map_name"] for m in maps}
+    assert "Test Field" in names
+    assert "Another Map" in names
+
+
+def test_delete_map_by_hash(tmp_db):
+    h = tmp_db.store_map(_SIMPLE_YAML)
+    count = tmp_db.delete_map(h)
+    assert count == 1
+    assert tmp_db.get_map(h) is None
+
+
+def test_delete_map_by_name(tmp_db):
+    tmp_db.store_map(_SIMPLE_YAML)
+    count = tmp_db.delete_map("Test Field")
+    assert count == 1
+    assert tmp_db.get_map("Test Field") is None
+
+
+def test_delete_map_not_found(tmp_db):
+    count = tmp_db.delete_map("nonexistent")
+    assert count == 0
+
+
+def test_store_map_added_at_populated(tmp_db):
+    tmp_db.store_map(_SIMPLE_YAML)
+    rows = tmp_db.query("SELECT added_at FROM topological_maps")
+    assert rows[0]["added_at"] is not None
+    assert len(rows[0]["added_at"]) > 0
