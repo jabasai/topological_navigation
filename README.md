@@ -277,9 +277,32 @@ ros2 launch topological_navigation_visual topological_map_visualiser.launch.py \
 |----------|---------|-------------|
 | `map_file` | `''` | Path to `.tmap2.yaml` file (empty = subscribe to topic) |
 | `auto_save` | `false` | Auto-save changes every 30 seconds |
-| `marker_scale` | `0.5` | Scale factor for RViz markers |
+| `marker_scale` | `0.5` | Base scale factor for RViz markers |
 | `edit_mode` | `true` | Enable interactive drag-and-drop editing |
 | `nav_action_name` | `/topological_navigation` | GotoNode action name for click-to-navigate |
+| `show_node_labels` | `true` | Render per-node text labels (disable for large maps) |
+| `show_zones` | `true` | Render node influence-zone polygons |
+| `show_edges` | `true` | Render edges between nodes |
+| `auto_marker_scale` | `false` | Derive `marker_scale` automatically from map spread |
+| `interactive_marker_limit` | `750` | Max node count for editable markers; above this the map is shown read-only |
+
+> **Large maps & responsiveness.** The visualiser batches markers — all
+> nodes into one `SPHERE_LIST`, all influence zones into one `LINE_LIST`,
+> and edges into one `LINE_LIST` per action colour — so even maps with
+> thousands of nodes/edges produce only a handful of RViz markers. For very
+> large maps, set `show_node_labels:=false` (text is the most expensive RViz
+> primitive) and/or raise `interactive_marker_limit` only if you really need
+> per-node dragging. Enable `auto_marker_scale:=true` to size markers
+> automatically from the map extent.
+>
+> All of these parameters (except `map_file` / `nav_action_name`) can be
+> changed at **runtime** with `ros2 param set`, e.g.:
+>
+> ```bash
+> ros2 param set /topological_map_visualiser show_node_labels false
+> ros2 param set /topological_map_visualiser marker_scale 1.5
+> ros2 param set /topological_map_visualiser auto_marker_scale true
+> ```
 
 ### On a Real Robot
 
@@ -327,6 +350,16 @@ ros2 action send_goal /topological_navigation \
 | `route_algorithm` | string | `"astar"` | Path planning algorithm: `"astar"` or `"dijkstra"` |
 | `route_weight_attr` | string | `"weight"` | Edge attribute used as cost for path planning |
 
+> All five parameters above are **dynamically reconfigurable** — change them
+> at runtime with `ros2 param set` and the new value is used on the next
+> planned route (no restart needed). Invalid values (e.g. an unknown
+> `route_algorithm`) are rejected. Example:
+>
+> ```bash
+> ros2 param set /topological_navigation route_algorithm dijkstra
+> ros2 param set /topological_navigation max_dist_to_closest_edge 2.0
+> ```
+
 ### topological_localisation (localisation2.py)
 
 | Parameter | Type | Default | Description |
@@ -364,11 +397,20 @@ ros2 action send_goal /topological_navigation \
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `map_file` | string | `""` | Path to `.tmap2.yaml` file for editing (empty = subscribe to topic) |
+| `map_file` | string | `""` | Path to `.tmap2.yaml` file for editing (empty = subscribe to topic). *Start-up only.* |
 | `auto_save` | bool | `false` | Automatically save map every 30 seconds |
-| `marker_scale` | double | `0.5` | Scale factor for RViz node/edge markers |
+| `marker_scale` | double | `0.5` | Base scale factor for RViz markers |
 | `edit_mode` | bool | `true` | Enable interactive drag-and-drop node editing |
-| `nav_action_name` | string | `"/topological_navigation"` | GotoNode action name for click-to-navigate context menu |
+| `nav_action_name` | string | `"/topological_navigation"` | GotoNode action name for click-to-navigate context menu. *Start-up only.* |
+| `show_node_labels` | bool | `true` | Render per-node text labels (disable on large maps for speed) |
+| `show_zones` | bool | `true` | Render node influence-zone polygons |
+| `show_edges` | bool | `true` | Render edges between nodes |
+| `auto_marker_scale` | bool | `false` | Derive `marker_scale` automatically from the spatial spread of the map |
+| `interactive_marker_limit` | int | `750` | Max node count for which editable markers are created; above this the map is shown read-only |
+
+> Every parameter except `map_file` and `nav_action_name` can be changed at
+> runtime via `ros2 param set /topological_map_visualiser <param> <value>`;
+> the visualisation rebuilds automatically.
 
 ### route_visualiser / occupancy_visualiser (topological_visual.py)
 

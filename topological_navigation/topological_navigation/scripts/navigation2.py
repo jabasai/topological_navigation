@@ -63,6 +63,7 @@ from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import Point32, PolygonStamped, PoseStamped
 from rcl_interfaces.msg import Parameter as RclParameter
 from rcl_interfaces.msg import ParameterType, ParameterValue
+from rcl_interfaces.msg import SetParametersResult
 from rcl_interfaces.srv import SetParameters
 from rclpy import Parameter
 from rclpy.action import ActionClient, ActionServer, CancelResponse
@@ -267,6 +268,9 @@ class TopologicalNavServer(rclpy.node.Node):
         # -- Parameters ----------------------------------------------
         self._declare_parameters()
         self._load_parameters()
+        # Allow route-planning / boundary parameters to be reconfigured at
+        # runtime (ROS 2 Humble: add_on_set_parameters_callback).
+        self.add_on_set_parameters_callback(self._parameters_callback)
 
         # -- QoS -----------------------------------------------------
         self._latch = QoSProfile(
@@ -476,6 +480,91 @@ class TopologicalNavServer(rclpy.node.Node):
                 % (self._stats_db_path, exc),
             )
             self._stats_db = None
+
+    def _parameters_callback(self, params):
+        """Apply runtime parameter updates (ROS 2 Humble compatible).
+
+        Route-planning and boundary parameters are read fresh on every
+        navigation request, so updating the cached attributes here takes
+        effect on the *next* planned route without requiring a restart.
+        Invalid values are rejected so the running configuration stays
+        consistent.
+        """
+        valid_algorithms = ('astar', 'dijkstra')
+
+        for p in params:
+            name = p.name
+
+            if name == 'route_algorithm':
+                if p.type_ != Parameter.Type.STRING:
+                    return SetParametersResult(
+                        successful=False,
+                        reason='route_algorithm must be a string',
+                    )
+                if p.value not in valid_algorithms:
+                    return SetParametersResult(
+                        successful=False,
+                        reason="route_algorithm must be one of %s"
+                        % (valid_algorithms,),
+                    )
+                self._route_algorithm = p.value
+
+            elif name == 'route_weight_attr':
+                if p.type_ != Parameter.Type.STRING or not p.value:
+                    return SetParametersResult(
+                        successful=False,
+                        reason='route_weight_attr must be a non-empty string',
+                    )
+                self._route_weight = p.value
+
+            elif name == 'max_dist_to_closest_edge':
+                if p.type_ not in (
+                    Parameter.Type.DOUBLE, Parameter.Type.INTEGER,
+                ):
+                    return SetParametersResult(
+                        successful=False,
+                        reason='max_dist_to_closest_edge must be a number',
+                    )
+                if float(p.value) < 0.0:
+                    return SetParametersResult(
+                        successful=False,
+                        reason='max_dist_to_closest_edge must be >= 0',
+                    )
+                self._max_dist_to_closest_edge = float(p.value)
+
+            elif name == 'default_boundary_left':
+                if p.type_ not in (
+                    Parameter.Type.DOUBLE, Parameter.Type.INTEGER,
+                ):
+                    return SetParametersResult(
+                        successful=False,
+                        reason='default_boundary_left must be a number',
+                    )
+                self._default_boundary_left = float(p.value)
+
+            elif name == 'default_boundary_right':
+                if p.type_ not in (
+                    Parameter.Type.DOUBLE, Parameter.Type.INTEGER,
+                ):
+                    return SetParametersResult(
+                        successful=False,
+                        reason='default_boundary_right must be a number',
+                    )
+                self._default_boundary_right = float(p.value)
+
+            else:
+                # Other parameters are start-up only; ignore live changes.
+                continue
+
+            self.get_logger().info(
+                "[PARAM] %s -> %s" % (name, p.value),
+            )
+
+        return SetParametersResult(successful=True)
+
+    # =================================================================
+    # Map-driven configuration
+    # =================================================================
 
     def _load_action_type(self, type_str):
         # Example: nav2_msgs.action.NavigateThroughPoses
