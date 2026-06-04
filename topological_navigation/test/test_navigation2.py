@@ -2,6 +2,7 @@
 
 from types import SimpleNamespace
 
+from rclpy import Parameter
 from rclpy.action import CancelResponse
 
 from topological_navigation.navigation_graph import NavState
@@ -221,3 +222,66 @@ def test_load_map_config_clears_stale_action_clients_when_actions_missing():
 
     assert server._action_clients == {}
     assert server._bt_files == {}
+
+
+# ----------------------------------------------------------------------
+# Dynamic (runtime) parameter callback
+# ----------------------------------------------------------------------
+def _param(name, value, ptype):
+    """Build a parameter double exposing name/value/type_."""
+    return SimpleNamespace(name=name, value=value, type_=ptype)
+
+
+def test_parameters_callback_updates_route_algorithm():
+    """A valid algorithm change should be applied and accepted."""
+    server = _make_server()
+    result = server._parameters_callback(
+        [_param('route_algorithm', 'dijkstra', Parameter.Type.STRING)]
+    )
+    assert result.successful is True
+    assert server._route_algorithm == 'dijkstra'
+
+
+def test_parameters_callback_rejects_unknown_algorithm():
+    """An unknown algorithm must be rejected without mutating state."""
+    server = _make_server()
+    server._route_algorithm = 'astar'
+    result = server._parameters_callback(
+        [_param('route_algorithm', 'bfs', Parameter.Type.STRING)]
+    )
+    assert result.successful is False
+    assert server._route_algorithm == 'astar'
+
+
+def test_parameters_callback_rejects_negative_max_dist():
+    """A negative origin distance must be rejected."""
+    server = _make_server()
+    result = server._parameters_callback(
+        [_param('max_dist_to_closest_edge', -1.0, Parameter.Type.DOUBLE)]
+    )
+    assert result.successful is False
+
+
+def test_parameters_callback_rejects_empty_weight_attr():
+    """An empty weight attribute name must be rejected."""
+    server = _make_server()
+    result = server._parameters_callback(
+        [_param('route_weight_attr', '', Parameter.Type.STRING)]
+    )
+    assert result.successful is False
+
+
+def test_parameters_callback_updates_numeric_and_weight_params():
+    """Valid numeric/string updates should all be applied."""
+    server = _make_server()
+    result = server._parameters_callback([
+        _param('max_dist_to_closest_edge', 2.5, Parameter.Type.DOUBLE),
+        _param('default_boundary_left', 0.7, Parameter.Type.DOUBLE),
+        _param('default_boundary_right', 0.8, Parameter.Type.DOUBLE),
+        _param('route_weight_attr', 'cost', Parameter.Type.STRING),
+    ])
+    assert result.successful is True
+    assert server._max_dist_to_closest_edge == 2.5
+    assert server._default_boundary_left == 0.7
+    assert server._default_boundary_right == 0.8
+    assert server._route_weight == 'cost'
