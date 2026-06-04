@@ -2,11 +2,11 @@ name: Validate Schema
 
 on:
   push:
-    branches: [ humble ]
+    branches: [ humble, main ]
     tags:
       - '*'
   pull_request:
-    branches: [ humble ]
+    branches: [ humble, main ]
 
 jobs:
   validate_schema:
