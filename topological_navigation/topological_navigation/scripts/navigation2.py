@@ -91,6 +91,7 @@ from topological_navigation.navigation_graph import (
     merge_action_segments,
     plan_route,
 )
+from topological_navigation.nav_stats_db import NavStatsDB, compute_map_hash
 from topological_navigation.networkx_utils import build_graph_from_tmap
 from topological_navigation.tmap_utils import (
     get_edge_from_id_tmap2,
@@ -147,6 +148,12 @@ class nav_stats:
         self.target = target
         self.topological_map = topol_map
         self.edge_id = edge_id
+        # Optional extras used by the DB recorder
+        self.map_hash: str = ""
+        self.failure_reason: str = "none"
+        self.edge_length: float = 0.0
+        self.is_segment: bool = False
+        self.segment_edge_ids: list = []
         self.set_start()
 
     def set_start(self):
@@ -255,6 +262,8 @@ class TopologicalNavServer(rclpy.node.Node):
 
         # -- Stats ---------------------------------------------------
         self._stat = None
+        self._stats_db: 'NavStatsDB | None' = None
+        self._map_hash: str = ""
 
         # -- Parameters ----------------------------------------------
         self._declare_parameters()
@@ -406,6 +415,8 @@ class TopologicalNavServer(rclpy.node.Node):
             ('goal_checker_node', Parameter.Type.STRING),
             ('xy_tolerance_param', Parameter.Type.STRING),
             ('yaw_tolerance_param', Parameter.Type.STRING),
+            # Statistics persistence
+            ('stats_db_path', Parameter.Type.STRING),
         ]:
             self.declare_parameter(name, ptype)
 
@@ -447,6 +458,28 @@ class TopologicalNavServer(rclpy.node.Node):
             'yaw_tolerance_param', Parameter.Type.STRING,
             'goal_checker.yaw_goal_tolerance',
         )
+        # Stats persistence: empty string means disabled
+        self._stats_db_path = _p(
+            'stats_db_path', Parameter.Type.STRING, '',
+        )
+        self._init_stats_db()
+
+    def _init_stats_db(self):
+        """Open (or create) the SQLite stats database, if a path is configured."""
+        if not self._stats_db_path:
+            self._stats_db = None
+            return
+        try:
+            self._stats_db = NavStatsDB(self._stats_db_path)
+            self.get_logger().info(
+                "[STATS] Database opened: %s" % self._stats_db_path,
+            )
+        except Exception as exc:
+            self.get_logger().error(
+                "[STATS] Cannot open database '%s': %s"
+                % (self._stats_db_path, exc),
+            )
+            self._stats_db = None
 
     def _parameters_callback(self, params):
         """Apply runtime parameter updates (ROS 2 Humble compatible).
@@ -659,6 +692,9 @@ class TopologicalNavServer(rclpy.node.Node):
         if self._navigation_activated:
             self._preempted = True
             self._cancel_nav2_goal(timeout_sec=2.0)
+        if self._stats_db is not None:
+            self._stats_db.close()
+            self._stats_db = None
 
     # =================================================================
     # Topic callbacks
@@ -710,6 +746,7 @@ class TopologicalNavServer(rclpy.node.Node):
             self._tmap = tmap
             self._graph = graph
             self._topol_map = tmap.get("pointset", "unknown")
+            self._map_hash = compute_map_hash(msg.data)
             self._map_received = True
             self._load_map_config()
 
@@ -846,6 +883,30 @@ class TopologicalNavServer(rclpy.node.Node):
         )
         msg.date_finished = s.get_finish_time_str()
         self._stats_pub.publish(msg)
+        self._record_stats_to_db(s)
+
+    def _record_stats_to_db(self, s):
+        """Persist traversal statistics to the SQLite database (if enabled)."""
+        if self._stats_db is None:
+            return
+        try:
+            self._stats_db.record_traversal(
+                map_name=s.topological_map,
+                map_hash=s.map_hash or self._map_hash,
+                edge_id=s.edge_id,
+                origin=s.origin,
+                target=s.target,
+                status=s.status,
+                failure_reason=s.failure_reason,
+                start_time=s.date_started,
+                end_time=s.date_finished,
+                duration_s=s.operation_time,
+                edge_length=s.edge_length if s.edge_length else None,
+                is_segment=s.is_segment,
+                segment_edges=s.segment_edge_ids if s.segment_edge_ids else None,
+            )
+        except Exception as exc:
+            self.get_logger().error("[STATS] DB write error: %s" % exc)
 
     def _publish_current_edge(self, edge_id):
         msg = String()
@@ -1822,6 +1883,8 @@ class TopologicalNavServer(rclpy.node.Node):
                     % (eid, src, tgt),
                 )
                 self._stat = nav_stats(src, tgt, self._topol_map, eid)
+                self._stat.map_hash = self._map_hash
+                self._stat.failure_reason = "lookup_failed"
                 self._stat.set_ended(self._current_node)
                 self._stat.status = "failed"
                 self._publish_stats()
@@ -1849,6 +1912,15 @@ class TopologicalNavServer(rclpy.node.Node):
             self._topol_map,
             segment.edge_ids[0] if segment.edge_ids else "",
         )
+        # Populate extras for DB recording
+        self._stat.map_hash = self._map_hash
+        self._stat.is_segment = segment.num_edges > 1
+        self._stat.segment_edge_ids = list(segment.edge_ids)
+        self._stat.edge_length = get_route_distance(
+            self._graph,
+            (segment.source_nodes + [segment.last_target])
+            if segment.source_nodes else [],
+        )
 
         info = self._action_clients.get(action)
         client = info['client'] if info else None
@@ -1871,10 +1943,14 @@ class TopologicalNavServer(rclpy.node.Node):
             )
             self._goal_reached = False
         else:
-            self._stat.status = "failed"
-            self._publish_stats()
             if status == GoalStatus.STATUS_CANCELED:
+                self._stat.status = "aborted"
+                self._stat.failure_reason = "cancelled"
                 self._preempted = True
+            else:
+                self._stat.status = "failed"
+                self._stat.failure_reason = _status_str(status).lower()
+            self._publish_stats()
             self.get_logger().warning(
                 "  Segment FAILED: %s -> %s (%s)" % (
                     segment.first_source, segment.last_target,
