@@ -146,9 +146,14 @@ def _install_ros_test_stubs():
             def __init__(self):
                 super().__init__(values=[])
 
+    class SetParametersResult(_BaseMsg):
+        def __init__(self, successful=False, reason=''):
+            super().__init__(successful=successful, reason=reason)
+
     rcl_interfaces.msg.Parameter = RclParameter
     rcl_interfaces.msg.ParameterType = ParameterType
     rcl_interfaces.msg.ParameterValue = ParameterValue
+    rcl_interfaces.msg.SetParametersResult = SetParametersResult
     rcl_interfaces.srv.SetParameters = SetParameters
     rcl_interfaces.srv.GetParameters = GetParameters
 
