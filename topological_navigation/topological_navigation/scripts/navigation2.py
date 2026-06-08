@@ -64,7 +64,7 @@ from geometry_msgs.msg import Point32, PolygonStamped, PoseStamped
 from rcl_interfaces.msg import Parameter as RclParameter
 from rcl_interfaces.msg import ParameterType, ParameterValue
 from rcl_interfaces.msg import SetParametersResult
-from rcl_interfaces.srv import SetParameters
+from rcl_interfaces.srv import GetParameters, SetParameters
 from rclpy import Parameter
 from rclpy.action import ActionClient, ActionServer, CancelResponse
 from rclpy.callback_groups import (
@@ -133,6 +133,50 @@ class _FloatSafeLoader(yaml.SafeLoader):
             if k in m and isinstance(m[k], int):
                 m[k] = float(m[k])
         return m
+
+
+# =====================================================================
+# ROS 2 parameter value helpers
+# =====================================================================
+
+def _ros_param_value(param_value):
+    """Extract the Python value from a ROS 2 ``ParameterValue``.
+
+    Returns ``None`` when the parameter type is not recognised or when
+    the parameter is unset (``PARAMETER_NOT_SET``).
+    """
+    ptype = param_value.type
+    if ptype == ParameterType.PARAMETER_BOOL:
+        return param_value.bool_value
+    if ptype == ParameterType.PARAMETER_INTEGER:
+        return param_value.integer_value
+    if ptype == ParameterType.PARAMETER_DOUBLE:
+        return param_value.double_value
+    if ptype == ParameterType.PARAMETER_STRING:
+        return param_value.string_value
+    return None
+
+
+def _make_ros_param_value(value):
+    """Build a ROS 2 ``ParameterValue`` from a plain Python value.
+
+    Supported types: ``bool``, ``int``, ``float``, ``str``.
+    Returns an unset ``ParameterValue`` for unsupported types.
+    """
+    pv = ParameterValue()
+    if isinstance(value, bool):
+        pv.type = ParameterType.PARAMETER_BOOL
+        pv.bool_value = value
+    elif isinstance(value, int):
+        pv.type = ParameterType.PARAMETER_INTEGER
+        pv.integer_value = value
+    elif isinstance(value, float):
+        pv.type = ParameterType.PARAMETER_DOUBLE
+        pv.double_value = value
+    elif isinstance(value, str):
+        pv.type = ParameterType.PARAMETER_STRING
+        pv.string_value = value
+    return pv
 
 
 # =====================================================================
@@ -383,15 +427,18 @@ class TopologicalNavServer(rclpy.node.Node):
             callback_group=cb_policy,
         )
 
-        # -- Goal checker service client ---------------------------
+        # -- Goal checker service clients --------------------------
         gc_node = self._goal_checker_node
         self._set_params_client = self.create_client(
             SetParameters,
             '/%s/set_parameters' % gc_node,
             callback_group=ReentrantCallbackGroup(),
         )
-        self._last_xy_tol = None
-        self._last_yaw_tol = None
+        self._get_params_client = self.create_client(
+            GetParameters,
+            '/%s/get_parameters' % gc_node,
+            callback_group=ReentrantCallbackGroup(),
+        )
 
         self.get_logger().info(
             "[INIT] Navigation server READY ('%s', algo=%s, weight=%s)"
@@ -1065,90 +1112,202 @@ class TopologicalNavServer(rclpy.node.Node):
         return ps
 
     # =================================================================
-    # Nav2 goal tolerances
+    # Segment parameter management (save / apply / restore)
     # =================================================================
 
-    def _set_goal_tolerances(self, node_name):
-        """Set Nav2 goal checker tolerances from node properties.
+    def _get_ros_params_sync(self, names):
+        """Synchronously query ROS 2 parameters from the goal-checker node.
 
-        Reads ``xy_goal_tolerance`` and ``yaw_goal_tolerance`` from
-        the target node's properties and sets them on the Nav2
-        controller_server via the ``SetParameters`` service.
+        Polls the ``GetParameters`` service until the future resolves
+        or a 2-second deadline elapses.  Returns a ``{name: value}``
+        dict for every successfully retrieved parameter; parameters
+        whose value could not be decoded (e.g. ``PARAMETER_NOT_SET``)
+        are omitted.
 
-        This is best-effort: if the service is unavailable the
-        goal proceeds with the previously configured tolerances.
+        Args:
+            names: List of ROS 2 parameter names to query.
+
+        Returns:
+            Dict mapping parameter name to its current Python value.
         """
-        if node_name not in self._graph:
+        if not names:
+            return {}
+        if not self._get_params_client.service_is_ready():
+            self.get_logger().debug(
+                "[PARAM] GetParameters service not available",
+            )
+            return {}
+
+        req = GetParameters.Request()
+        req.names = list(names)
+        future = self._get_params_client.call_async(req)
+
+        deadline = time.time() + 2.0
+        while rclpy.ok() and not future.done() and time.time() < deadline:
+            time.sleep(0.05)
+
+        if not future.done():
+            self.get_logger().warning(
+                "[PARAM] GetParameters timed out for: %s" % names,
+            )
+            return {}
+
+        try:
+            result = future.result()
+        except Exception as exc:
+            self.get_logger().debug(
+                "[PARAM] GetParameters failed: %s" % exc,
+            )
+            return {}
+
+        out = {}
+        for name, pv in zip(names, result.values):
+            val = _ros_param_value(pv)
+            if val is not None:
+                out[name] = val
+        return out
+
+    def _set_ros_params_async(self, params_dict):
+        """Send a ``SetParameters`` request (fire-and-forget).
+
+        Args:
+            params_dict: ``{ros_param_name: python_value}`` mapping.
+        """
+        if not params_dict:
             return
-
-        props = self._graph.nodes[node_name].get('properties', {})
-        xy_tol = props.get('xy_goal_tolerance')
-        yaw_tol = props.get('yaw_goal_tolerance')
-
-        if xy_tol is None and yaw_tol is None:
-            return
-
-        # Skip if unchanged from last set
-        if xy_tol == self._last_xy_tol and yaw_tol == self._last_yaw_tol:
+        if not self._set_params_client.service_is_ready():
+            self.get_logger().debug(
+                "[PARAM] SetParameters service not available, skipping",
+            )
             return
 
         params = []
-        if xy_tol is not None:
+        for name, value in params_dict.items():
             p = RclParameter()
-            p.name = self._xy_tolerance_param
-            p.value = ParameterValue(
-                type=ParameterType.PARAMETER_DOUBLE,
-                double_value=float(xy_tol),
-            )
+            p.name = name
+            p.value = _make_ros_param_value(value)
             params.append(p)
-
-        if yaw_tol is not None:
-            p = RclParameter()
-            p.name = self._yaw_tolerance_param
-            p.value = ParameterValue(
-                type=ParameterType.PARAMETER_DOUBLE,
-                double_value=float(yaw_tol),
-            )
-            params.append(p)
-
-        if not self._set_params_client.service_is_ready():
-            self.get_logger().debug(
-                "[TOL] SetParameters service not available, skipping",
-            )
-            return
 
         req = SetParameters.Request()
         req.parameters = params
         future = self._set_params_client.call_async(req)
-        future.add_done_callback(self._tolerance_set_cb)
+        future.add_done_callback(self._set_params_cb)
 
-        self._last_xy_tol = xy_tol
-        self._last_yaw_tol = yaw_tol
-
-        self.get_logger().info(
-            "[TOL] Setting tolerances for '%s': xy=%.3f yaw=%.3f"
-            % (
-                node_name,
-                float(xy_tol) if xy_tol is not None else -1,
-                float(yaw_tol) if yaw_tol is not None else -1,
-            ),
-        )
-
-    def _tolerance_set_cb(self, future):
-        """Log result of tolerance parameter update."""
+    def _set_params_cb(self, future):
+        """Log the result of an async ``SetParameters`` call."""
         try:
             result = future.result()
-            failed = [
-                r for r in result.results if not r.successful
-            ]
+            failed = [r for r in result.results if not r.successful]
             if failed:
                 self.get_logger().warning(
-                    "[TOL] Some parameters failed to set",
+                    "[PARAM] %d parameter(s) failed to set" % len(failed),
                 )
         except Exception as exc:
             self.get_logger().debug(
-                "[TOL] SetParameters call failed: %s" % exc,
+                "[PARAM] SetParameters call failed: %s" % exc,
             )
+
+    def _apply_segment_parameters(self, segment):
+        """Apply ROS 2 parameters for a segment and save previous values.
+
+        Called at segment entrance.  For each parameter that will be
+        changed:
+
+        1. The current value is queried via ``GetParameters``.
+        2. The new value (derived from the segment) is sent via
+           ``SetParameters``.
+
+        The returned dict maps parameter name to the value that was in
+        place *before* this call; pass it to
+        :meth:`_restore_segment_parameters` after the segment
+        completes to undo the changes.
+
+        **Parameter sources**
+
+        - *Node-level goal tolerances* – ``xy_goal_tolerance`` and
+          ``yaw_goal_tolerance`` from the target node's properties.
+        - *Edge-level parameters* – any entry in the segment's edge
+          ``properties`` that is listed under ``ros_parameters`` in
+          the action's map configuration.  The ``ros_parameters`` dict
+          maps edge property name to the corresponding ROS 2 parameter
+          name on the goal-checker node::
+
+              actions:
+                row_traversal:
+                  ros_parameters:
+                    max_speed: FollowPath.max_robot_speed
+
+        All operations are best-effort; if the parameter service is
+        unavailable the segment still executes with the currently
+        configured values.
+
+        Args:
+            segment: The :class:`ActionSegment` about to be executed.
+
+        Returns:
+            ``{ros_param_name: previous_value}`` dict (may be empty).
+        """
+        params_to_set = {}
+
+        # -- Node-level goal tolerances --------------------------------
+        target_node = segment.last_target
+        if target_node and target_node in self._graph:
+            node_props = self._graph.nodes[target_node].get('properties', {})
+            xy_tol = node_props.get('xy_goal_tolerance')
+            yaw_tol = node_props.get('yaw_goal_tolerance')
+            if xy_tol is not None:
+                params_to_set[self._xy_tolerance_param] = float(xy_tol)
+            if yaw_tol is not None:
+                params_to_set[self._yaw_tolerance_param] = float(yaw_tol)
+
+        # -- Edge-level parameters from the action's ros_parameters ----
+        action = segment.action_type
+        info = self._action_clients.get(action) or {}
+        ros_param_mapping = (info.get('config') or {}).get(
+            'ros_parameters', {},
+        )
+        edge_props = segment.parameters  # consistent across segment
+        for prop_name, ros_param_name in ros_param_mapping.items():
+            if prop_name in edge_props:
+                params_to_set[ros_param_name] = edge_props[prop_name]
+
+        if not params_to_set:
+            return {}
+
+        # Query current values before making any changes
+        prev_values = self._get_ros_params_sync(list(params_to_set.keys()))
+
+        # Apply the new values
+        self._set_ros_params_async(params_to_set)
+
+        if params_to_set:
+            self.get_logger().info(
+                "[PARAM] Segment '%s': setting %s"
+                % (action, list(params_to_set.keys())),
+            )
+
+        return prev_values
+
+    def _restore_segment_parameters(self, prev_values):
+        """Restore ROS 2 parameters to the values saved before a segment.
+
+        Called after a segment completes (whether it succeeded, failed,
+        or was cancelled/aborted).  Sends a ``SetParameters`` request
+        (fire-and-forget) to put the affected parameters back to the
+        values that were recorded by :meth:`_apply_segment_parameters`.
+
+        Args:
+            prev_values: ``{ros_param_name: previous_value}`` dict as
+                returned by :meth:`_apply_segment_parameters`.  An
+                empty dict is a no-op.
+        """
+        if not prev_values:
+            return
+        self.get_logger().info(
+            "[PARAM] Restoring %d parameter(s) to pre-segment values"
+            % len(prev_values),
+        )
+        self._set_ros_params_async(prev_values)
 
     # =================================================================
     # Goal construction (map-driven)
@@ -1898,8 +2057,11 @@ class TopologicalNavServer(rclpy.node.Node):
             segment.edge_ids[0] if segment.edge_ids else "none",
         )
 
-        # Set Nav2 goal checker tolerances from target node properties
-        self._set_goal_tolerances(segment.last_target)
+        # Apply segment parameters (query current values, set new ones).
+        # Parameters are restored unconditionally in the finally block
+        # so that changes are undone whether the segment succeeds,
+        # fails, or is cancelled/aborted.
+        prev_params = self._apply_segment_parameters(segment)
 
         self.get_logger().info(
             "  Sending %d-wp %s goal" % (segment.num_edges, action),
@@ -1924,7 +2086,12 @@ class TopologicalNavServer(rclpy.node.Node):
 
         info = self._action_clients.get(action)
         client = info['client'] if info else None
-        status = self._send_nav2_goal(goal, action_client=client)
+        try:
+            status = self._send_nav2_goal(goal, action_client=client)
+        finally:
+            # Restore parameters regardless of outcome (success, failure,
+            # cancellation, or exception).
+            self._restore_segment_parameters(prev_params)
 
         self._publish_move_status(
             segment.last_target or "?", action, _status_str(status),
