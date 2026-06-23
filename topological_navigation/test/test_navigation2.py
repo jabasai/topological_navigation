@@ -97,6 +97,29 @@ class _FakePolicyGoalHandle:
         self.final_state = 'canceled'
 
 
+class _FakePolicyGraph:
+    """Small graph stub supporting get_route_edges-style access."""
+
+    def __init__(self, edges):
+        self._edges = list(edges)
+
+    def has_edge(self, src, tgt):
+        return (src, tgt) in self._edges
+
+    def __getitem__(self, src):
+        edge_map = {}
+        for u, v in self._edges:
+            if u != src:
+                continue
+            edge_map[v] = {
+                'edge_id': '%s_%s' % (u, v),
+                'source': u,
+                'target': v,
+                'properties': {},
+            }
+        return edge_map
+
+
 def _make_server():
     """Create a partially constructed ``TopologicalNavServer`` for unit tests."""
     server = TopologicalNavServer.__new__(TopologicalNavServer)
@@ -122,7 +145,7 @@ def _make_server():
             },
         ],
     }
-    server._graph = {}
+    server._graph = _FakePolicyGraph([('WP1', 'WP2')])
     server._topol_map = 'test_map'
     server._map_actions = {}
     server._map_definitions = {}
@@ -485,12 +508,63 @@ def test_parameters_callback_updates_numeric_and_weight_params():
     server = _make_server()
     result = server._parameters_callback([
         _param('max_dist_to_closest_edge', 2.5, Parameter.Type.DOUBLE),
-        _param('default_boundary_left', 0.7, Parameter.Type.DOUBLE),
-        _param('default_boundary_right', 0.8, Parameter.Type.DOUBLE),
+        _param('coarse_white_extension_m', 4.7, Parameter.Type.DOUBLE),
+        _param('route_white_extension_m', 2.8, Parameter.Type.DOUBLE),
         _param('route_weight_attr', 'cost', Parameter.Type.STRING),
     ])
     assert result.successful is True
     assert server._max_dist_to_closest_edge == 2.5
-    assert server._default_boundary_left == 0.7
-    assert server._default_boundary_right == 0.8
+    assert server._coarse_white_extension_m == 4.7
+    assert server._route_white_extension_m == 2.8
     assert server._route_weight == 'cost'
+
+
+def test_parameters_callback_updates_metric_map_parameters():
+    """Metric map generation parameters should accept valid updates."""
+    server = _make_server()
+    result = server._parameters_callback([
+        _param('metric_map_resolution', 1.0, Parameter.Type.DOUBLE),
+        _param('route_segment_resolution', 0.05, Parameter.Type.DOUBLE),
+        _param('route_segment_border_width', 0.3, Parameter.Type.DOUBLE),
+        _param('route_segment_padding', 0.2, Parameter.Type.DOUBLE),
+    ])
+    assert result.successful is True
+    assert server._metric_map_resolution == 1.0
+    assert server._route_segment_resolution == 0.05
+    assert server._route_segment_border_width == 0.3
+    assert server._route_segment_padding == 0.2
+
+
+def test_parameters_callback_rejects_invalid_metric_map_values():
+    """Invalid metric map values should be rejected."""
+    server = _make_server()
+
+    result = server._parameters_callback([
+        _param('metric_map_resolution', 0.0, Parameter.Type.DOUBLE),
+    ])
+    assert result.successful is False
+
+    result = server._parameters_callback([
+        _param('route_segment_resolution', -0.1, Parameter.Type.DOUBLE),
+    ])
+    assert result.successful is False
+
+    result = server._parameters_callback([
+        _param('route_segment_border_width', -0.1, Parameter.Type.DOUBLE),
+    ])
+    assert result.successful is False
+
+    result = server._parameters_callback([
+        _param('route_segment_padding', -0.1, Parameter.Type.DOUBLE),
+    ])
+    assert result.successful is False
+
+    result = server._parameters_callback([
+        _param('coarse_white_extension_m', -0.1, Parameter.Type.DOUBLE),
+    ])
+    assert result.successful is False
+
+    result = server._parameters_callback([
+        _param('route_white_extension_m', -0.1, Parameter.Type.DOUBLE),
+    ])
+    assert result.successful is False

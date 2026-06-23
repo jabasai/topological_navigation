@@ -98,6 +98,30 @@ def _install_ros_test_stubs():
     geometry_msgs.msg.PolygonStamped = PolygonStamped
     geometry_msgs.msg.PoseStamped = PoseStamped
 
+    # nav_msgs.msg ---------------------------------------------------
+    nav_msgs = _module('nav_msgs')
+    nav_msgs.msg = _module('nav_msgs.msg')
+
+    class OccupancyGrid(_BaseMsg):
+        def __init__(self):
+            super().__init__(
+                header=types.SimpleNamespace(frame_id='', stamp=None),
+                info=types.SimpleNamespace(
+                    resolution=0.0,
+                    width=0,
+                    height=0,
+                    origin=types.SimpleNamespace(
+                        position=types.SimpleNamespace(x=0.0, y=0.0, z=0.0),
+                        orientation=types.SimpleNamespace(
+                            x=0.0, y=0.0, z=0.0, w=1.0,
+                        ),
+                    ),
+                ),
+                data=[],
+            )
+
+    nav_msgs.msg.OccupancyGrid = OccupancyGrid
+
     # rcl_interfaces --------------------------------------------------
     rcl_interfaces = _module('rcl_interfaces')
     rcl_interfaces.msg = _module('rcl_interfaces.msg')
