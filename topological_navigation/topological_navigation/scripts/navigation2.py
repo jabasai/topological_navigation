@@ -38,8 +38,8 @@ ROS 2 interfaces
         topological_navigation/move_action_status (String)
     Parameters:
         max_dist_to_closest_edge  (double)  -- origin heuristic
-        default_boundary_left     (double)  -- row corridor left
-        default_boundary_right    (double)  -- row corridor right
+        coarse_white_extension_m  (double)  -- coarse full-map corridor half-width
+        route_white_extension_m   (double)  -- fine route-map default half-width
         route_algorithm           (string)  -- 'astar' | 'dijkstra'
         route_weight_attr         (string)  -- edge attribute for cost
 
@@ -61,6 +61,7 @@ import rclpy
 import rclpy.node
 from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import Point32, PolygonStamped, PoseStamped
+from nav_msgs.msg import OccupancyGrid
 from rcl_interfaces.msg import Parameter as RclParameter
 from rcl_interfaces.msg import ParameterType, ParameterValue
 from rcl_interfaces.msg import SetParametersResult
@@ -93,6 +94,15 @@ from topological_navigation.navigation_graph import (
 )
 from topological_navigation.nav_stats_db import NavStatsDB, compute_map_hash
 from topological_navigation.networkx_utils import build_graph_from_tmap
+from topological_navigation.topomap_to_map_image import (
+    FREE_VALUE,
+    OCCUPIED_VALUE,
+    UNKNOWN_VALUE,
+    geometry_from_tmap,
+    rasterize_geometry,
+    rasterize_route_geometry,
+    route_specs_from_edge_data,
+)
 from topological_navigation.tmap_utils import (
     get_edge_from_id_tmap2,
     get_node_from_tmap2,
@@ -356,6 +366,12 @@ class TopologicalNavServer(rclpy.node.Node):
             String, "/robot_operation_current_status",
             qos_profile=self._latch,
         )
+        self._map_pub = self.create_publisher(
+            OccupancyGrid, "/map", qos_profile=self._latch,
+        )
+        self._route_segment_map_pub = self.create_publisher(
+            OccupancyGrid, "/topo_map_route_segment", qos_profile=self._latch,
+        )
 
         # -- Map subscription (blocking wait) ------------------------
         self._map_received = False
@@ -453,8 +469,12 @@ class TopologicalNavServer(rclpy.node.Node):
         """Declare all ROS 2 parameters."""
         for name, ptype in [
             ('max_dist_to_closest_edge', Parameter.Type.DOUBLE),
-            ('default_boundary_left', Parameter.Type.DOUBLE),
-            ('default_boundary_right', Parameter.Type.DOUBLE),
+            ('coarse_white_extension_m', Parameter.Type.DOUBLE),
+            ('route_white_extension_m', Parameter.Type.DOUBLE),
+            ('metric_map_resolution', Parameter.Type.DOUBLE),
+            ('route_segment_resolution', Parameter.Type.DOUBLE),
+            ('route_segment_border_width', Parameter.Type.DOUBLE),
+            ('route_segment_padding', Parameter.Type.DOUBLE),
             # NetworkX path optimisation
             ('route_algorithm', Parameter.Type.STRING),
             ('route_weight_attr', Parameter.Type.STRING),
@@ -478,11 +498,23 @@ class TopologicalNavServer(rclpy.node.Node):
         self._max_dist_to_closest_edge = _p(
             'max_dist_to_closest_edge', Parameter.Type.DOUBLE, 1.0,
         )
-        self._default_boundary_left = _p(
-            'default_boundary_left', Parameter.Type.DOUBLE, 0.5,
+        self._coarse_white_extension_m = _p(
+            'coarse_white_extension_m', Parameter.Type.DOUBLE, 4.0,
         )
-        self._default_boundary_right = _p(
-            'default_boundary_right', Parameter.Type.DOUBLE, 0.5,
+        self._route_white_extension_m = _p(
+            'route_white_extension_m', Parameter.Type.DOUBLE, 2.0,
+        )
+        self._metric_map_resolution = _p(
+            'metric_map_resolution', Parameter.Type.DOUBLE, 1.0,
+        )
+        self._route_segment_resolution = _p(
+            'route_segment_resolution', Parameter.Type.DOUBLE, 0.05,
+        )
+        self._route_segment_border_width = _p(
+            'route_segment_border_width', Parameter.Type.DOUBLE, 0.25,
+        )
+        self._route_segment_padding = _p(
+            'route_segment_padding', Parameter.Type.DOUBLE, 0.0,
         )
         # 'astar' (with Euclidean heuristic) or 'dijkstra'
         self._route_algorithm = _p(
@@ -579,25 +611,95 @@ class TopologicalNavServer(rclpy.node.Node):
                     )
                 self._max_dist_to_closest_edge = float(p.value)
 
-            elif name == 'default_boundary_left':
+            elif name == 'coarse_white_extension_m':
                 if p.type_ not in (
                     Parameter.Type.DOUBLE, Parameter.Type.INTEGER,
                 ):
                     return SetParametersResult(
                         successful=False,
-                        reason='default_boundary_left must be a number',
+                        reason='coarse_white_extension_m must be a number',
                     )
-                self._default_boundary_left = float(p.value)
+                if float(p.value) < 0.0:
+                    return SetParametersResult(
+                        successful=False,
+                        reason='coarse_white_extension_m must be >= 0',
+                    )
+                self._coarse_white_extension_m = float(p.value)
 
-            elif name == 'default_boundary_right':
+            elif name == 'route_white_extension_m':
                 if p.type_ not in (
                     Parameter.Type.DOUBLE, Parameter.Type.INTEGER,
                 ):
                     return SetParametersResult(
                         successful=False,
-                        reason='default_boundary_right must be a number',
+                        reason='route_white_extension_m must be a number',
                     )
-                self._default_boundary_right = float(p.value)
+                if float(p.value) < 0.0:
+                    return SetParametersResult(
+                        successful=False,
+                        reason='route_white_extension_m must be >= 0',
+                    )
+                self._route_white_extension_m = float(p.value)
+
+            elif name == 'metric_map_resolution':
+                if p.type_ not in (
+                    Parameter.Type.DOUBLE, Parameter.Type.INTEGER,
+                ):
+                    return SetParametersResult(
+                        successful=False,
+                        reason='metric_map_resolution must be a number',
+                    )
+                if float(p.value) <= 0.0:
+                    return SetParametersResult(
+                        successful=False,
+                        reason='metric_map_resolution must be > 0',
+                    )
+                self._metric_map_resolution = float(p.value)
+
+            elif name == 'route_segment_resolution':
+                if p.type_ not in (
+                    Parameter.Type.DOUBLE, Parameter.Type.INTEGER,
+                ):
+                    return SetParametersResult(
+                        successful=False,
+                        reason='route_segment_resolution must be a number',
+                    )
+                if float(p.value) <= 0.0:
+                    return SetParametersResult(
+                        successful=False,
+                        reason='route_segment_resolution must be > 0',
+                    )
+                self._route_segment_resolution = float(p.value)
+
+            elif name == 'route_segment_border_width':
+                if p.type_ not in (
+                    Parameter.Type.DOUBLE, Parameter.Type.INTEGER,
+                ):
+                    return SetParametersResult(
+                        successful=False,
+                        reason='route_segment_border_width must be a number',
+                    )
+                if float(p.value) < 0.0:
+                    return SetParametersResult(
+                        successful=False,
+                        reason='route_segment_border_width must be >= 0',
+                    )
+                self._route_segment_border_width = float(p.value)
+
+            elif name == 'route_segment_padding':
+                if p.type_ not in (
+                    Parameter.Type.DOUBLE, Parameter.Type.INTEGER,
+                ):
+                    return SetParametersResult(
+                        successful=False,
+                        reason='route_segment_padding must be a number',
+                    )
+                if float(p.value) < 0.0:
+                    return SetParametersResult(
+                        successful=False,
+                        reason='route_segment_padding must be >= 0',
+                    )
+                self._route_segment_padding = float(p.value)
 
             else:
                 # Other parameters are start-up only; ignore live changes.
@@ -796,6 +898,7 @@ class TopologicalNavServer(rclpy.node.Node):
             self._map_hash = compute_map_hash(msg.data)
             self._map_received = True
             self._load_map_config()
+            self._publish_topological_metric_map()
 
             self.get_logger().info(
                 "[MAP] Applied update '%s' -- %d nodes, %d edges"
@@ -873,6 +976,111 @@ class TopologicalNavServer(rclpy.node.Node):
     def _route_pub_cb(self):
         if self._stroute and self._stroute.nodes:
             self._route_pub.publish(self._stroute)
+
+    def _raster_to_occupancy_grid(self, raster, frame_id):
+        """Convert a rasterized map image to an OccupancyGrid message."""
+        msg = OccupancyGrid()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = frame_id
+        msg.info.resolution = float(raster.resolution)
+        msg.info.width = int(raster.image.width)
+        msg.info.height = int(raster.image.height)
+        msg.info.origin.position.x = float(raster.origin[0])
+        msg.info.origin.position.y = float(raster.origin[1])
+        msg.info.origin.position.z = 0.0
+        msg.info.origin.orientation.x = 0.0
+        msg.info.origin.orientation.y = 0.0
+        msg.info.origin.orientation.z = 0.0
+        msg.info.origin.orientation.w = 1.0
+
+        pixels = raster.image.load()
+        width = raster.image.width
+        height = raster.image.height
+        data = []
+
+        # OccupancyGrid data is ordered from map origin (bottom-left).
+        for py in range(height - 1, -1, -1):
+            for px in range(width):
+                value = int(pixels[px, py])
+                if value == UNKNOWN_VALUE:
+                    data.append(-1)
+                elif value == FREE_VALUE:
+                    data.append(0)
+                elif value == OCCUPIED_VALUE:
+                    data.append(100)
+                else:
+                    data.append(-1)
+
+        msg.data = data
+        return msg
+
+    def _publish_topological_metric_map(self):
+        """Publish a coarse metric occupancy map for the full topological map."""
+        if not self._tmap:
+            return
+
+        try:
+            geometry = geometry_from_tmap(self._tmap, apply_transform=True)
+            full_corridor = float(self._coarse_white_extension_m)
+            raster = rasterize_geometry(
+                geometry,
+                white_extension_m=full_corridor,
+                border_width_m=float(self._route_segment_border_width),
+                resolution=float(self._metric_map_resolution),
+                padding_m=full_corridor,
+                include_node_polygons=False,
+            )
+            self._map_pub.publish(
+                self._raster_to_occupancy_grid(raster, geometry.frame_id),
+            )
+            self.get_logger().info(
+                "[MAP] Published /map (%dx%d, %.3f m/px)"
+                % (
+                    raster.image.width,
+                    raster.image.height,
+                    self._metric_map_resolution,
+                ),
+            )
+        except Exception as exc:
+            self.get_logger().error(
+                "[MAP] Failed to publish /map occupancy grid: %s" % exc,
+            )
+
+    def _publish_route_segment_metric_map(self, route_edges):
+        """Publish a fine occupancy map around the current route segment."""
+        if not route_edges or not self._tmap:
+            return
+
+        try:
+            geometry = geometry_from_tmap(self._tmap, apply_transform=True)
+            specs = route_specs_from_edge_data(
+                route_edges,
+                default_left_m=float(self._route_white_extension_m),
+                default_right_m=float(self._route_white_extension_m),
+            )
+            raster = rasterize_route_geometry(
+                geometry,
+                specs,
+                border_width_m=float(self._route_segment_border_width),
+                resolution=float(self._route_segment_resolution),
+                padding_m=float(self._route_segment_padding),
+                unknown_value=FREE_VALUE,
+            )
+            self._route_segment_map_pub.publish(
+                self._raster_to_occupancy_grid(raster, geometry.frame_id),
+            )
+            self.get_logger().info(
+                "[MAP] Published /topo_map_route_segment (%dx%d, %.3f m/px)"
+                % (
+                    raster.image.width,
+                    raster.image.height,
+                    self._route_segment_resolution,
+                ),
+            )
+        except Exception as exc:
+            self.get_logger().error(
+                "[MAP] Failed to publish /topo_map_route_segment: %s" % exc,
+            )
 
     # =================================================================
     # Status publishers
@@ -1696,6 +1904,9 @@ class TopologicalNavServer(rclpy.node.Node):
             goal_handle, route_nodes[0], GoalStatus.STATUS_EXECUTING,
         )
         self._publish_route(route_nodes)
+        self._publish_route_segment_metric_map(
+            get_route_edges(self._graph, route_nodes),
+        )
         success = self._execute_route(route_nodes, target)
 
         self._navigation_activated = False
@@ -1784,6 +1995,9 @@ class TopologicalNavServer(rclpy.node.Node):
             % (" -> ".join(route_nodes), len(route_nodes)),
         )
         self._publish_route(route_nodes)
+        self._publish_route_segment_metric_map(
+            get_route_edges(self._graph, route_nodes),
+        )
         success = self._execute_route(route_nodes, target)
 
         # If the map was updated mid-execution, replan from scratch.
@@ -2153,8 +2367,8 @@ class TopologicalNavServer(rclpy.node.Node):
         frame_id = self._node_nav_frame(segment.first_source)
         poly = compute_boundary_polygon(
             self._graph, segment,
-            default_left=self._default_boundary_left,
-            default_right=self._default_boundary_right,
+            default_left=self._route_white_extension_m,
+            default_right=self._route_white_extension_m,
         )
         if poly:
             self._publish_boundary(poly, frame_id)
