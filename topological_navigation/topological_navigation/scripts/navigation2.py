@@ -475,6 +475,7 @@ class TopologicalNavServer(rclpy.node.Node):
             ('route_segment_resolution', Parameter.Type.DOUBLE),
             ('route_segment_border_width', Parameter.Type.DOUBLE),
             ('route_segment_padding', Parameter.Type.DOUBLE),
+            ('route_segment_settle_time', Parameter.Type.DOUBLE),
             # NetworkX path optimisation
             ('route_algorithm', Parameter.Type.STRING),
             ('route_weight_attr', Parameter.Type.STRING),
@@ -515,6 +516,9 @@ class TopologicalNavServer(rclpy.node.Node):
         )
         self._route_segment_padding = _p(
             'route_segment_padding', Parameter.Type.DOUBLE, 0.0,
+        )
+        self._route_segment_settle_time = _p(
+            'route_segment_settle_time', Parameter.Type.DOUBLE, 0.0,
         )
         # 'astar' (with Euclidean heuristic) or 'dijkstra'
         self._route_algorithm = _p(
@@ -1907,6 +1911,7 @@ class TopologicalNavServer(rclpy.node.Node):
         self._publish_route_segment_metric_map(
             get_route_edges(self._graph, route_nodes),
         )
+        self._wait_for_route_segment_costmap()
         success = self._execute_route(route_nodes, target)
 
         self._navigation_activated = False
@@ -1998,6 +2003,7 @@ class TopologicalNavServer(rclpy.node.Node):
         self._publish_route_segment_metric_map(
             get_route_edges(self._graph, route_nodes),
         )
+        self._wait_for_route_segment_costmap()
         success = self._execute_route(route_nodes, target)
 
         # If the map was updated mid-execution, replan from scratch.
@@ -2012,6 +2018,22 @@ class TopologicalNavServer(rclpy.node.Node):
             self._sm.transition(NavState.FAILED)
             self._publish_status("FAILED")
         return success
+
+    def _wait_for_route_segment_costmap(self):
+        """Allow Nav2's static layer to ingest the newly published corridor."""
+        # Some tests and downstream users construct the server with __new__
+        # for isolated route execution. Preserve the zero-delay legacy
+        # behaviour when __init__ has not populated the parameter yet.
+        delay = max(
+            0.0,
+            float(getattr(self, "_route_segment_settle_time", 0.0)),
+        )
+        if delay <= 0.0:
+            return
+        self.get_logger().info(
+            "[MAP] Waiting %.2f s for global costmap route update" % delay,
+        )
+        time.sleep(delay)
 
     def _determine_origin(self, target):
         """Best origin: current_node > closest-edge > closest_node."""
