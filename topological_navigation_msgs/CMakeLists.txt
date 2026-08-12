@@ -66,6 +66,7 @@ set(srv_files
   "srv/LoadTopoNavTestScenario.srv"
   "srv/RunTopoNavTestScenario.srv"
   "srv/ReconfAtEdges.srv"
+  "srv/LoadTmap.srv"
 )
 
 
@@ -76,6 +77,7 @@ set(action_files
     "action/GotoNode.action"
     "action/ExecutePolicyMode.action"
     "action/BuildTopPrediction.action"
+    "action/RecordMap.action"
 )
 
 
