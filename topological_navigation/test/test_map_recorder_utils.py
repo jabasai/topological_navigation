@@ -217,7 +217,8 @@ def test_add_node_loop_closure_links_existing_node(recorder):
     assert created is False
     assert name == "node0"
     assert "loop closure" in msg
-    assert recorder.num_nodes() == 4  # order includes the repeated node0
+    assert recorder.num_nodes() == 3  # unique nodes: node0, node1, node2
+    assert recorder.num_visits() == 4  # visits include the repeated node0
 
     node0 = recorder._get_node("node0")["node"]
     node2 = recorder._get_node("node2")["node"]
@@ -252,6 +253,36 @@ def test_delete_last_node_empty_map(recorder):
     success, msg = recorder.delete_last_node()
     assert success is False
     assert "no nodes" in msg
+
+
+def test_delete_last_node_after_loop_closure_keeps_reused_node(recorder):
+    """Undoing a loop-closure "visit" must not delete the still-referenced node."""
+    recorder.add_node(pose(0.0, 0.0), node_distance=1.0)   # node0
+    recorder.add_node(pose(2.0, 0.0), node_distance=1.0)   # node1
+    recorder.add_node(pose(4.0, 0.0), node_distance=1.0)   # node2
+
+    name, created, _ = recorder.add_node(pose(0.05, 0.05), node_distance=1.0)
+    assert created is False
+    assert name == "node0"
+    assert recorder.num_nodes() == 3
+    assert recorder.num_visits() == 4
+
+    success, message = recorder.delete_last_node()
+    assert success is True
+    assert "node0" in message
+    # node0 must still exist (it is still referenced by the earlier visit).
+    assert recorder._get_node("node0") is not None
+    assert recorder.num_nodes() == 3
+    assert recorder.num_visits() == 3
+    assert recorder.last_node_name() == "node2"
+
+    # The loop-closure edge between node2 and node0 must have been undone.
+    node0 = recorder._get_node("node0")["node"]
+    node2 = recorder._get_node("node2")["node"]
+    assert not any(e["node"] == "node0" for e in node2["edges"])
+    assert not any(e["node"] == "node2" for e in node0["edges"])
+    # But node0's original edge to node1 (from the first pass) is untouched.
+    assert any(e["node"] == "node1" for e in node0["edges"])
 
 
 # ---------- MapRecorderCore: reset / load ----------------------------------

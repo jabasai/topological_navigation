@@ -199,7 +199,10 @@ class MapRecorder(Node):
             if self._robot_pose is not None:
                 _, created, message = self.core.add_node(
                     self._robot_pose, node_distance=node_distance)
-                if created:
+                # A loop closure also mutates the map (a new edge is added
+                # to link back to the reused node) even though `created` is
+                # False, so republish in that case too.
+                if created or message.startswith("loop closure"):
                     self._publish_recorded_tmap()
                     self._publish_record_feedback(goal_handle, message)
             self.get_clock().sleep_for(rclpy.duration.Duration(seconds=rate_period))
