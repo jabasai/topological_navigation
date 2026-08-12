@@ -11,6 +11,7 @@ RUN rm -rf /var/lib/apt/lists/* \
     python3-colcon-common-extensions \
     python3-pip \
     python3-rosdep \
+    ros-${ROS_DISTRO}-rqt-graph \
     && rm -rf /var/lib/apt/lists/*
 
 ############################################################################################################

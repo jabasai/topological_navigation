@@ -65,7 +65,7 @@ class MapRecorder(Node):
         self.declare_parameter('pointset', 'recorded_map')
         self.declare_parameter('site_name', 'map')
         self.declare_parameter('tmap_dir', '')
-        self.declare_parameter('pose_topic', '/odometry/filtered')
+        self.declare_parameter('pose_topic', '/odometry/global')
         self.declare_parameter(
             'source_tmap_topic', Parameter.Type.STRING)
 
