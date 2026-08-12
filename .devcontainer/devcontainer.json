@@ -2,7 +2,7 @@
 	"name": "topological_navigation",
 	"dockerComposeFile": "compose.yaml",
 	"service": "topo-nav",
-	"workspaceFolder": "/home/ros/workspace/src",
+	"workspaceFolder": "/workspace/src",
 	"updateRemoteUserUID": true,
 	
 	"forwardPorts": ["vnc:5801"],

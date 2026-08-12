@@ -18,7 +18,7 @@ services:
       target: devcontainer
     volumes:
       - x11:/tmp/.X11-unix
-      - ../:/home/ros/workspace/src:cached
+      - ../:/workspace/src:cached
     stdin_open: true
     tty: true
     networks:

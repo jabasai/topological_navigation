@@ -13,8 +13,6 @@ RUN rm -rf /var/lib/apt/lists/* \
     python3-rosdep \
     && rm -rf /var/lib/apt/lists/*
 
-
-
 ############################################################################################################
 # Intermediate stage: extract only package.xml files so that the rosdep cache
 # is only invalidated when package.xml files actually change, not on every
@@ -43,12 +41,21 @@ RUN echo "Installing dependencies" && \
     echo "Running rosdep update..."  && \
     rosdep update --rosdistro ${ROS_DISTRO}  && \
     echo "Running apt-get update..."  && \
-    sudo apt-get update  && \
+    apt-get update  && \
     echo "Running rosdep install..."  && \
     rosdep install --from-paths . --ignore-src --rosdistro ${ROS_DISTRO} -y  || echo "rosdep install failed, continuing with flag to keep going"  && \
     rosdep install --from-paths . --ignore-src --rosdistro ${ROS_DISTRO} -y -r
 
 FROM deps_installed AS devcontainer
+# do an initial build to speed up development
+RUN --mount=type=bind,target=/workspace/src \
+    . /opt/ros/${ROS_DISTRO}/setup.sh && \
+    cd /workspace && \
+    colcon build --continue-on-error
+
+RUN echo "source /opt/ros/${ROS_DISTRO}/setup.bash" >> /etc/bash.bashrc
+RUN echo "if [ -f /workspace/install/setup.bash ]; then source /workspace/install/setup.bash; fi" >> /etc/bash.bashrc
+RUN echo "alias build='(cd /workspace && colcon build)'" >> /etc/bash.bashrc
 
 
 FROM devcontainer AS build
@@ -64,5 +71,5 @@ FROM build AS final
 
 RUN /bin/bash -lc "source /opt/ros/${ROS_DISTRO}/setup.bash && colcon build"
 
-ENV MAP_FILE=/home/ros/workspace/src/topological_navigation/config/test_simple_tmap2.yaml 
+ENV MAP_FILE=/workspace/src/topological_navigation/config/test_simple_tmap2.yaml 
 CMD ["/bin/bash", "-lc", "source /workspace/install/setup.bash && exec ros2 launch topological_navigation topological_navigation.launch.py map_path:=$MAP_FILE"]
