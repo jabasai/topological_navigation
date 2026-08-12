@@ -3,8 +3,6 @@
 	"dockerComposeFile": "compose.yaml",
 	"service": "topo-nav",
 	"workspaceFolder": "/home/ros/workspace",
-	"containerUser": "ros",
-	"remoteUser": "ros",
 	"updateRemoteUserUID": true,
 	
 	"forwardPorts": ["vnc:5801"],

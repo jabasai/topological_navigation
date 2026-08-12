@@ -17,12 +17,12 @@ find_package(rosidl_default_generators REQUIRED)
 find_package(builtin_interfaces REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
-find_package(actionlib_msgs REQUIRED)
+find_package(action_msgs REQUIRED)
 set(msg_deps
   builtin_interfaces
   std_msgs
   geometry_msgs
-  actionlib_msgs
+  action_msgs
 )
 
 
