@@ -50,6 +50,8 @@ RUN echo "Installing dependencies" && \
 
 FROM deps_installed AS devcontainer
 
+
+FROM devcontainer AS build
 COPY ./ /workspace/src
 WORKDIR /workspace
 ENV ROS2_WS=/workspace
@@ -58,7 +60,7 @@ ENV ROS2_WS=/workspace
 RUN /bin/bash -lc "source /opt/ros/${ROS_DISTRO}/setup.bash && colcon build --continue-on-error"
 
 # ----------------------------------------------------------------------------------------------------
-FROM devcontainer AS final
+FROM build AS final
 
 RUN /bin/bash -lc "source /opt/ros/${ROS_DISTRO}/setup.bash && colcon build"
 
