@@ -395,8 +395,15 @@ def rasterize_route_geometry(
     unknown_value: int = UNKNOWN_VALUE,
     occupied_value: int = OCCUPIED_VALUE,
     free_value: int = FREE_VALUE,
+    route_start: Optional[Point] = None,
 ) -> RasterResult:
-    """Rasterize only the specified route edges with per-edge corridor widths."""
+    """Rasterize route edges with per-edge widths.
+
+    When ``route_start`` is supplied, it replaces the source-node position of
+    the first valid edge. This lets a live route corridor start at the robot's
+    current position while subsequent edges remain anchored to topological
+    nodes.
+    """
 
     if border_width_m < 0.0:
         raise ValueError("border_width_m must be >= 0")
@@ -413,7 +420,7 @@ def rasterize_route_geometry(
         if value < 0 or value > 255:
             raise ValueError(f"{name} must be in the range [0, 255]")
 
-    valid_edges: List[RouteEdgeSpec] = []
+    valid_edges: List[Tuple[RouteEdgeSpec, Point, Point]] = []
     bounds_points: List[Point] = []
 
     for edge in route_edges:
@@ -422,14 +429,18 @@ def rasterize_route_geometry(
         if edge.left_m < 0.0 or edge.right_m < 0.0:
             raise ValueError("Boundary widths must be >= 0")
 
-        start = geometry.nodes[edge.source].point
+        start = (
+            route_start
+            if route_start is not None and not valid_edges
+            else geometry.nodes[edge.source].point
+        )
         end = geometry.nodes[edge.target].point
         try:
             quad = _route_quad_points(start, end, edge.left_m, edge.right_m)
         except ValueError:
             continue
 
-        valid_edges.append(edge)
+        valid_edges.append((edge, start, end))
         bounds_points.extend(quad)
         radius = max(edge.left_m, edge.right_m) + border_width_m
         bounds_points.extend(
@@ -462,9 +473,7 @@ def rasterize_route_geometry(
     draw = ImageDraw.Draw(image)
 
     # Draw occupied corridor border first.
-    for edge in valid_edges:
-        start = geometry.nodes[edge.source].point
-        end = geometry.nodes[edge.target].point
+    for edge, start, end in valid_edges:
         border_quad = _route_quad_points(
             start,
             end,
@@ -489,9 +498,7 @@ def rasterize_route_geometry(
                 )
 
     # Draw free-space corridor inside border.
-    for edge in valid_edges:
-        start = geometry.nodes[edge.source].point
-        end = geometry.nodes[edge.target].point
+    for edge, start, end in valid_edges:
         free_quad = _route_quad_points(start, end, edge.left_m, edge.right_m)
         draw.polygon([world_to_pixel(p) for p in free_quad], fill=free_value)
         free_radius_px = int(math.ceil(max(edge.left_m, edge.right_m) / resolution))

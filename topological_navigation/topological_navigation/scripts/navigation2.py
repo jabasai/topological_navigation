@@ -40,6 +40,7 @@ ROS 2 interfaces
         max_dist_to_closest_edge  (double)  -- origin heuristic
         coarse_white_extension_m  (double)  -- coarse full-map corridor half-width
         route_white_extension_m   (double)  -- fine route-map default half-width
+        base_frame                (string)  -- robot TF frame for route-map start
         route_algorithm           (string)  -- 'astar' | 'dijkstra'
         route_weight_attr         (string)  -- edge attribute for cost
 
@@ -81,6 +82,9 @@ from rclpy.qos import (
     ReliabilityPolicy,
 )
 from std_msgs.msg import String
+from tf2_ros import TransformException
+from tf2_ros.buffer import Buffer
+from tf2_ros.transform_listener import TransformListener
 
 from topological_navigation.navigation_graph import (
     ACTION_TO_STATE,
@@ -322,6 +326,8 @@ class TopologicalNavServer(rclpy.node.Node):
         # -- Parameters ----------------------------------------------
         self._declare_parameters()
         self._load_parameters()
+        self._tf_buffer = Buffer()
+        self._tf_listener = TransformListener(self._tf_buffer, self)
         # Allow route-planning / boundary parameters to be reconfigured at
         # runtime (ROS 2 Humble: add_on_set_parameters_callback).
         self.add_on_set_parameters_callback(self._parameters_callback)
@@ -476,6 +482,7 @@ class TopologicalNavServer(rclpy.node.Node):
             ('route_segment_border_width', Parameter.Type.DOUBLE),
             ('route_segment_padding', Parameter.Type.DOUBLE),
             ('route_segment_settle_time', Parameter.Type.DOUBLE),
+            ('base_frame', Parameter.Type.STRING),
             # NetworkX path optimisation
             ('route_algorithm', Parameter.Type.STRING),
             ('route_weight_attr', Parameter.Type.STRING),
@@ -519,6 +526,9 @@ class TopologicalNavServer(rclpy.node.Node):
         )
         self._route_segment_settle_time = _p(
             'route_segment_settle_time', Parameter.Type.DOUBLE, 0.0,
+        )
+        self._base_frame = _p(
+            'base_frame', Parameter.Type.STRING, 'base_link',
         )
         # 'astar' (with Euclidean heuristic) or 'dijkstra'
         self._route_algorithm = _p(
@@ -1051,12 +1061,13 @@ class TopologicalNavServer(rclpy.node.Node):
             )
 
     def _publish_route_segment_metric_map(self, route_edges):
-        """Publish a fine occupancy map around the current route segment."""
+        """Publish a fine map whose first corridor starts at the robot."""
         if not route_edges or not self._tmap:
             return
 
         try:
             geometry = geometry_from_tmap(self._tmap, apply_transform=True)
+            route_start = self._robot_position_in_frame(geometry.frame_id)
             specs = route_specs_from_edge_data(
                 route_edges,
                 default_left_m=float(self._route_white_extension_m),
@@ -1065,6 +1076,7 @@ class TopologicalNavServer(rclpy.node.Node):
             raster = rasterize_route_geometry(
                 geometry,
                 specs,
+                route_start=route_start,
                 border_width_m=float(self._route_segment_border_width),
                 resolution=float(self._route_segment_resolution),
                 padding_m=float(self._route_segment_padding),
@@ -1085,6 +1097,24 @@ class TopologicalNavServer(rclpy.node.Node):
             self.get_logger().error(
                 "[MAP] Failed to publish /topo_map_route_segment: %s" % exc,
             )
+
+    def _robot_position_in_frame(self, frame_id):
+        """Return the latest robot x/y position in ``frame_id`` from TF."""
+        try:
+            transform = self._tf_buffer.lookup_transform(
+                frame_id,
+                self._base_frame,
+                rclpy.time.Time(),
+            )
+        except (TransformException, AttributeError) as exc:
+            self.get_logger().warning(
+                "[MAP] Robot pose unavailable in '%s'; route segment will "
+                "start at its source node: %s" % (frame_id, exc),
+            )
+            return None
+
+        translation = transform.transform.translation
+        return float(translation.x), float(translation.y)
 
     # =================================================================
     # Status publishers
