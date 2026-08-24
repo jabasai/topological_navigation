@@ -7,6 +7,7 @@ from rclpy import Parameter
 from rclpy.action import CancelResponse
 
 from topological_navigation.navigation_graph import ActionSegment, NavState
+from topological_navigation.scripts import navigation2 as navigation2_module
 from topological_navigation.scripts.navigation2 import (
     TopologicalNavServer,
     _make_ros_param_value,
@@ -568,3 +569,58 @@ def test_parameters_callback_rejects_invalid_metric_map_values():
         _param('route_white_extension_m', -0.1, Parameter.Type.DOUBLE),
     ])
     assert result.successful is False
+
+
+def test_route_segment_map_passes_robot_position_to_rasterizer(monkeypatch):
+    """The live route corridor should begin at the latest TF robot pose."""
+    server = _make_server()
+    server._route_white_extension_m = 2.0
+    server._route_segment_border_width = 0.25
+    server._route_segment_resolution = 0.05
+    server._route_segment_padding = 0.0
+    server._base_frame = 'base_link'
+    server._raster_to_occupancy_grid = lambda raster, frame: (raster, frame)
+
+    translation = SimpleNamespace(x=3.5, y=-1.25)
+    transform = SimpleNamespace(
+        transform=SimpleNamespace(translation=translation),
+    )
+    server._tf_buffer = SimpleNamespace(
+        lookup_transform=lambda target, source, stamp: transform,
+    )
+    published = []
+    server._route_segment_map_pub = SimpleNamespace(
+        publish=lambda msg: published.append(msg),
+    )
+
+    geometry = SimpleNamespace(frame_id='map')
+    raster = SimpleNamespace(
+        image=SimpleNamespace(width=10, height=20),
+        resolution=0.05,
+    )
+    captured = {}
+    monkeypatch.setattr(
+        navigation2_module,
+        'geometry_from_tmap',
+        lambda tmap, apply_transform: geometry,
+    )
+    monkeypatch.setattr(
+        navigation2_module,
+        'route_specs_from_edge_data',
+        lambda edges, default_left_m, default_right_m: ('spec',),
+    )
+
+    def _capture_rasterize(_geometry, _specs, **kwargs):
+        captured.update(kwargs)
+        return raster
+
+    monkeypatch.setattr(
+        navigation2_module,
+        'rasterize_route_geometry',
+        _capture_rasterize,
+    )
+
+    server._publish_route_segment_metric_map([{'source': 'A', 'target': 'B'}])
+
+    assert captured['route_start'] == (3.5, -1.25)
+    assert published == [(raster, 'map')]

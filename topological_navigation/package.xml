@@ -44,6 +44,7 @@
   <depend>nav2_msgs</depend>
 
   <depend>tf_transformations</depend>
+  <depend>tf2_ros</depend>
   <depend>launch_pytest</depend>
   
   <export>

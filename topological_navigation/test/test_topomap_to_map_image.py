@@ -176,3 +176,32 @@ def test_rasterize_route_geometry_draws_unknown_free_and_occupied():
     assert pixel_at(5.0, 1.0) == FREE_VALUE
     assert pixel_at(5.0, 2.0) == OCCUPIED_VALUE
     assert image.getpixel((0, 0)) == UNKNOWN_VALUE
+
+
+def test_rasterize_route_geometry_starts_first_edge_at_robot_position():
+    geometry = geometry_from_tmap(_simple_tmap(), apply_transform=False)
+    specs = route_specs_from_edge_data(
+        [{"source": "A", "target": "B", "properties": {}}],
+        default_left_m=1.0,
+        default_right_m=1.0,
+    )
+
+    robot_position = (4.0, 2.0)
+    raster = rasterize_route_geometry(
+        geometry,
+        specs,
+        route_start=robot_position,
+        border_width_m=1.0,
+        resolution=1.0,
+        padding_m=0.0,
+    )
+
+    # Node A is at x=0. The bounds now begin around the robot rather than
+    # including the source node, proving the first edge was shortened.
+    assert raster.origin[0] > geometry.nodes["A"].point[0]
+
+    origin_x, origin_y = raster.origin
+    top_y = origin_y + ((raster.image.height - 1) * raster.resolution)
+    robot_px = int(round((robot_position[0] - origin_x) / raster.resolution))
+    robot_py = int(round((top_y - robot_position[1]) / raster.resolution))
+    assert raster.image.getpixel((robot_px, robot_py)) == FREE_VALUE
