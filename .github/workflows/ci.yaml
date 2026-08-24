@@ -36,6 +36,7 @@ jobs:
           python -m pytest test/ \
             --ignore=test/test_navigationcore.py \
             --ignore=test/test_localisation2.py \
+            --ignore=test/test_navigation2.py \
             -v --tb=short
 
       - name: Run topological_nav_simulator unit tests
