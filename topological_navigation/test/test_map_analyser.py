@@ -6,6 +6,7 @@ SVG generation, and the top-level ``analyse_map`` / CLI ``check``
 behaviour.
 """
 
+import math
 import os
 
 import networkx as nx
@@ -231,6 +232,7 @@ class TestGenerateSvg:
 
     def test_non_finite_node_coordinates_do_not_break_svg(self, tmp_path):
         """NaN/Inf coordinates must be sanitised, not leak into the markup."""
+        import re
         import xml.etree.ElementTree as ET
 
         graph = nx.DiGraph()
@@ -245,8 +247,13 @@ class TestGenerateSvg:
         svg = generate_svg(graph, str(out))
 
         ET.fromstring(svg)
-        assert "nan" not in svg.lower()
-        assert "inf" not in svg.lower()
+        # Every numeric-looking attribute value must be a finite number;
+        # a loose whole-document substring search would false-positive on
+        # unrelated text (e.g. font-family names), so inspect attribute
+        # values directly instead.
+        for value in re.findall(r'"(-?\d[\d.eE+-]*)"', svg):
+            assert value.lower() not in ("nan", "inf", "-inf", "infinity", "-infinity")
+            assert math.isfinite(float(value))
 
     def test_degenerate_width_height_do_not_break_svg(self, tmp_path):
         """A width/height smaller than 2x margin must not produce an invalid document."""
