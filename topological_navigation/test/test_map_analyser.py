@@ -195,6 +195,84 @@ class TestGenerateSvg:
         with pytest.raises(ValueError):
             generate_svg(graph, str(tmp_path / "empty.svg"))
 
+    def test_output_is_well_formed_xml(self, tmp_path):
+        """The generated document must always be parseable XML."""
+        import xml.etree.ElementTree as ET
+        from topological_navigation.networkx_utils import build_graph_from_tmap
+        from topological_navigation.tmap_utils import load_tmap2_file
+        graph = build_graph_from_tmap(load_tmap2_file(COMPLEX_MAP))
+
+        out = tmp_path / "complex.svg"
+        svg = generate_svg(graph, str(out), title="A & B <weird> \"title\"")
+        ET.fromstring(svg)  # raises ParseError if malformed
+
+    def test_special_characters_in_names_are_escaped(self, tmp_path):
+        """Node/action/edge names with XML metacharacters must not break the SVG."""
+        import xml.etree.ElementTree as ET
+
+        graph = nx.DiGraph()
+        graph.add_node("N<1>", x=0.0, y=0.0, verts=[])
+        graph.add_node('N&"2', x=5.0, y=0.0, verts=[])
+        graph.add_edge(
+            "N<1>", 'N&"2',
+            edge_id="e<1>&'2\"", action="go & <stop>",
+            action_type="", properties={}, weight=1.0,
+        )
+
+        out = tmp_path / "special.svg"
+        svg = generate_svg(graph, str(out), title="Map <1> & \"2\"")
+
+        # Must parse as valid XML despite the special characters.
+        ET.fromstring(svg)
+        # Raw metacharacters must not appear unescaped in text content.
+        assert "<1>" not in svg
+        assert "go & <stop>" not in svg
+        assert "&lt;1&gt;" in svg
+
+    def test_non_finite_node_coordinates_do_not_break_svg(self, tmp_path):
+        """NaN/Inf coordinates must be sanitised, not leak into the markup."""
+        import xml.etree.ElementTree as ET
+
+        graph = nx.DiGraph()
+        graph.add_node("A", x=float("nan"), y=float("inf"), verts=[])
+        graph.add_node("B", x=1.0, y=1.0, verts=[])
+        graph.add_edge(
+            "A", "B", edge_id="A_B", action="navigate_to_pose",
+            action_type="", properties={}, weight=1.0,
+        )
+
+        out = tmp_path / "nonfinite.svg"
+        svg = generate_svg(graph, str(out))
+
+        ET.fromstring(svg)
+        assert "nan" not in svg.lower()
+        assert "inf" not in svg.lower()
+
+    def test_degenerate_width_height_do_not_break_svg(self, tmp_path):
+        """A width/height smaller than 2x margin must not produce an invalid document."""
+        import xml.etree.ElementTree as ET
+        from topological_navigation.networkx_utils import build_graph_from_tmap
+        from topological_navigation.tmap_utils import load_tmap2_file
+        graph = build_graph_from_tmap(load_tmap2_file(SIMPLE_MAP))
+
+        out = tmp_path / "tiny.svg"
+        svg = generate_svg(graph, str(out), width=10, height=10, margin=40.0)
+
+        ET.fromstring(svg)
+
+    def test_all_nodes_at_same_position_do_not_break_svg(self, tmp_path):
+        """A single point (zero span) map must still render valid SVG."""
+        import xml.etree.ElementTree as ET
+
+        graph = nx.DiGraph()
+        graph.add_node("A", x=3.0, y=3.0, verts=[])
+        graph.add_node("B", x=3.0, y=3.0, verts=[])
+
+        out = tmp_path / "single_point.svg"
+        svg = generate_svg(graph, str(out))
+
+        ET.fromstring(svg)
+
 
 # ---------------------------------------------------------------------------
 # analyse_map / AnalysisResult

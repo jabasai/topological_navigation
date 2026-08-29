@@ -40,6 +40,7 @@ import sys
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple
+from xml.sax.saxutils import escape as _xml_escape
 
 try:
     import networkx as nx
@@ -71,10 +72,33 @@ _FALLBACK_PALETTE = [
 
 def _colour_for_action(action: str) -> str:
     """Return a stable hex colour for an action name."""
+    action = str(action) if action is not None else "unknown"
     if action in _ACTION_COLOURS:
         return _ACTION_COLOURS[action]
     index = sum(ord(c) for c in action) % len(_FALLBACK_PALETTE)
     return _FALLBACK_PALETTE[index]
+
+
+def _svg_text(value: Any) -> str:
+    """Escape *value* for safe inclusion as SVG/XML element text content.
+
+    Any user-controlled string (node names, action names, edge ids, map
+    titles, ...) must be escaped before being embedded in generated SVG
+    markup, otherwise characters such as ``&``, ``<`` or ``>`` would
+    produce invalid/unparseable XML.
+    """
+    return _xml_escape("" if value is None else str(value))
+
+
+def _finite_or(value: Any, default: float) -> float:
+    """Coerce *value* to a finite float, falling back to *default* otherwise."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    if math.isnan(number) or math.isinf(number):
+        return default
+    return number
 
 
 # =====================================================================
@@ -288,16 +312,33 @@ def generate_svg(
     if not node_names:
         raise ValueError("Cannot render SVG for an empty map")
 
-    xs = [graph.nodes[n]["x"] for n in node_names]
-    ys = [graph.nodes[n]["y"] for n in node_names]
+    # Coerce every node coordinate to a finite float. Missing/NaN/Inf
+    # coordinates would otherwise propagate into the generated markup as
+    # literal "nan"/"inf" attribute values, which is not valid SVG.
+    xs = [_finite_or(graph.nodes[n].get("x"), 0.0) for n in node_names]
+    ys = [_finite_or(graph.nodes[n].get("y"), 0.0) for n in node_names]
     min_x, max_x = min(xs), max(xs)
     min_y, max_y = min(ys), max(ys)
+
+    # Guard against degenerate output sizes (e.g. width/height smaller than
+    # 2x margin) which would otherwise make the map area negative and
+    # produce a non-finite or negative scale factor.
+    width = max(int(_finite_or(width, 1200)), 1)
+    height = max(int(_finite_or(height, 900)), 1)
+    margin = max(_finite_or(margin, 40.0), 0.0)
+    margin = min(margin, (width - 1) / 2.0, (height - 1) / 2.0)
+    margin = max(margin, 0.0)
 
     span_x = max(max_x - min_x, 1e-6)
     span_y = max(max_y - min_y, 1e-6)
     drawable_w = width - 2 * margin
     drawable_h = height - 2 * margin
     scale = min(drawable_w / span_x, drawable_h / span_y)
+
+    # Sanitized (x, y) position per node, reused for every draw call below
+    # so that a single NaN/Inf coordinate is normalised once rather than
+    # risking re-reading the raw (possibly non-finite) graph attribute.
+    positions: Dict[str, Point] = dict(zip(node_names, zip(xs, ys)))
 
     def to_px(point: Point) -> Point:
         px = margin + (point[0] - min_x) * scale
@@ -316,7 +357,7 @@ def generate_svg(
         svg_parts.append(
             f'<text x="{width / 2:.1f}" y="20" text-anchor="middle" '
             f'font-size="16" font-family="sans-serif" font-weight="bold">'
-            f'{title}</text>'
+            f'{_svg_text(title)}</text>'
         )
 
     # Arrow-head markers, one per colour used by a directional edge.
@@ -347,8 +388,8 @@ def generate_svg(
         colour = _colour_for_action(action)
         bidirectional = is_bidirectional_edge(graph, u, v)
 
-        x1, y1 = to_px((graph.nodes[u]["x"], graph.nodes[u]["y"]))
-        x2, y2 = to_px((graph.nodes[v]["x"], graph.nodes[v]["y"]))
+        x1, y1 = to_px(positions[u])
+        x2, y2 = to_px(positions[v])
 
         marker_attr = ""
         if not bidirectional:
@@ -358,24 +399,27 @@ def generate_svg(
         svg_parts.append(
             f'<line x1="{x1:.2f}" y1="{y1:.2f}" x2="{x2:.2f}" y2="{y2:.2f}" '
             f'stroke="{colour}" stroke-width="2"{marker_attr}>'
-            f'<title>{data.get("edge_id", "")} ({action})</title>'
+            f'<title>{_svg_text(data.get("edge_id", ""))} ({_svg_text(action)})</title>'
             f'</line>'
         )
 
     # --- nodes -------------------------------------------------------------
     for node_name in node_names:
-        px, py = to_px((graph.nodes[node_name]["x"], graph.nodes[node_name]["y"]))
+        px, py = to_px(positions[node_name])
         svg_parts.append(
             f'<circle cx="{px:.2f}" cy="{py:.2f}" r="6" fill="steelblue" '
-            f'stroke="black" stroke-width="1"><title>{node_name}</title></circle>'
+            f'stroke="black" stroke-width="1"><title>{_svg_text(node_name)}</title></circle>'
         )
         svg_parts.append(
             f'<text x="{px + 8:.2f}" y="{py - 8:.2f}" font-size="10" '
-            f'font-family="sans-serif">{node_name}</text>'
+            f'font-family="sans-serif">{_svg_text(node_name)}</text>'
         )
 
     # --- legend --------------------------------------------------------
-    actions = sorted({data.get("action", "unknown") for _, _, data in graph.edges(data=True)})
+    actions = sorted({
+        str(data.get("action", "unknown") or "unknown")
+        for _, _, data in graph.edges(data=True)
+    })
     legend_y = height - 20 * len(actions) - 10
     for i, action in enumerate(actions):
         colour = _colour_for_action(action)
@@ -386,7 +430,7 @@ def generate_svg(
         )
         svg_parts.append(
             f'<text x="{width - 145}" y="{ly + 4:.1f}" font-size="11" '
-            f'font-family="sans-serif">{action}</text>'
+            f'font-family="sans-serif">{_svg_text(action)}</text>'
         )
 
     svg_parts.append('</svg>')
