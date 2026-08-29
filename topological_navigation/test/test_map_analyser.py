@@ -159,7 +159,6 @@ class TestFindOverlappingInfluenceZones:
 
     def test_simple_map_has_no_overlaps(self):
         result = analyse_map(SIMPLE_MAP)
-        assert find_overlapping_influence_zones is not None
         assert result.overlaps == []
 
 
