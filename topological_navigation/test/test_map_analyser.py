@@ -15,6 +15,7 @@ import pytest
 import yaml
 
 from topological_navigation.map_analyser import (
+    DEFAULT_ANCHORS_KEY,
     AnalysisResult,
     MinifyResult,
     analyse_map,
@@ -368,7 +369,7 @@ class TestMinifyMap:
 
         with open(out, encoding="utf-8") as fh:
             reparsed = yaml.load(fh, Loader=CustomSafeLoader)
-        reparsed_body = {k: v for k, v in reparsed.items() if k != "anchors"}
+        reparsed_body = {k: v for k, v in reparsed.items() if k != DEFAULT_ANCHORS_KEY}
         assert reparsed_body == load_tmap2_file(COMPLEX_MAP)
 
     def test_low_thresholds_create_anchors(self, tmp_path):
@@ -381,7 +382,7 @@ class TestMinifyMap:
 
         with open(out, encoding="utf-8") as fh:
             text = fh.read()
-        assert "anchors:" in text
+        assert f"{DEFAULT_ANCHORS_KEY}:" in text
         assert "&" in text  # at least one anchor definition
         assert "*" in text  # at least one alias reference
 
@@ -395,7 +396,7 @@ class TestMinifyMap:
 
         with open(out, encoding="utf-8") as fh:
             text = fh.read()
-        assert "anchors:" not in text
+        assert f"{DEFAULT_ANCHORS_KEY}:" not in text
 
     def test_strip_comments_removes_leading_banner(self, tmp_path):
         out_kept = tmp_path / "kept.min.yaml"
@@ -449,11 +450,27 @@ class TestMinifyMap:
         pass1 = tmp_path / "pass1.min.yaml"
         pass2 = tmp_path / "pass2.min.yaml"
         minify_map(COMPLEX_MAP, output_file=str(pass1), min_size=1, min_occurrences=2)
-        assert "anchors:" in pass1.read_text()
+        assert f"{DEFAULT_ANCHORS_KEY}:" in pass1.read_text()
 
         result2 = minify_map(str(pass1), output_file=str(pass2), min_size=1, min_occurrences=2)
         assert result2.schema_valid is True
         assert pass2.read_text() == pass1.read_text()
+
+    def test_custom_anchors_key_is_used_instead_of_default(self, tmp_path):
+        out = tmp_path / "out.min.yaml"
+        result = minify_map(
+            COMPLEX_MAP, output_file=str(out), anchors_key="custom_key", min_size=1, min_occurrences=2
+        )
+        assert result.anchors_created > 0
+
+        text = out.read_text()
+        assert "custom_key:" in text
+        assert f"{DEFAULT_ANCHORS_KEY}:" not in text
+
+        with open(out, encoding="utf-8") as fh:
+            reparsed = yaml.load(fh, Loader=CustomSafeLoader)
+        reparsed_body = {k: v for k, v in reparsed.items() if k != "custom_key"}
+        assert reparsed_body == load_tmap2_file(COMPLEX_MAP)
 
 
 # ---------------------------------------------------------------------------

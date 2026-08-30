@@ -32,6 +32,7 @@ Usage::
     python3 map_analyser.py check map.tmap2.yaml
     python3 map_analyser.py svg map.tmap2.yaml -o out.svg
     python3 map_analyser.py minify map.tmap2.yaml [--anchors] [--strip-unreachable NODE]
+    python3 map_analyser.py merge map_a.tmap2.yaml map_b.tmap2.yaml -o merged.tmap2.yaml
 
 Each check can be individually turned off or have its severity changed
 between "warning" (printed, exit code unaffected) and "error" (printed,
@@ -71,6 +72,7 @@ except ImportError:
     print("Error: PyYAML is required. Install with: pip install pyyaml")
     sys.exit(2)
 
+from topological_navigation.map_merger import merge_maps
 from topological_navigation.networkx_utils import build_graph_from_tmap
 from topological_navigation.tmap_utils import CustomSafeLoader, NoAliasDumper, load_tmap2_file
 from topological_navigation.validate_map import validate_map
@@ -91,6 +93,10 @@ DEFAULT_CHECK_SEVERITY: Dict[str, Optional[str]] = {
     "sub-map-separation": "warning",
     "influence-zone-overlap": "warning",
 }
+
+# Top-level YAML key under which minify_map() collects collapsed anchors;
+# double-underscore prefix keeps it visually distinct from real map data.
+DEFAULT_ANCHORS_KEY = "__yaml_anchors"
 
 
 def _parse_severity(value: str) -> Optional[str]:
@@ -458,11 +464,11 @@ def generate_svg(
     for node_name in node_names:
         px, py = to_px(positions[node_name])
         svg_parts.append(
-            f'<circle cx="{px:.2f}" cy="{py:.2f}" r="6" fill="steelblue" '
-            f'stroke="black" stroke-width="1"><title>{_svg_text(node_name)}</title></circle>'
+            f'<circle cx="{px:.2f}" cy="{py:.2f}" r="2" fill="steelblue" '
+            f'stroke="black" stroke-width="0"><title>{_svg_text(node_name)}</title></circle>'
         )
         svg_parts.append(
-            f'<text x="{px + 8:.2f}" y="{py - 8:.2f}" font-size="10" '
+            f'<text x="{px + 2:.2f}" y="{py + 1.5:.2f}" font-size="3" '
             f'font-family="sans-serif">{_svg_text(node_name)}</text>'
         )
 
@@ -952,6 +958,7 @@ def minify_map(
     map_file: str,
     output_file: Optional[str] = None,
     anchors: bool = True,
+    anchors_key: str = DEFAULT_ANCHORS_KEY,
     strip_comments: bool = False,
     flowstyle: bool = False,
     min_size: int = 100,
@@ -966,11 +973,12 @@ def minify_map(
     Repeated dict/list sub-structures (e.g. shared ``properties``, ``verts`` or
     ``orientation`` blocks) whose serialised size is >= *min_size* and which occur
     >= *min_occurrences* times are collapsed into named YAML anchors gathered under
-    a top-level ``anchors`` section, when *anchors* is True. Only the leading
-    top-of-file comment block is preserved (per-node/edge inline comments are not
-    preserved by the underlying YAML parser); pass ``strip_comments=True`` to drop
-    it too. When *strip_unreachable_from* is given, nodes/edges not reachable via a
-    directed path from that node are dropped first.
+    a top-level section named *anchors_key* (default :data:`DEFAULT_ANCHORS_KEY`),
+    when *anchors* is True. Only the leading top-of-file comment block is preserved
+    (per-node/edge inline comments are not preserved by the underlying YAML parser);
+    pass ``strip_comments=True`` to drop it too. When *strip_unreachable_from* is
+    given, nodes/edges not reachable via a directed path from that node are dropped
+    first.
     """
     log = logger or _LOGGER
 
@@ -979,13 +987,13 @@ def minify_map(
 
     tmap_data = load_tmap2_file(map_file)
     # If *map_file* was itself produced by a previous minify pass, discard its
-    # top-level "anchors" section: it's not real map data, just a cache of
+    # top-level anchors section: it's not real map data, just a cache of
     # shared subtrees we're about to recompute from scratch. Keeping it around
     # would leak into the rebuilt document (clobbering the new anchors) and
     # break the round-trip check below.
-    previously_had_anchors = tmap_data.pop("anchors", None) is not None
+    previously_had_anchors = tmap_data.pop(anchors_key, None) is not None
     if previously_had_anchors:
-        log.info("Input already contains an 'anchors' section; recomputing anchors from scratch")
+        log.info("Input already contains an '%s' section; recomputing anchors from scratch", anchors_key)
 
     stripped_nodes = stripped_edges = 0
     if strip_unreachable_from:
@@ -1022,7 +1030,7 @@ def minify_map(
         occurrences_collapsed = sum(counts[sig] for sig in candidates)
 
         rebuilt = _rebuild_with_anchors(tmap_data, mergeable_set, representative, cache)
-        final_doc = {"anchors": anchors_section, **rebuilt} if anchors_section else rebuilt
+        final_doc = {anchors_key: anchors_section, **rebuilt} if anchors_section else rebuilt
         anchor_names_by_id = {id(v): k for k, v in anchors_section.items()}
     else:
         final_doc = deepcopy(tmap_data)
@@ -1038,9 +1046,9 @@ def minify_map(
     )
 
     # Round-trip sanity check: minified YAML must parse back to the same data
-    # (aliases transparently expand back out), modulo the extra "anchors" section.
+    # (aliases transparently expand back out), modulo the extra anchors section.
     reparsed = yaml.load(dumped, Loader=CustomSafeLoader)
-    reparsed_body = {k: v for k, v in reparsed.items() if k != "anchors"}
+    reparsed_body = {k: v for k, v in reparsed.items() if k != anchors_key}
     if reparsed_body != tmap_data:
         raise RuntimeError("Minification round-trip check failed: output does not match input data")
 
@@ -1135,6 +1143,8 @@ Examples:
   %(prog)s svg my_map.tmap2.yaml -o my_map.svg
   %(prog)s minify my_map.tmap2.yaml
   %(prog)s minify my_map.tmap2.yaml --strip-unreachable Charging --flowstyle
+  %(prog)s merge map_a.tmap2.yaml map_b.tmap2.yaml -o merged.tmap2.yaml
+  %(prog)s merge map_a.tmap2.yaml map_b.tmap2.yaml --connect-closest
         """,
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -1173,6 +1183,11 @@ Examples:
         help="Collapse repeated data structures into named YAML anchors (default: enabled)",
     )
     minify_parser.add_argument(
+        "--anchors-key",
+        default=DEFAULT_ANCHORS_KEY,
+        help="Top-level key name to collect anchors under (default: %(default)s)",
+    )
+    minify_parser.add_argument(
         "--strip-comments",
         action="store_true",
         help="Also drop the file's leading comment block (default: keep it)",
@@ -1196,6 +1211,29 @@ Examples:
         help="Also drop nodes/edges not reachable via a directed path from NODE",
     )
 
+    merge_parser = subparsers.add_parser(
+        "merge",
+        help="Merge two or more maps into one, reprojected into the first map's GPS origin",
+    )
+    merge_parser.add_argument("map_files", nargs="+", help="Paths to two or more topological map YAML files")
+    merge_parser.add_argument(
+        "--output", "-o", help="Output file path (default: <first-map-name>.merged.<ext>)"
+    )
+    merge_parser.add_argument("--schema", "-s", help="Path to the schema YAML file (optional)")
+    merge_parser.add_argument("--name", help="Override the merged map's name/metric_map/pointset")
+    merge_parser.add_argument(
+        "--connect-closest", action="store_true",
+        help="Link each map to the merged map with a bidirectional edge between their closest nodes",
+    )
+    merge_parser.add_argument(
+        "--connect-action", default="navigate_to_pose",
+        help="Action name used for connecting edges (default: %(default)s)",
+    )
+    merge_parser.add_argument(
+        "--connect-action-type", default="nav2_msgs/action/NavigateToPose",
+        help="Action type used for connecting edges (default: %(default)s)",
+    )
+
     return parser
 
 
@@ -1204,6 +1242,26 @@ def main(argv: Optional[List[str]] = None) -> None:
 
     parser = build_arg_parser()
     args = parser.parse_args(argv)
+
+    if args.command == "merge":
+        if len(args.map_files) < 2:
+            print("Error: At least two map files are required to merge")
+            sys.exit(2)
+        for map_file in args.map_files:
+            if not os.path.isfile(map_file):
+                print(f"Error: Map file not found: {map_file}")
+                sys.exit(2)
+        try:
+            result = merge_maps(
+                args.map_files, output_file=args.output, schema_file=args.schema, name=args.name,
+                connect_closest=args.connect_closest, connect_action=args.connect_action,
+                connect_action_type=args.connect_action_type,
+            )
+        except Exception as exc:  # noqa: BLE001 - report any load/merge error to the user
+            print(f"Error merging maps: {exc}")
+            sys.exit(2)
+        print(result.format_report())
+        return
 
     if not os.path.isfile(args.map_file):
         print(f"Error: Map file not found: {args.map_file}")
@@ -1215,6 +1273,7 @@ def main(argv: Optional[List[str]] = None) -> None:
                 args.map_file,
                 output_file=args.output,
                 anchors=args.anchors,
+                anchors_key=args.anchors_key,
                 strip_comments=args.strip_comments,
                 flowstyle=args.flowstyle,
                 min_size=args.min_size,
