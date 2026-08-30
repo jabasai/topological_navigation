@@ -445,6 +445,16 @@ class TestMinifyMap:
         assert "Reduction" in report
         assert "Anchors created" in report
 
+    def test_minifying_an_already_minified_file_is_idempotent(self, tmp_path):
+        pass1 = tmp_path / "pass1.min.yaml"
+        pass2 = tmp_path / "pass2.min.yaml"
+        minify_map(COMPLEX_MAP, output_file=str(pass1), min_size=1, min_occurrences=2)
+        assert "anchors:" in pass1.read_text()
+
+        result2 = minify_map(str(pass1), output_file=str(pass2), min_size=1, min_occurrences=2)
+        assert result2.schema_valid is True
+        assert pass2.read_text() == pass1.read_text()
+
 
 # ---------------------------------------------------------------------------
 # CLI

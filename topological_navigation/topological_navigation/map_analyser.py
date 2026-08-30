@@ -978,6 +978,14 @@ def minify_map(
         original_text = fh.read()
 
     tmap_data = load_tmap2_file(map_file)
+    # If *map_file* was itself produced by a previous minify pass, discard its
+    # top-level "anchors" section: it's not real map data, just a cache of
+    # shared subtrees we're about to recompute from scratch. Keeping it around
+    # would leak into the rebuilt document (clobbering the new anchors) and
+    # break the round-trip check below.
+    previously_had_anchors = tmap_data.pop("anchors", None) is not None
+    if previously_had_anchors:
+        log.info("Input already contains an 'anchors' section; recomputing anchors from scratch")
 
     stripped_nodes = stripped_edges = 0
     if strip_unreachable_from:
