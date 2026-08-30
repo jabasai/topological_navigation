@@ -32,6 +32,7 @@
   <depend>python3-jsonschema</depend>
   <depend>python3-pil</depend>
   <depend>python3-yaml</depend>
+  <depend>python3-pyproj</depend>
 
   <depend>geometry_msgs</depend>
   <depend>std_msgs</depend>
@@ -44,6 +45,7 @@
   <depend>nav2_msgs</depend>
 
   <depend>tf_transformations</depend>
+  <depend>tf2_ros</depend>
   <depend>launch_pytest</depend>
   
   <export>
