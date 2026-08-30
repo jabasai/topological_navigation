@@ -1,13 +1,23 @@
 """SQLite persistence module for topological navigation traversal statistics.
 
 This module provides the ``NavStatsDB`` class which handles all database
-operations for recording and querying edge traversal statistics.  It is
-designed to be used by the navigation server and is intentionally kept
-independent of any ROS 2 imports so that it can also be used from
-standalone analysis scripts.
+operations for recording and querying edge traversal statistics, as well as
+storing the topological maps themselves.  It is designed to be used by the
+navigation server and is intentionally kept independent of any ROS 2 imports
+so that it can also be used from standalone analysis scripts.
 
 Schema
 ------
+``topological_maps`` table stores one row per unique map version:
+
+    id              – auto-increment primary key
+    map_name        – human-readable map name (from the ``name`` top-level key)
+    map_hash        – SHA-1 of the serialised map YAML (UNIQUE version key)
+    latitude        – origin latitude extracted from ``meta.origin.latitude``
+    longitude       – origin longitude extracted from ``meta.origin.longitude``
+    map_data        – full YAML text stored as a BLOB for later retrieval
+    added_at        – UTC timestamp of when this map version was first stored
+
 ``traversals`` table stores one row per traversal attempt:
 
     id              – auto-increment primary key
@@ -32,12 +42,43 @@ import json
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
+
+import yaml
 
 
 # ---------------------------------------------------------------------------
 # Schema
 # ---------------------------------------------------------------------------
+
+_CREATE_TOPOLOGICAL_MAPS = """
+CREATE TABLE IF NOT EXISTS topological_maps (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    map_name   TEXT    NOT NULL DEFAULT '',
+    map_hash   TEXT    NOT NULL UNIQUE,
+    latitude   REAL,
+    longitude  REAL,
+    map_data   BLOB    NOT NULL,
+    added_at   TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+"""
+
+_CREATE_IDX_TOPOMAP_HASH = """
+CREATE UNIQUE INDEX IF NOT EXISTS idx_topomaps_map_hash
+    ON topological_maps (map_hash);
+"""
+
+_CREATE_IDX_TOPOMAP_NAME = """
+CREATE INDEX IF NOT EXISTS idx_topomaps_map_name
+    ON topological_maps (map_name);
+"""
+
+_INSERT_TOPOMAP = """
+INSERT OR IGNORE INTO topological_maps
+    (map_name, map_hash, latitude, longitude, map_data)
+VALUES
+    (:map_name, :map_hash, :latitude, :longitude, :map_data);
+"""
 
 _CREATE_TRAVERSALS = """
 CREATE TABLE IF NOT EXISTS traversals (
@@ -142,6 +183,9 @@ class NavStatsDB:
     def _create_schema(self) -> None:
         """Create tables and indexes if they do not yet exist."""
         with self._conn:
+            self._conn.execute(_CREATE_TOPOLOGICAL_MAPS)
+            self._conn.execute(_CREATE_IDX_TOPOMAP_HASH)
+            self._conn.execute(_CREATE_IDX_TOPOMAP_NAME)
             self._conn.execute(_CREATE_TRAVERSALS)
             self._conn.execute(_CREATE_IDX_EDGE)
             self._conn.execute(_CREATE_IDX_MAP)
@@ -151,6 +195,112 @@ class NavStatsDB:
         if self._conn is not None:
             self._conn.close()
             self._conn = None
+
+    # ------------------------------------------------------------------
+    # Map store/retrieve API
+    # ------------------------------------------------------------------
+
+    def store_map(self, map_yaml_str: str) -> str:
+        """Persist a topological map to the database (idempotent).
+
+        If a map with the same hash already exists, this is a no-op.
+
+        Parameters
+        ----------
+        map_yaml_str:
+            Raw YAML text of the topological map as received from the ROS
+            topic or read from a file.
+
+        Returns
+        -------
+        str
+            The SHA-1 hash of the stored map (12 hex characters).
+        """
+        map_hash = compute_map_hash(map_yaml_str)
+        try:
+            parsed: Dict[str, Any] = yaml.safe_load(map_yaml_str) or {}
+        except Exception:
+            parsed = {}
+
+        map_name = parsed.get("name") or parsed.get("pointset") or ""
+        origin = (parsed.get("meta") or {}).get("origin") or {}
+        latitude = origin.get("latitude")
+        longitude = origin.get("longitude")
+
+        row = {
+            "map_name": map_name,
+            "map_hash": map_hash,
+            "latitude": latitude,
+            "longitude": longitude,
+            "map_data": map_yaml_str,
+        }
+        with self._conn:
+            self._conn.execute(_INSERT_TOPOMAP, row)
+        return map_hash
+
+    def get_map(self, identifier: str) -> Optional[Dict[str, Any]]:
+        """Retrieve a stored map by name or hash.
+
+        When *identifier* matches multiple names, the most-recently-added
+        row is returned.
+
+        Parameters
+        ----------
+        identifier:
+            Either the full ``map_hash`` (12-char hex) or the ``map_name``.
+
+        Returns
+        -------
+        dict or None
+            Row dict with keys: id, map_name, map_hash, latitude, longitude,
+            map_data, added_at.  Returns ``None`` if not found.
+        """
+        rows = self.query(
+            "SELECT * FROM topological_maps WHERE map_hash = ? "
+            "ORDER BY added_at DESC LIMIT 1",
+            (identifier,),
+        )
+        if rows:
+            return rows[0]
+        rows = self.query(
+            "SELECT * FROM topological_maps WHERE map_name = ? "
+            "ORDER BY added_at DESC LIMIT 1",
+            (identifier,),
+        )
+        return rows[0] if rows else None
+
+    def list_maps(self) -> List[Dict[str, Any]]:
+        """Return all stored maps ordered by name then added_at."""
+        return self.query(
+            "SELECT id, map_name, map_hash, latitude, longitude, added_at "
+            "FROM topological_maps ORDER BY map_name, added_at",
+        )
+
+    def delete_map(self, identifier: str) -> int:
+        """Delete a stored map by name or hash.
+
+        Parameters
+        ----------
+        identifier:
+            Either the full ``map_hash`` or the ``map_name``.
+
+        Returns
+        -------
+        int
+            Number of rows deleted.
+        """
+        with self._conn:
+            cur = self._conn.execute(
+                "DELETE FROM topological_maps WHERE map_hash = ?",
+                (identifier,),
+            )
+            if cur.rowcount:
+                return cur.rowcount
+            cur = self._conn.execute(
+                "DELETE FROM topological_maps WHERE map_name = ?",
+                (identifier,),
+            )
+            return cur.rowcount
 
     # ------------------------------------------------------------------
     # Write API
