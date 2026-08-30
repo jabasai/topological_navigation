@@ -10,6 +10,9 @@ number and warning about the collision. Top-level metadata (``meta``,
 ``actions``) is merged with a "first map to define a value wins" rule,
 with special handling for ``meta.origin`` (always the reference map's
 value) and ``meta.fields`` (concatenated, renumbered so nothing is lost).
+Optionally (``--connect-closest``), each map is linked to the merged map
+with a new bidirectional edge between their closest pair of nodes, so the
+result is a single connected graph instead of one sub-map per input.
 
 Usage::
 
@@ -19,6 +22,7 @@ Usage::
 import argparse
 import datetime
 import logging
+import math
 import os
 import sys
 from copy import deepcopy
@@ -96,6 +100,7 @@ class MergeResult:
     reference_origin: Dict[str, Any] = field(default_factory=dict)
     per_map_offsets: List[Tuple[str, float, float, float, bool]] = field(default_factory=list)
     fields_merged: int = 0
+    connecting_edges: List[Tuple[str, str, str, str, float]] = field(default_factory=list)
     schema_valid: Optional[bool] = None
     schema_message: str = ""
 
@@ -133,6 +138,16 @@ class MergeResult:
         if self.edge_renames:
             for source_file, old, new in self.edge_renames:
                 lines.append(f"  - {source_file}: '{old}' -> '{new}'")
+        else:
+            lines.append("  none")
+
+        lines.append("")
+        lines.append("[Connecting edges]")
+        if self.connecting_edges:
+            for node_a, node_b, edge_id_ab, edge_id_ba, dist in self.connecting_edges:
+                lines.append(
+                    f"  - '{node_a}' <-> '{node_b}' (dist={dist:.3f}m): '{edge_id_ab}' / '{edge_id_ba}'"
+                )
         else:
             lines.append("  none")
 
@@ -289,11 +304,58 @@ def _apply_offset(entries: List[Dict[str, Any]], east: float, north: float, alt:
         position["z"] = position.get("z", 0.0) + alt
 
 
+def _node_position(entry: Dict[str, Any]) -> Optional[Tuple[float, float, float]]:
+    """Return *entry*'s ``(x, y, z)`` position, or None if it has no pose."""
+    position = entry.get("node", {}).get("pose", {}).get("position")
+    if not position:
+        return None
+    return (
+        float(position.get("x", 0.0)),
+        float(position.get("y", 0.0)),
+        float(position.get("z", 0.0)),
+    )
+
+
+def _closest_node_pair(
+    entries_a: List[Dict[str, Any]], entries_b: List[Dict[str, Any]]
+) -> Optional[Tuple[str, str, float]]:
+    """Return ``(name_a, name_b, distance)`` for the closest pair of nodes across the two lists."""
+    best: Optional[Tuple[str, str, float]] = None
+    for entry_a in entries_a:
+        pos_a = _node_position(entry_a)
+        if pos_a is None:
+            continue
+        for entry_b in entries_b:
+            pos_b = _node_position(entry_b)
+            if pos_b is None:
+                continue
+            dist = math.sqrt(sum((ca - cb) ** 2 for ca, cb in zip(pos_a, pos_b)))
+            if best is None or dist < best[2]:
+                best = (entry_a["node"]["name"], entry_b["node"]["name"], dist)
+    return best
+
+
+def _append_edge(
+    entries: List[Dict[str, Any]], from_name: str, to_name: str, edge_id: str, action: str, action_type: str
+) -> None:
+    """Append a new edge from the node named *from_name* to *to_name* within *entries*."""
+    for entry in entries:
+        if entry["node"]["name"] == from_name:
+            entry["node"].setdefault("edges", []).append(
+                {"edge_id": edge_id, "node": to_name, "action": action, "action_type": action_type}
+            )
+            return
+    raise KeyError(f"Node '{from_name}' not found when adding a connecting edge")
+
+
 def merge_maps(
     map_files: List[str],
     output_file: Optional[str] = None,
     schema_file: Optional[str] = None,
     name: Optional[str] = None,
+    connect_closest: bool = False,
+    connect_action: str = "navigate_to_pose",
+    connect_action_type: str = "nav2_msgs/action/NavigateToPose",
     logger: Optional[logging.Logger] = None,
 ) -> MergeResult:
     """Merge *map_files* into a single schema-valid map and return a :class:`MergeResult`.
@@ -303,6 +365,11 @@ def merge_maps(
     ids are kept globally unique by suffixing collisions with a running
     number. Top-level metadata is merged with a first-map-wins policy (see
     :func:`_merge_meta` / :func:`_merge_top_level_scalars` for the exceptions).
+
+    If *connect_closest* is set, each map (after the first) is linked to the
+    growing set of already-merged maps with a new bidirectional edge between
+    their closest pair of nodes, so the final graph is a single connected
+    component rather than one disconnected sub-map per input file.
     """
     log = logger or _LOGGER
 
@@ -383,6 +450,24 @@ def merge_maps(
         _apply_offset(entries, east, north, alt)
         all_entries.append(entries)
 
+    connecting_edges: List[Tuple[str, str, str, str, float]] = []
+    if connect_closest:
+        connected_pool: List[Dict[str, Any]] = list(all_entries[0])
+        for map_file, entries in zip(map_files[1:], all_entries[1:]):
+            pair = _closest_node_pair(connected_pool, entries)
+            if pair is None:
+                warn(f"Map {map_file} has no nodes with a valid pose; could not connect it to the merged map")
+            else:
+                node_a, node_b, dist = pair
+                edge_id_ab = _next_unique_name(f"connect_{node_a}_{node_b}", used_edge_ids)
+                used_edge_ids.add(edge_id_ab)
+                edge_id_ba = _next_unique_name(f"connect_{node_b}_{node_a}", used_edge_ids)
+                used_edge_ids.add(edge_id_ba)
+                _append_edge(connected_pool, node_a, node_b, edge_id_ab, connect_action, connect_action_type)
+                _append_edge(entries, node_b, node_a, edge_id_ba, connect_action, connect_action_type)
+                connecting_edges.append((node_a, node_b, edge_id_ab, edge_id_ba, dist))
+            connected_pool = connected_pool + entries
+
     merged_doc["nodes"] = [entry for entries in all_entries for entry in entries]
 
     total_nodes = len(merged_doc["nodes"])
@@ -419,6 +504,7 @@ def merge_maps(
         reference_origin=reference_origin if reference_set else {},
         per_map_offsets=per_map_offsets,
         fields_merged=fields_merged,
+        connecting_edges=connecting_edges,
         schema_valid=schema_valid,
         schema_message=schema_message,
     )
@@ -437,12 +523,25 @@ def build_arg_parser() -> argparse.ArgumentParser:
 Examples:
   %(prog)s map_a.tmap2.yaml map_b.tmap2.yaml -o merged.tmap2.yaml
   %(prog)s map_a.tmap2.yaml map_b.tmap2.yaml map_c.tmap2.yaml --name my_merged_map
+  %(prog)s map_a.tmap2.yaml map_b.tmap2.yaml --connect-closest
         """,
     )
     parser.add_argument("map_files", nargs="+", help="Paths to two or more topological map YAML files")
     parser.add_argument("--output", "-o", help="Output file path (default: <first-map-name>.merged.<ext>)")
     parser.add_argument("--schema", "-s", help="Path to the schema YAML file (optional)")
     parser.add_argument("--name", help="Override the merged map's name/metric_map/pointset")
+    parser.add_argument(
+        "--connect-closest", action="store_true",
+        help="Link each map to the merged map with a bidirectional edge between their closest nodes",
+    )
+    parser.add_argument(
+        "--connect-action", default="navigate_to_pose",
+        help="Action name used for connecting edges (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--connect-action-type", default="nav2_msgs/action/NavigateToPose",
+        help="Action type used for connecting edges (default: %(default)s)",
+    )
     return parser
 
 
@@ -464,6 +563,8 @@ def main(argv: Optional[List[str]] = None) -> None:
     try:
         result = merge_maps(
             args.map_files, output_file=args.output, schema_file=args.schema, name=args.name,
+            connect_closest=args.connect_closest, connect_action=args.connect_action,
+            connect_action_type=args.connect_action_type,
         )
     except Exception as exc:  # noqa: BLE001 - report any load/merge error to the user
         print(f"Error merging maps: {exc}")

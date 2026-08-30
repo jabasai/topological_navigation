@@ -210,10 +210,95 @@ class TestFormatReport:
         report = result.format_report()
         for section in (
             "[Reference origin]", "[Per-map reprojection offsets]",
-            "[Node renames]", "[Edge renames]", "[Warnings]",
+            "[Node renames]", "[Edge renames]", "[Connecting edges]", "[Warnings]",
             "[Schema validation of merged output]",
         ):
             assert section in report
+
+
+class TestConnectClosest:
+    def test_disabled_by_default(self, tmp_path):
+        out = tmp_path / "merged.yaml"
+        result = merge_maps([MERGE_A, MERGE_B], output_file=str(out))
+        assert result.connecting_edges == []
+
+    def test_adds_one_bidirectional_edge_between_closest_nodes(self, tmp_path):
+        out = tmp_path / "merged.yaml"
+        result = merge_maps([MERGE_A, MERGE_B], output_file=str(out), connect_closest=True)
+
+        assert len(result.connecting_edges) == 1
+        node_a, node_b, edge_id_ab, edge_id_ba, dist = result.connecting_edges[0]
+        assert node_a in ("WP1", "WP2")
+        assert node_b in ("WP1_2", "WP2_2")
+        assert dist > 0
+
+        merged = load_tmap2_file(str(out))
+        edges_a = {e["edge_id"]: e for e in _node(merged, node_a)["node"]["edges"]}
+        edges_b = {e["edge_id"]: e for e in _node(merged, node_b)["node"]["edges"]}
+        assert edges_a[edge_id_ab]["node"] == node_b
+        assert edges_b[edge_id_ba]["node"] == node_a
+        assert edges_a[edge_id_ab]["action"] == "navigate_to_pose"
+        assert edges_a[edge_id_ab]["action_type"] == "nav2_msgs/action/NavigateToPose"
+
+    def test_connecting_edge_is_actually_the_closest_pair(self, tmp_path):
+        out = tmp_path / "merged.yaml"
+        result = merge_maps([MERGE_A, MERGE_B], output_file=str(out), connect_closest=True)
+        merged = load_tmap2_file(str(out))
+
+        a_names = ("WP1", "WP2")
+        b_names = ("WP1_2", "WP2_2")
+
+        def pos(name):
+            p = _node(merged, name)["node"]["pose"]["position"]
+            return p["x"], p["y"], p["z"]
+
+        def dist(n1, n2):
+            p1, p2 = pos(n1), pos(n2)
+            return sum((c1 - c2) ** 2 for c1, c2 in zip(p1, p2)) ** 0.5
+
+        expected_dist = min(dist(a, b) for a in a_names for b in b_names)
+        _, _, _, _, actual_dist = result.connecting_edges[0]
+        assert actual_dist == pytest.approx(expected_dist, abs=1e-6)
+
+    def test_merged_map_becomes_a_single_connected_component(self, tmp_path):
+        out = tmp_path / "merged.yaml"
+        merge_maps([MERGE_A, MERGE_B], output_file=str(out), connect_closest=True)
+        analysis = analyse_map(str(out))
+        assert len(analysis.disconnected_components) == 1
+
+    def test_without_connect_closest_stays_disconnected(self, tmp_path):
+        out = tmp_path / "merged.yaml"
+        merge_maps([MERGE_A, MERGE_B], output_file=str(out))
+        analysis = analyse_map(str(out))
+        assert len(analysis.disconnected_components) == 2
+
+    def test_custom_connect_action(self, tmp_path):
+        out = tmp_path / "merged.yaml"
+        merge_maps(
+            [MERGE_A, MERGE_B], output_file=str(out), connect_closest=True,
+            connect_action="custom_action", connect_action_type="custom_pkg/action/Custom",
+        )
+        merged = load_tmap2_file(str(out))
+        connecting = [
+            edge
+            for entry in merged["nodes"]
+            for edge in entry["node"]["edges"]
+            if edge["edge_id"].startswith("connect_")
+        ]
+        assert connecting
+        for edge in connecting:
+            assert edge["action"] == "custom_action"
+            assert edge["action_type"] == "custom_pkg/action/Custom"
+
+    def test_cli_connect_closest_flag(self, tmp_path):
+        out = tmp_path / "cli_merged.yaml"
+        analyser_main(["merge", MERGE_A, MERGE_B, "-o", str(out), "--connect-closest"])
+        merged = load_tmap2_file(str(out))
+        assert any(
+            edge["edge_id"].startswith("connect_")
+            for entry in merged["nodes"]
+            for edge in entry["node"]["edges"]
+        )
 
 
 class TestCli:

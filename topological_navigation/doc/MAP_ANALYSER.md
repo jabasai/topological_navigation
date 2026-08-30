@@ -149,6 +149,7 @@ need to be navigated as one graph.
 map_analyser.py merge map_a.tmap2.yaml map_b.tmap2.yaml
 map_analyser.py merge map_a.tmap2.yaml map_b.tmap2.yaml -o merged.tmap2.yaml
 map_analyser.py merge map_a.tmap2.yaml map_b.tmap2.yaml map_c.tmap2.yaml --name my_merged_map
+map_analyser.py merge map_a.tmap2.yaml map_b.tmap2.yaml --connect-closest
 ```
 
 If `-o`/`--output` is omitted, the output path is derived from the
@@ -171,8 +172,17 @@ Merge rules:
   and subsequent maps are renamed with a numeric suffix (`WP1` ->
   `WP1_2` -> `WP1_3`, ...), a warning is recorded for each rename, and
   every edge referencing a renamed node is updated to point at the new
-  name.
-* **Metadata merge** \u2013 top-level keys (`name`, `metric_map`,
+  name.* **Connecting the maps** – by default, each input map remains its own
+  disconnected sub-map in the merged graph (see `--sub-map-separation`
+  above). Pass `--connect-closest` to automatically link every map to
+  the growing merged map with a new bidirectional edge between their
+  closest pair of nodes (straight-line distance in the merged/
+  reprojected frame), producing a single connected graph. The action
+  and action type used for these edges default to `navigate_to_pose` /
+  `nav2_msgs/action/NavigateToPose` and can be overridden with
+  `--connect-action` / `--connect-action-type`. Connecting edge IDs are
+  named `connect_<node_a>_<node_b>`; the merge report lists every
+  connecting edge under `[Connecting edges]` with the distance covered.* **Metadata merge** \u2013 top-level keys (`name`, `metric_map`,
   `pointset`, `transformation`, `definitions`, `actions`,
   `navigation_config_file`) and `meta` subkeys use
   first-map-precedence: the first map's value is kept and a warning is

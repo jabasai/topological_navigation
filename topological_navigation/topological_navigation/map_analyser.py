@@ -1144,6 +1144,7 @@ Examples:
   %(prog)s minify my_map.tmap2.yaml
   %(prog)s minify my_map.tmap2.yaml --strip-unreachable Charging --flowstyle
   %(prog)s merge map_a.tmap2.yaml map_b.tmap2.yaml -o merged.tmap2.yaml
+  %(prog)s merge map_a.tmap2.yaml map_b.tmap2.yaml --connect-closest
         """,
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -1220,6 +1221,18 @@ Examples:
     )
     merge_parser.add_argument("--schema", "-s", help="Path to the schema YAML file (optional)")
     merge_parser.add_argument("--name", help="Override the merged map's name/metric_map/pointset")
+    merge_parser.add_argument(
+        "--connect-closest", action="store_true",
+        help="Link each map to the merged map with a bidirectional edge between their closest nodes",
+    )
+    merge_parser.add_argument(
+        "--connect-action", default="navigate_to_pose",
+        help="Action name used for connecting edges (default: %(default)s)",
+    )
+    merge_parser.add_argument(
+        "--connect-action-type", default="nav2_msgs/action/NavigateToPose",
+        help="Action type used for connecting edges (default: %(default)s)",
+    )
 
     return parser
 
@@ -1241,6 +1254,8 @@ def main(argv: Optional[List[str]] = None) -> None:
         try:
             result = merge_maps(
                 args.map_files, output_file=args.output, schema_file=args.schema, name=args.name,
+                connect_closest=args.connect_closest, connect_action=args.connect_action,
+                connect_action_type=args.connect_action_type,
             )
         except Exception as exc:  # noqa: BLE001 - report any load/merge error to the user
             print(f"Error merging maps: {exc}")
