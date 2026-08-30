@@ -92,6 +92,10 @@ DEFAULT_CHECK_SEVERITY: Dict[str, Optional[str]] = {
     "influence-zone-overlap": "warning",
 }
 
+# Top-level YAML key under which minify_map() collects collapsed anchors;
+# double-underscore prefix keeps it visually distinct from real map data.
+DEFAULT_ANCHORS_KEY = "__yaml_anchors"
+
 
 def _parse_severity(value: str) -> Optional[str]:
     """Parse a ``--<check>=<value>`` CLI value into a check severity."""
@@ -952,6 +956,7 @@ def minify_map(
     map_file: str,
     output_file: Optional[str] = None,
     anchors: bool = True,
+    anchors_key: str = DEFAULT_ANCHORS_KEY,
     strip_comments: bool = False,
     flowstyle: bool = False,
     min_size: int = 100,
@@ -966,11 +971,12 @@ def minify_map(
     Repeated dict/list sub-structures (e.g. shared ``properties``, ``verts`` or
     ``orientation`` blocks) whose serialised size is >= *min_size* and which occur
     >= *min_occurrences* times are collapsed into named YAML anchors gathered under
-    a top-level ``anchors`` section, when *anchors* is True. Only the leading
-    top-of-file comment block is preserved (per-node/edge inline comments are not
-    preserved by the underlying YAML parser); pass ``strip_comments=True`` to drop
-    it too. When *strip_unreachable_from* is given, nodes/edges not reachable via a
-    directed path from that node are dropped first.
+    a top-level section named *anchors_key* (default :data:`DEFAULT_ANCHORS_KEY`),
+    when *anchors* is True. Only the leading top-of-file comment block is preserved
+    (per-node/edge inline comments are not preserved by the underlying YAML parser);
+    pass ``strip_comments=True`` to drop it too. When *strip_unreachable_from* is
+    given, nodes/edges not reachable via a directed path from that node are dropped
+    first.
     """
     log = logger or _LOGGER
 
@@ -979,13 +985,13 @@ def minify_map(
 
     tmap_data = load_tmap2_file(map_file)
     # If *map_file* was itself produced by a previous minify pass, discard its
-    # top-level "anchors" section: it's not real map data, just a cache of
+    # top-level anchors section: it's not real map data, just a cache of
     # shared subtrees we're about to recompute from scratch. Keeping it around
     # would leak into the rebuilt document (clobbering the new anchors) and
     # break the round-trip check below.
-    previously_had_anchors = tmap_data.pop("anchors", None) is not None
+    previously_had_anchors = tmap_data.pop(anchors_key, None) is not None
     if previously_had_anchors:
-        log.info("Input already contains an 'anchors' section; recomputing anchors from scratch")
+        log.info("Input already contains an '%s' section; recomputing anchors from scratch", anchors_key)
 
     stripped_nodes = stripped_edges = 0
     if strip_unreachable_from:
@@ -1022,7 +1028,7 @@ def minify_map(
         occurrences_collapsed = sum(counts[sig] for sig in candidates)
 
         rebuilt = _rebuild_with_anchors(tmap_data, mergeable_set, representative, cache)
-        final_doc = {"anchors": anchors_section, **rebuilt} if anchors_section else rebuilt
+        final_doc = {anchors_key: anchors_section, **rebuilt} if anchors_section else rebuilt
         anchor_names_by_id = {id(v): k for k, v in anchors_section.items()}
     else:
         final_doc = deepcopy(tmap_data)
@@ -1038,9 +1044,9 @@ def minify_map(
     )
 
     # Round-trip sanity check: minified YAML must parse back to the same data
-    # (aliases transparently expand back out), modulo the extra "anchors" section.
+    # (aliases transparently expand back out), modulo the extra anchors section.
     reparsed = yaml.load(dumped, Loader=CustomSafeLoader)
-    reparsed_body = {k: v for k, v in reparsed.items() if k != "anchors"}
+    reparsed_body = {k: v for k, v in reparsed.items() if k != anchors_key}
     if reparsed_body != tmap_data:
         raise RuntimeError("Minification round-trip check failed: output does not match input data")
 
@@ -1173,6 +1179,11 @@ Examples:
         help="Collapse repeated data structures into named YAML anchors (default: enabled)",
     )
     minify_parser.add_argument(
+        "--anchors-key",
+        default=DEFAULT_ANCHORS_KEY,
+        help="Top-level key name to collect anchors under (default: %(default)s)",
+    )
+    minify_parser.add_argument(
         "--strip-comments",
         action="store_true",
         help="Also drop the file's leading comment block (default: keep it)",
@@ -1215,6 +1226,7 @@ def main(argv: Optional[List[str]] = None) -> None:
                 args.map_file,
                 output_file=args.output,
                 anchors=args.anchors,
+                anchors_key=args.anchors_key,
                 strip_comments=args.strip_comments,
                 flowstyle=args.flowstyle,
                 min_size=args.min_size,

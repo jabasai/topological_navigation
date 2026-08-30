@@ -92,7 +92,8 @@ Topological maps often contain many repeated data structures (e.g. the
 same `properties` dict or influence-zone `verts` polygon reused across
 dozens of nodes/edges). `minify` rewrites the map into an equivalent but
 smaller file by finding these repeated subtrees and replacing them with
-YAML anchors/aliases, collected under a top-level `anchors:` key.
+YAML anchors/aliases, collected under a top-level `__yaml_anchors:` key
+(configurable via `--anchors-key`).
 
 ```bash
 map_analyser.py minify my_map.tmap2.yaml
@@ -111,6 +112,7 @@ auto-generated ids, so the minified file stays human-readable.
 | Switch | Meaning | Default |
 |--------|---------|---------|
 | `--anchors` / `--no-anchors` | Collapse repeated subtrees into named anchors | enabled |
+| `--anchors-key KEY` | Top-level key name to collect anchors under | `__yaml_anchors` |
 | `--strip-comments` | Drop the file's leading comment block | disabled (comments kept) |
 | `--flowstyle` | Emit compact flow-style YAML instead of block style | disabled |
 | `--min-size N` | Minimum serialised size (chars) of a subtree to qualify for anchoring | `100` |
