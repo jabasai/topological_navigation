@@ -1,12 +1,18 @@
 """Targeted tests for ``navigation2.py`` action-server behavior."""
 
+import pytest
 from types import SimpleNamespace
 
 from rclpy import Parameter
 from rclpy.action import CancelResponse
 
-from topological_navigation.navigation_graph import NavState
-from topological_navigation.scripts.navigation2 import TopologicalNavServer
+from topological_navigation.navigation_graph import ActionSegment, NavState
+from topological_navigation.scripts import navigation2 as navigation2_module
+from topological_navigation.scripts.navigation2 import (
+    TopologicalNavServer,
+    _make_ros_param_value,
+    _ros_param_value,
+)
 
 
 class _DummyLogger:
@@ -92,6 +98,29 @@ class _FakePolicyGoalHandle:
         self.final_state = 'canceled'
 
 
+class _FakePolicyGraph:
+    """Small graph stub supporting get_route_edges-style access."""
+
+    def __init__(self, edges):
+        self._edges = list(edges)
+
+    def has_edge(self, src, tgt):
+        return (src, tgt) in self._edges
+
+    def __getitem__(self, src):
+        edge_map = {}
+        for u, v in self._edges:
+            if u != src:
+                continue
+            edge_map[v] = {
+                'edge_id': '%s_%s' % (u, v),
+                'source': u,
+                'target': v,
+                'properties': {},
+            }
+        return edge_map
+
+
 def _make_server():
     """Create a partially constructed ``TopologicalNavServer`` for unit tests."""
     server = TopologicalNavServer.__new__(TopologicalNavServer)
@@ -117,12 +146,14 @@ def _make_server():
             },
         ],
     }
-    server._graph = {}
+    server._graph = _FakePolicyGraph([('WP1', 'WP2')])
     server._topol_map = 'test_map'
     server._map_actions = {}
     server._map_definitions = {}
     server._bt_files = {}
     server._action_clients = {}
+    server._xy_tolerance_param = 'goal_checker.xy_goal_tolerance'
+    server._yaw_tolerance_param = 'goal_checker.yaw_goal_tolerance'
     server._publish_status = lambda *_args, **_kwargs: None
     server._publish_route = lambda *_args, **_kwargs: None
     server._execute_route = lambda *_args, **_kwargs: True
@@ -224,6 +255,208 @@ def test_load_map_config_clears_stale_action_clients_when_actions_missing():
     assert server._bt_files == {}
 
 
+# =====================================================================
+# ROS 2 parameter value helpers
+# =====================================================================
+
+
+class _FakeGraph:
+    """Minimal networkx-compatible graph stub for unit tests."""
+
+    def __init__(self, node_data):
+        self.nodes = node_data
+
+    def __contains__(self, item):
+        return item in self.nodes
+
+
+class TestRosParamHelpers:
+    """Unit tests for _ros_param_value and _make_ros_param_value."""
+
+    def _pv(self, value):
+        """Round-trip: build ParameterValue then read it back."""
+        from rcl_interfaces.msg import ParameterValue, ParameterType
+        pv = _make_ros_param_value(value)
+        return _ros_param_value(pv), pv
+
+    def test_double_roundtrip(self):
+        val, pv = self._pv(3.14)
+        assert abs(val - 3.14) < 1e-9
+
+    def test_int_roundtrip(self):
+        val, pv = self._pv(42)
+        assert val == 42
+
+    def test_bool_roundtrip(self):
+        val, pv = self._pv(True)
+        assert val is True
+
+    def test_string_roundtrip(self):
+        val, pv = self._pv('hello')
+        assert val == 'hello'
+
+    def test_unsupported_type_returns_none(self):
+        from rcl_interfaces.msg import ParameterValue
+        # An unset ParameterValue has type 0 (PARAMETER_NOT_SET)
+        pv = ParameterValue()
+        assert _ros_param_value(pv) is None
+
+    def test_make_unsupported_type_returns_unset(self):
+        from rcl_interfaces.msg import ParameterType
+        pv = _make_ros_param_value([1, 2, 3])  # list not supported
+        assert pv.type == ParameterType.PARAMETER_NOT_SET
+
+
+# =====================================================================
+# _apply_segment_parameters / _restore_segment_parameters
+# =====================================================================
+
+
+class TestApplyRestoreSegmentParameters:
+    """Parameter save/restore behaviour in isolation from Nav2."""
+
+    def _make_segment(self, target='WP2', edge_props=None, action='navigate_to_pose'):
+        """Build an ActionSegment stub."""
+        props = edge_props if edge_props is not None else {}
+        return ActionSegment(
+            action_type=action,
+            edge_ids=['e1'],
+            source_nodes=['WP1'],
+            target_nodes=[target],
+            edge_data=[{'edge_id': 'e1', 'source': 'WP1',
+                        'target': target, 'properties': props}],
+        )
+
+    def test_no_params_returns_empty(self):
+        """Segment with no relevant properties -> no parameters set."""
+        server = _make_server()
+        # Use a dict-of-dicts with a nodes accessor (networkx-style)
+        server._graph = _FakeGraph({'WP2': {'properties': {}, 'name': 'WP2'}})
+        server._get_ros_params_sync = lambda names: {}
+        server._set_ros_params_async = lambda _d: None
+
+        seg = self._make_segment()
+        prev = server._apply_segment_parameters(seg)
+        assert prev == {}
+
+    def test_node_tolerances_queried_and_set(self):
+        """xy/yaw goal tolerances from node properties are queried and set."""
+        server = _make_server()
+        server._graph = _FakeGraph({
+            'WP2': {
+                'name': 'WP2',
+                'properties': {
+                    'xy_goal_tolerance': 0.1,
+                    'yaw_goal_tolerance': 0.05,
+                },
+            },
+        })
+        queried_names = []
+        set_calls = []
+
+        def _fake_get(names):
+            queried_names.extend(names)
+            return {n: 0.5 for n in names}  # pretend current value is 0.5
+
+        server._get_ros_params_sync = _fake_get
+        server._set_ros_params_async = lambda d: set_calls.append(dict(d))
+
+        seg = self._make_segment()
+        prev = server._apply_segment_parameters(seg)
+
+        # Both tolerance param names should have been queried
+        assert 'goal_checker.xy_goal_tolerance' in queried_names
+        assert 'goal_checker.yaw_goal_tolerance' in queried_names
+
+        # The returned dict contains the old values (0.5 faked above)
+        assert prev.get('goal_checker.xy_goal_tolerance') == 0.5
+        assert prev.get('goal_checker.yaw_goal_tolerance') == 0.5
+
+        # SetParameters was called with new values
+        assert len(set_calls) == 1
+        assert set_calls[0]['goal_checker.xy_goal_tolerance'] == pytest.approx(0.1)
+        assert set_calls[0]['goal_checker.yaw_goal_tolerance'] == pytest.approx(0.05)
+
+    def test_edge_ros_parameters_queried_and_set(self):
+        """Edge properties mapped via ros_parameters are queried and applied."""
+        server = _make_server()
+        server._graph = _FakeGraph({})  # no node in graph -> no tolerance params
+        server._action_clients = {
+            'row_traversal': {
+                'client': None,
+                'action_class': None,
+                'config': {
+                    'ros_parameters': {
+                        'max_speed': 'FollowPath.max_robot_speed',
+                    },
+                },
+            },
+        }
+
+        queried_names = []
+        set_calls = []
+
+        def _fake_get(names):
+            queried_names.extend(names)
+            return {'FollowPath.max_robot_speed': 1.0}
+
+        server._get_ros_params_sync = _fake_get
+        server._set_ros_params_async = lambda d: set_calls.append(dict(d))
+
+        seg = self._make_segment(
+            target='WP2',
+            edge_props={'max_speed': 0.3},
+            action='row_traversal',
+        )
+        prev = server._apply_segment_parameters(seg)
+
+        assert 'FollowPath.max_robot_speed' in queried_names
+        assert prev.get('FollowPath.max_robot_speed') == pytest.approx(1.0)
+        assert set_calls[0]['FollowPath.max_robot_speed'] == pytest.approx(0.3)
+
+    def test_restore_calls_set_with_prev_values(self):
+        """_restore_segment_parameters sends saved values via SetParameters."""
+        server = _make_server()
+        set_calls = []
+        server._set_ros_params_async = lambda d: set_calls.append(dict(d))
+
+        prev = {'goal_checker.xy_goal_tolerance': 0.5,
+                'goal_checker.yaw_goal_tolerance': 0.2}
+        server._restore_segment_parameters(prev)
+
+        assert len(set_calls) == 1
+        assert set_calls[0] == prev
+
+    def test_restore_empty_is_noop(self):
+        """_restore_segment_parameters({}) must not call SetParameters."""
+        server = _make_server()
+        set_calls = []
+        server._set_ros_params_async = lambda d: set_calls.append(d)
+
+        server._restore_segment_parameters({})
+        assert set_calls == []
+
+    def test_get_ros_params_sync_unavailable_service(self):
+        """_get_ros_params_sync returns {} when service is not ready."""
+        server = _make_server()
+
+        class _FakeClient:
+            def service_is_ready(self):
+                return False
+
+        server._get_params_client = _FakeClient()
+
+        result = server._get_ros_params_sync(['some_param'])
+        assert result == {}
+
+    def test_get_ros_params_sync_empty_names(self):
+        """_get_ros_params_sync with empty list returns {} immediately."""
+        server = _make_server()
+        # No client needed – should return before touching it
+        result = server._get_ros_params_sync([])
+        assert result == {}
+
+
 # ----------------------------------------------------------------------
 # Dynamic (runtime) parameter callback
 # ----------------------------------------------------------------------
@@ -276,12 +509,118 @@ def test_parameters_callback_updates_numeric_and_weight_params():
     server = _make_server()
     result = server._parameters_callback([
         _param('max_dist_to_closest_edge', 2.5, Parameter.Type.DOUBLE),
-        _param('default_boundary_left', 0.7, Parameter.Type.DOUBLE),
-        _param('default_boundary_right', 0.8, Parameter.Type.DOUBLE),
+        _param('coarse_white_extension_m', 4.7, Parameter.Type.DOUBLE),
+        _param('route_white_extension_m', 2.8, Parameter.Type.DOUBLE),
         _param('route_weight_attr', 'cost', Parameter.Type.STRING),
     ])
     assert result.successful is True
     assert server._max_dist_to_closest_edge == 2.5
-    assert server._default_boundary_left == 0.7
-    assert server._default_boundary_right == 0.8
+    assert server._coarse_white_extension_m == 4.7
+    assert server._route_white_extension_m == 2.8
     assert server._route_weight == 'cost'
+
+
+def test_parameters_callback_updates_metric_map_parameters():
+    """Metric map generation parameters should accept valid updates."""
+    server = _make_server()
+    result = server._parameters_callback([
+        _param('metric_map_resolution', 1.0, Parameter.Type.DOUBLE),
+        _param('route_segment_resolution', 0.05, Parameter.Type.DOUBLE),
+        _param('route_segment_border_width', 0.3, Parameter.Type.DOUBLE),
+        _param('route_segment_padding', 0.2, Parameter.Type.DOUBLE),
+    ])
+    assert result.successful is True
+    assert server._metric_map_resolution == 1.0
+    assert server._route_segment_resolution == 0.05
+    assert server._route_segment_border_width == 0.3
+    assert server._route_segment_padding == 0.2
+
+
+def test_parameters_callback_rejects_invalid_metric_map_values():
+    """Invalid metric map values should be rejected."""
+    server = _make_server()
+
+    result = server._parameters_callback([
+        _param('metric_map_resolution', 0.0, Parameter.Type.DOUBLE),
+    ])
+    assert result.successful is False
+
+    result = server._parameters_callback([
+        _param('route_segment_resolution', -0.1, Parameter.Type.DOUBLE),
+    ])
+    assert result.successful is False
+
+    result = server._parameters_callback([
+        _param('route_segment_border_width', -0.1, Parameter.Type.DOUBLE),
+    ])
+    assert result.successful is False
+
+    result = server._parameters_callback([
+        _param('route_segment_padding', -0.1, Parameter.Type.DOUBLE),
+    ])
+    assert result.successful is False
+
+    result = server._parameters_callback([
+        _param('coarse_white_extension_m', -0.1, Parameter.Type.DOUBLE),
+    ])
+    assert result.successful is False
+
+    result = server._parameters_callback([
+        _param('route_white_extension_m', -0.1, Parameter.Type.DOUBLE),
+    ])
+    assert result.successful is False
+
+
+def test_route_segment_map_passes_robot_position_to_rasterizer(monkeypatch):
+    """The live route corridor should begin at the latest TF robot pose."""
+    server = _make_server()
+    server._route_white_extension_m = 2.0
+    server._route_segment_border_width = 0.25
+    server._route_segment_resolution = 0.05
+    server._route_segment_padding = 0.0
+    server._base_frame = 'base_link'
+    server._raster_to_occupancy_grid = lambda raster, frame: (raster, frame)
+
+    translation = SimpleNamespace(x=3.5, y=-1.25)
+    transform = SimpleNamespace(
+        transform=SimpleNamespace(translation=translation),
+    )
+    server._tf_buffer = SimpleNamespace(
+        lookup_transform=lambda target, source, stamp: transform,
+    )
+    published = []
+    server._route_segment_map_pub = SimpleNamespace(
+        publish=lambda msg: published.append(msg),
+    )
+
+    geometry = SimpleNamespace(frame_id='map')
+    raster = SimpleNamespace(
+        image=SimpleNamespace(width=10, height=20),
+        resolution=0.05,
+    )
+    captured = {}
+    monkeypatch.setattr(
+        navigation2_module,
+        'geometry_from_tmap',
+        lambda tmap, apply_transform: geometry,
+    )
+    monkeypatch.setattr(
+        navigation2_module,
+        'route_specs_from_edge_data',
+        lambda edges, default_left_m, default_right_m: ('spec',),
+    )
+
+    def _capture_rasterize(_geometry, _specs, **kwargs):
+        captured.update(kwargs)
+        return raster
+
+    monkeypatch.setattr(
+        navigation2_module,
+        'rasterize_route_geometry',
+        _capture_rasterize,
+    )
+
+    server._publish_route_segment_metric_map([{'source': 'A', 'target': 'B'}])
+
+    assert captured['route_start'] == (3.5, -1.25)
+    assert published == [(raster, 'map')]

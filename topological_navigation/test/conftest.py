@@ -98,16 +98,56 @@ def _install_ros_test_stubs():
     geometry_msgs.msg.PolygonStamped = PolygonStamped
     geometry_msgs.msg.PoseStamped = PoseStamped
 
+    # nav_msgs.msg ---------------------------------------------------
+    nav_msgs = _module('nav_msgs')
+    nav_msgs.msg = _module('nav_msgs.msg')
+
+    class OccupancyGrid(_BaseMsg):
+        def __init__(self):
+            super().__init__(
+                header=types.SimpleNamespace(frame_id='', stamp=None),
+                info=types.SimpleNamespace(
+                    resolution=0.0,
+                    width=0,
+                    height=0,
+                    origin=types.SimpleNamespace(
+                        position=types.SimpleNamespace(x=0.0, y=0.0, z=0.0),
+                        orientation=types.SimpleNamespace(
+                            x=0.0, y=0.0, z=0.0, w=1.0,
+                        ),
+                    ),
+                ),
+                data=[],
+            )
+
+    nav_msgs.msg.OccupancyGrid = OccupancyGrid
+
     # rcl_interfaces --------------------------------------------------
     rcl_interfaces = _module('rcl_interfaces')
     rcl_interfaces.msg = _module('rcl_interfaces.msg')
     rcl_interfaces.srv = _module('rcl_interfaces.srv')
 
     class ParameterType:
+        PARAMETER_NOT_SET = 0
+        PARAMETER_BOOL = 1
+        PARAMETER_INTEGER = 2
         PARAMETER_DOUBLE = 3
+        PARAMETER_STRING = 4
+        PARAMETER_BYTE_ARRAY = 5
+        PARAMETER_BOOL_ARRAY = 6
+        PARAMETER_INTEGER_ARRAY = 7
+        PARAMETER_DOUBLE_ARRAY = 8
+        PARAMETER_STRING_ARRAY = 9
 
     class ParameterValue(_BaseMsg):
-        pass
+        def __init__(self, **kwargs):
+            self.type = ParameterType.PARAMETER_NOT_SET
+            self.bool_value = False
+            self.integer_value = 0
+            self.double_value = 0.0
+            self.string_value = ''
+            for key, value in kwargs.items():
+                setattr(self, key, value)
 
     class RclParameter(_BaseMsg):
         pass
@@ -116,6 +156,19 @@ def _install_ros_test_stubs():
         class Request(_BaseMsg):
             def __init__(self):
                 super().__init__(parameters=[])
+
+        class Response(_BaseMsg):
+            def __init__(self):
+                super().__init__(results=[])
+
+    class GetParameters:
+        class Request(_BaseMsg):
+            def __init__(self):
+                super().__init__(names=[])
+
+        class Response(_BaseMsg):
+            def __init__(self):
+                super().__init__(values=[])
 
     class SetParametersResult(_BaseMsg):
         def __init__(self, successful=False, reason=''):
@@ -126,6 +179,7 @@ def _install_ros_test_stubs():
     rcl_interfaces.msg.ParameterValue = ParameterValue
     rcl_interfaces.msg.SetParametersResult = SetParametersResult
     rcl_interfaces.srv.SetParameters = SetParameters
+    rcl_interfaces.srv.GetParameters = GetParameters
 
     # rclpy -----------------------------------------------------------
     rclpy = _module('rclpy')

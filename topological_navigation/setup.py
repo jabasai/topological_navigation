@@ -36,6 +36,7 @@ setup(
             'manual_topomapping.py = topological_navigation.scripts.manual_topomapping:main',
             'validate_map.py = topological_navigation.validate_map:main',
             'topo_stats.py = topological_navigation.scripts.topo_stats:main',
+            'map_analyser.py = topological_navigation.map_analyser:main',
 
             # Map conversion
             'convert_tmap.py = topological_navigation.convert_tmap:main',

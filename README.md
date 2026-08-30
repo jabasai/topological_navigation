@@ -22,6 +22,7 @@ Originally developed for the [STRANDS](https://strands-project.eu/) long-term au
     - [Prerequisites](#prerequisites)
     - [Build from Source](#build-from-source)
     - [Python Dependencies](#python-dependencies)
+    - [Running the CLI Tools Without ROS 2](#running-the-cli-tools-without-ros-2)
   - [Launching the System](#launching-the-system)
     - [Full Stack (with Simulator)](#full-stack-with-simulator)
     - [Standalone Simulator](#standalone-simulator)
@@ -124,6 +125,8 @@ Originally developed for the [STRANDS](https://strands-project.eu/) long-term au
 | `tmap_utils.py` | YAML map loading utilities |
 | `validate_map.py` | CLI tool for topological map validation against schema |
 | `convert_tmap.py` | Convert between topological map format versions |
+| `map_analyser.py` | Standalone CLI (`analyse`/`check`/`svg`/`minify`/`merge`) for analysing, validating, rendering, minifying, and merging topological maps — runs without ROS 2 |
+| `map_merger.py` | Core logic for merging multiple topological maps into one schema-valid map, with GPS-based reprojection and name deduplication (used by `map_analyser.py merge`) |
 
 ### topological_navigation_msgs
 
@@ -197,6 +200,31 @@ source install/setup.bash
 | `scipy` | 1.5 | KD-tree spatial indexing |
 | `numpy` | 1.19 | Numerical operations |
 | `jsonschema` | — | Map schema validation |
+| `pyproj` | — | Geodetic (lat/long) to local ENU projection, used by `map_analyser.py merge` |
+
+All pure-Python dependencies are also listed in [requirements.txt](requirements.txt) at the repository root.
+
+### Running the CLI Tools Without ROS 2
+
+The map inspection/validation/merge tools (`map_analyser.py`, `map_merger.py`,
+`validate_map.py`, `convert_tmap.py`) have no ROS 2 runtime dependency — they
+only need the pure-Python packages above, so they can be run standalone (e.g.
+in a CI pipeline or a plain `venv`) without building or sourcing a ROS 2
+workspace:
+
+```bash
+# From the repository root
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+# Run map_analyser.py directly
+python3 topological_navigation/topological_navigation/map_analyser.py analyse my_map.tmap2.yaml
+python3 topological_navigation/topological_navigation/map_analyser.py check my_map.tmap2.yaml
+python3 topological_navigation/topological_navigation/map_analyser.py merge map_a.tmap2.yaml map_b.tmap2.yaml -o merged.tmap2.yaml
+```
+
+See [doc/MAP_ANALYSER.md](topological_navigation/doc/MAP_ANALYSER.md) for the full command reference. When ROS 2 **is** sourced, the same tool is also available as `ros2 run topological_navigation map_analyser.py ...`.
 
 ---
 
@@ -700,10 +728,17 @@ ros2 run topological_navigation validate_map.py /path/to/map.tmap2.yaml -v
 |---------|-------------|
 | `ros2 run topological_navigation validate_map.py <map.yaml> -v` | Validate a map against the JSON schema |
 | `ros2 run topological_navigation convert_tmap.py <args>` | Convert between topological map format versions |
+| `map_analyser.py analyse <map.yaml> [--svg out.svg]` | Full analysis report (schema, orphaned nodes, disconnected sub-maps, influence-zone overlaps, statistics), optionally with SVG rendering |
+| `map_analyser.py check <map.yaml>` | CI-friendly validity check; exit code reflects the result |
+| `map_analyser.py svg <map.yaml> -o out.svg` | Render the map to an SVG image |
+| `map_analyser.py minify <map.yaml>` | Write a smaller, semantically-identical copy of the map using YAML anchors |
+| `map_analyser.py merge <map_a.yaml> <map_b.yaml> [...] -o merged.yaml` | Merge multiple topological maps into one schema-valid map (GPS reprojection, name deduplication, metadata merge) |
 | `ros2 action send_goal /topological_navigation topological_navigation_msgs/action/GotoNode "{target: 'node_name'}"` | Send a navigation goal |
 | `ros2 topic echo /current_node` | Monitor which node the robot is at |
 | `ros2 topic echo /closest_node` | Monitor the nearest node |
 | `ros2 service call /topological_localisation/localise_pose topological_navigation_msgs/srv/LocalisePose "{pose: {position: {x: 1.0, y: 2.0, z: 0.0}}}"` | Localise an arbitrary pose |
+
+> `map_analyser.py` runs standalone without ROS 2 — see [Running the CLI Tools Without ROS 2](#running-the-cli-tools-without-ros-2).
 
 ---
 

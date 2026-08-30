@@ -38,8 +38,9 @@ ROS 2 interfaces
         topological_navigation/move_action_status (String)
     Parameters:
         max_dist_to_closest_edge  (double)  -- origin heuristic
-        default_boundary_left     (double)  -- row corridor left
-        default_boundary_right    (double)  -- row corridor right
+        coarse_white_extension_m  (double)  -- coarse full-map corridor half-width
+        route_white_extension_m   (double)  -- fine route-map default half-width
+        base_frame                (string)  -- robot TF frame for route-map start
         route_algorithm           (string)  -- 'astar' | 'dijkstra'
         route_weight_attr         (string)  -- edge attribute for cost
 
@@ -61,10 +62,11 @@ import rclpy
 import rclpy.node
 from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import Point32, PolygonStamped, PoseStamped
+from nav_msgs.msg import OccupancyGrid
 from rcl_interfaces.msg import Parameter as RclParameter
 from rcl_interfaces.msg import ParameterType, ParameterValue
 from rcl_interfaces.msg import SetParametersResult
-from rcl_interfaces.srv import SetParameters
+from rcl_interfaces.srv import GetParameters, SetParameters
 from rclpy import Parameter
 from rclpy.action import ActionClient, ActionServer, CancelResponse
 from rclpy.callback_groups import (
@@ -80,6 +82,9 @@ from rclpy.qos import (
     ReliabilityPolicy,
 )
 from std_msgs.msg import String
+from tf2_ros import TransformException
+from tf2_ros.buffer import Buffer
+from tf2_ros.transform_listener import TransformListener
 
 from topological_navigation.navigation_graph import (
     ACTION_TO_STATE,
@@ -93,6 +98,15 @@ from topological_navigation.navigation_graph import (
 )
 from topological_navigation.nav_stats_db import NavStatsDB, compute_map_hash
 from topological_navigation.networkx_utils import build_graph_from_tmap
+from topological_navigation.topomap_to_map_image import (
+    FREE_VALUE,
+    OCCUPIED_VALUE,
+    UNKNOWN_VALUE,
+    geometry_from_tmap,
+    rasterize_geometry,
+    rasterize_route_geometry,
+    route_specs_from_edge_data,
+)
 from topological_navigation.tmap_utils import (
     get_edge_from_id_tmap2,
     get_node_from_tmap2,
@@ -133,6 +147,50 @@ class _FloatSafeLoader(yaml.SafeLoader):
             if k in m and isinstance(m[k], int):
                 m[k] = float(m[k])
         return m
+
+
+# =====================================================================
+# ROS 2 parameter value helpers
+# =====================================================================
+
+def _ros_param_value(param_value):
+    """Extract the Python value from a ROS 2 ``ParameterValue``.
+
+    Returns ``None`` when the parameter type is not recognised or when
+    the parameter is unset (``PARAMETER_NOT_SET``).
+    """
+    ptype = param_value.type
+    if ptype == ParameterType.PARAMETER_BOOL:
+        return param_value.bool_value
+    if ptype == ParameterType.PARAMETER_INTEGER:
+        return param_value.integer_value
+    if ptype == ParameterType.PARAMETER_DOUBLE:
+        return param_value.double_value
+    if ptype == ParameterType.PARAMETER_STRING:
+        return param_value.string_value
+    return None
+
+
+def _make_ros_param_value(value):
+    """Build a ROS 2 ``ParameterValue`` from a plain Python value.
+
+    Supported types: ``bool``, ``int``, ``float``, ``str``.
+    Returns an unset ``ParameterValue`` for unsupported types.
+    """
+    pv = ParameterValue()
+    if isinstance(value, bool):
+        pv.type = ParameterType.PARAMETER_BOOL
+        pv.bool_value = value
+    elif isinstance(value, int):
+        pv.type = ParameterType.PARAMETER_INTEGER
+        pv.integer_value = value
+    elif isinstance(value, float):
+        pv.type = ParameterType.PARAMETER_DOUBLE
+        pv.double_value = value
+    elif isinstance(value, str):
+        pv.type = ParameterType.PARAMETER_STRING
+        pv.string_value = value
+    return pv
 
 
 # =====================================================================
@@ -268,6 +326,8 @@ class TopologicalNavServer(rclpy.node.Node):
         # -- Parameters ----------------------------------------------
         self._declare_parameters()
         self._load_parameters()
+        self._tf_buffer = Buffer()
+        self._tf_listener = TransformListener(self._tf_buffer, self)
         # Allow route-planning / boundary parameters to be reconfigured at
         # runtime (ROS 2 Humble: add_on_set_parameters_callback).
         self.add_on_set_parameters_callback(self._parameters_callback)
@@ -311,6 +371,12 @@ class TopologicalNavServer(rclpy.node.Node):
         self._status_pub = self.create_publisher(
             String, "/robot_operation_current_status",
             qos_profile=self._latch,
+        )
+        self._map_pub = self.create_publisher(
+            OccupancyGrid, "/map", qos_profile=self._latch,
+        )
+        self._route_segment_map_pub = self.create_publisher(
+            OccupancyGrid, "/topo_map_route_segment", qos_profile=self._latch,
         )
 
         # -- Map subscription (blocking wait) ------------------------
@@ -383,15 +449,18 @@ class TopologicalNavServer(rclpy.node.Node):
             callback_group=cb_policy,
         )
 
-        # -- Goal checker service client ---------------------------
+        # -- Goal checker service clients --------------------------
         gc_node = self._goal_checker_node
         self._set_params_client = self.create_client(
             SetParameters,
             '/%s/set_parameters' % gc_node,
             callback_group=ReentrantCallbackGroup(),
         )
-        self._last_xy_tol = None
-        self._last_yaw_tol = None
+        self._get_params_client = self.create_client(
+            GetParameters,
+            '/%s/get_parameters' % gc_node,
+            callback_group=ReentrantCallbackGroup(),
+        )
 
         self.get_logger().info(
             "[INIT] Navigation server READY ('%s', algo=%s, weight=%s)"
@@ -406,8 +475,14 @@ class TopologicalNavServer(rclpy.node.Node):
         """Declare all ROS 2 parameters."""
         for name, ptype in [
             ('max_dist_to_closest_edge', Parameter.Type.DOUBLE),
-            ('default_boundary_left', Parameter.Type.DOUBLE),
-            ('default_boundary_right', Parameter.Type.DOUBLE),
+            ('coarse_white_extension_m', Parameter.Type.DOUBLE),
+            ('route_white_extension_m', Parameter.Type.DOUBLE),
+            ('metric_map_resolution', Parameter.Type.DOUBLE),
+            ('route_segment_resolution', Parameter.Type.DOUBLE),
+            ('route_segment_border_width', Parameter.Type.DOUBLE),
+            ('route_segment_padding', Parameter.Type.DOUBLE),
+            ('route_segment_settle_time', Parameter.Type.DOUBLE),
+            ('base_frame', Parameter.Type.STRING),
             # NetworkX path optimisation
             ('route_algorithm', Parameter.Type.STRING),
             ('route_weight_attr', Parameter.Type.STRING),
@@ -431,11 +506,29 @@ class TopologicalNavServer(rclpy.node.Node):
         self._max_dist_to_closest_edge = _p(
             'max_dist_to_closest_edge', Parameter.Type.DOUBLE, 1.0,
         )
-        self._default_boundary_left = _p(
-            'default_boundary_left', Parameter.Type.DOUBLE, 0.5,
+        self._coarse_white_extension_m = _p(
+            'coarse_white_extension_m', Parameter.Type.DOUBLE, 4.0,
         )
-        self._default_boundary_right = _p(
-            'default_boundary_right', Parameter.Type.DOUBLE, 0.5,
+        self._route_white_extension_m = _p(
+            'route_white_extension_m', Parameter.Type.DOUBLE, 2.0,
+        )
+        self._metric_map_resolution = _p(
+            'metric_map_resolution', Parameter.Type.DOUBLE, 1.0,
+        )
+        self._route_segment_resolution = _p(
+            'route_segment_resolution', Parameter.Type.DOUBLE, 0.05,
+        )
+        self._route_segment_border_width = _p(
+            'route_segment_border_width', Parameter.Type.DOUBLE, 0.25,
+        )
+        self._route_segment_padding = _p(
+            'route_segment_padding', Parameter.Type.DOUBLE, 0.0,
+        )
+        self._route_segment_settle_time = _p(
+            'route_segment_settle_time', Parameter.Type.DOUBLE, 0.0,
+        )
+        self._base_frame = _p(
+            'base_frame', Parameter.Type.STRING, 'base_link',
         )
         # 'astar' (with Euclidean heuristic) or 'dijkstra'
         self._route_algorithm = _p(
@@ -532,25 +625,95 @@ class TopologicalNavServer(rclpy.node.Node):
                     )
                 self._max_dist_to_closest_edge = float(p.value)
 
-            elif name == 'default_boundary_left':
+            elif name == 'coarse_white_extension_m':
                 if p.type_ not in (
                     Parameter.Type.DOUBLE, Parameter.Type.INTEGER,
                 ):
                     return SetParametersResult(
                         successful=False,
-                        reason='default_boundary_left must be a number',
+                        reason='coarse_white_extension_m must be a number',
                     )
-                self._default_boundary_left = float(p.value)
+                if float(p.value) < 0.0:
+                    return SetParametersResult(
+                        successful=False,
+                        reason='coarse_white_extension_m must be >= 0',
+                    )
+                self._coarse_white_extension_m = float(p.value)
 
-            elif name == 'default_boundary_right':
+            elif name == 'route_white_extension_m':
                 if p.type_ not in (
                     Parameter.Type.DOUBLE, Parameter.Type.INTEGER,
                 ):
                     return SetParametersResult(
                         successful=False,
-                        reason='default_boundary_right must be a number',
+                        reason='route_white_extension_m must be a number',
                     )
-                self._default_boundary_right = float(p.value)
+                if float(p.value) < 0.0:
+                    return SetParametersResult(
+                        successful=False,
+                        reason='route_white_extension_m must be >= 0',
+                    )
+                self._route_white_extension_m = float(p.value)
+
+            elif name == 'metric_map_resolution':
+                if p.type_ not in (
+                    Parameter.Type.DOUBLE, Parameter.Type.INTEGER,
+                ):
+                    return SetParametersResult(
+                        successful=False,
+                        reason='metric_map_resolution must be a number',
+                    )
+                if float(p.value) <= 0.0:
+                    return SetParametersResult(
+                        successful=False,
+                        reason='metric_map_resolution must be > 0',
+                    )
+                self._metric_map_resolution = float(p.value)
+
+            elif name == 'route_segment_resolution':
+                if p.type_ not in (
+                    Parameter.Type.DOUBLE, Parameter.Type.INTEGER,
+                ):
+                    return SetParametersResult(
+                        successful=False,
+                        reason='route_segment_resolution must be a number',
+                    )
+                if float(p.value) <= 0.0:
+                    return SetParametersResult(
+                        successful=False,
+                        reason='route_segment_resolution must be > 0',
+                    )
+                self._route_segment_resolution = float(p.value)
+
+            elif name == 'route_segment_border_width':
+                if p.type_ not in (
+                    Parameter.Type.DOUBLE, Parameter.Type.INTEGER,
+                ):
+                    return SetParametersResult(
+                        successful=False,
+                        reason='route_segment_border_width must be a number',
+                    )
+                if float(p.value) < 0.0:
+                    return SetParametersResult(
+                        successful=False,
+                        reason='route_segment_border_width must be >= 0',
+                    )
+                self._route_segment_border_width = float(p.value)
+
+            elif name == 'route_segment_padding':
+                if p.type_ not in (
+                    Parameter.Type.DOUBLE, Parameter.Type.INTEGER,
+                ):
+                    return SetParametersResult(
+                        successful=False,
+                        reason='route_segment_padding must be a number',
+                    )
+                if float(p.value) < 0.0:
+                    return SetParametersResult(
+                        successful=False,
+                        reason='route_segment_padding must be >= 0',
+                    )
+                self._route_segment_padding = float(p.value)
 
             else:
                 # Other parameters are start-up only; ignore live changes.
@@ -749,6 +912,7 @@ class TopologicalNavServer(rclpy.node.Node):
             self._map_hash = compute_map_hash(msg.data)
             self._map_received = True
             self._load_map_config()
+            self._publish_topological_metric_map()
 
             # Persist the map to the stats database so that every traversal
             # recorded for this map version has the map available for lookup.
@@ -837,6 +1001,131 @@ class TopologicalNavServer(rclpy.node.Node):
     def _route_pub_cb(self):
         if self._stroute and self._stroute.nodes:
             self._route_pub.publish(self._stroute)
+
+    def _raster_to_occupancy_grid(self, raster, frame_id):
+        """Convert a rasterized map image to an OccupancyGrid message."""
+        msg = OccupancyGrid()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = frame_id
+        msg.info.resolution = float(raster.resolution)
+        msg.info.width = int(raster.image.width)
+        msg.info.height = int(raster.image.height)
+        msg.info.origin.position.x = float(raster.origin[0])
+        msg.info.origin.position.y = float(raster.origin[1])
+        msg.info.origin.position.z = 0.0
+        msg.info.origin.orientation.x = 0.0
+        msg.info.origin.orientation.y = 0.0
+        msg.info.origin.orientation.z = 0.0
+        msg.info.origin.orientation.w = 1.0
+
+        pixels = raster.image.load()
+        width = raster.image.width
+        height = raster.image.height
+        data = []
+
+        # OccupancyGrid data is ordered from map origin (bottom-left).
+        for py in range(height - 1, -1, -1):
+            for px in range(width):
+                value = int(pixels[px, py])
+                if value == UNKNOWN_VALUE:
+                    data.append(-1)
+                elif value == FREE_VALUE:
+                    data.append(0)
+                elif value == OCCUPIED_VALUE:
+                    data.append(100)
+                else:
+                    data.append(-1)
+
+        msg.data = data
+        return msg
+
+    def _publish_topological_metric_map(self):
+        """Publish a coarse metric occupancy map for the full topological map."""
+        if not self._tmap:
+            return
+
+        try:
+            geometry = geometry_from_tmap(self._tmap, apply_transform=True)
+            full_corridor = float(self._coarse_white_extension_m)
+            raster = rasterize_geometry(
+                geometry,
+                white_extension_m=full_corridor,
+                border_width_m=float(self._route_segment_border_width),
+                resolution=float(self._metric_map_resolution),
+                padding_m=full_corridor,
+                include_node_polygons=False,
+            )
+            self._map_pub.publish(
+                self._raster_to_occupancy_grid(raster, geometry.frame_id),
+            )
+            self.get_logger().info(
+                "[MAP] Published /map (%dx%d, %.3f m/px)"
+                % (
+                    raster.image.width,
+                    raster.image.height,
+                    self._metric_map_resolution,
+                ),
+            )
+        except Exception as exc:
+            self.get_logger().error(
+                "[MAP] Failed to publish /map occupancy grid: %s" % exc,
+            )
+
+    def _publish_route_segment_metric_map(self, route_edges):
+        """Publish a fine map whose first corridor starts at the robot."""
+        if not route_edges or not self._tmap:
+            return
+
+        try:
+            geometry = geometry_from_tmap(self._tmap, apply_transform=True)
+            route_start = self._robot_position_in_frame(geometry.frame_id)
+            specs = route_specs_from_edge_data(
+                route_edges,
+                default_left_m=float(self._route_white_extension_m),
+                default_right_m=float(self._route_white_extension_m),
+            )
+            raster = rasterize_route_geometry(
+                geometry,
+                specs,
+                route_start=route_start,
+                border_width_m=float(self._route_segment_border_width),
+                resolution=float(self._route_segment_resolution),
+                padding_m=float(self._route_segment_padding),
+                unknown_value=FREE_VALUE,
+            )
+            self._route_segment_map_pub.publish(
+                self._raster_to_occupancy_grid(raster, geometry.frame_id),
+            )
+            self.get_logger().info(
+                "[MAP] Published /topo_map_route_segment (%dx%d, %.3f m/px)"
+                % (
+                    raster.image.width,
+                    raster.image.height,
+                    self._route_segment_resolution,
+                ),
+            )
+        except Exception as exc:
+            self.get_logger().error(
+                "[MAP] Failed to publish /topo_map_route_segment: %s" % exc,
+            )
+
+    def _robot_position_in_frame(self, frame_id):
+        """Return the latest robot x/y position in ``frame_id`` from TF."""
+        try:
+            transform = self._tf_buffer.lookup_transform(
+                frame_id,
+                self._base_frame,
+                rclpy.time.Time(),
+            )
+        except (TransformException, AttributeError) as exc:
+            self.get_logger().warning(
+                "[MAP] Robot pose unavailable in '%s'; route segment will "
+                "start at its source node: %s" % (frame_id, exc),
+            )
+            return None
+
+        translation = transform.transform.translation
+        return float(translation.x), float(translation.y)
 
     # =================================================================
     # Status publishers
@@ -1076,90 +1365,202 @@ class TopologicalNavServer(rclpy.node.Node):
         return ps
 
     # =================================================================
-    # Nav2 goal tolerances
+    # Segment parameter management (save / apply / restore)
     # =================================================================
 
-    def _set_goal_tolerances(self, node_name):
-        """Set Nav2 goal checker tolerances from node properties.
+    def _get_ros_params_sync(self, names):
+        """Synchronously query ROS 2 parameters from the goal-checker node.
 
-        Reads ``xy_goal_tolerance`` and ``yaw_goal_tolerance`` from
-        the target node's properties and sets them on the Nav2
-        controller_server via the ``SetParameters`` service.
+        Polls the ``GetParameters`` service until the future resolves
+        or a 2-second deadline elapses.  Returns a ``{name: value}``
+        dict for every successfully retrieved parameter; parameters
+        whose value could not be decoded (e.g. ``PARAMETER_NOT_SET``)
+        are omitted.
 
-        This is best-effort: if the service is unavailable the
-        goal proceeds with the previously configured tolerances.
+        Args:
+            names: List of ROS 2 parameter names to query.
+
+        Returns:
+            Dict mapping parameter name to its current Python value.
         """
-        if node_name not in self._graph:
+        if not names:
+            return {}
+        if not self._get_params_client.service_is_ready():
+            self.get_logger().debug(
+                "[PARAM] GetParameters service not available",
+            )
+            return {}
+
+        req = GetParameters.Request()
+        req.names = list(names)
+        future = self._get_params_client.call_async(req)
+
+        deadline = time.time() + 2.0
+        while rclpy.ok() and not future.done() and time.time() < deadline:
+            time.sleep(0.05)
+
+        if not future.done():
+            self.get_logger().warning(
+                "[PARAM] GetParameters timed out for: %s" % names,
+            )
+            return {}
+
+        try:
+            result = future.result()
+        except Exception as exc:
+            self.get_logger().debug(
+                "[PARAM] GetParameters failed: %s" % exc,
+            )
+            return {}
+
+        out = {}
+        for name, pv in zip(names, result.values):
+            val = _ros_param_value(pv)
+            if val is not None:
+                out[name] = val
+        return out
+
+    def _set_ros_params_async(self, params_dict):
+        """Send a ``SetParameters`` request (fire-and-forget).
+
+        Args:
+            params_dict: ``{ros_param_name: python_value}`` mapping.
+        """
+        if not params_dict:
             return
-
-        props = self._graph.nodes[node_name].get('properties', {})
-        xy_tol = props.get('xy_goal_tolerance')
-        yaw_tol = props.get('yaw_goal_tolerance')
-
-        if xy_tol is None and yaw_tol is None:
-            return
-
-        # Skip if unchanged from last set
-        if xy_tol == self._last_xy_tol and yaw_tol == self._last_yaw_tol:
+        if not self._set_params_client.service_is_ready():
+            self.get_logger().debug(
+                "[PARAM] SetParameters service not available, skipping",
+            )
             return
 
         params = []
-        if xy_tol is not None:
+        for name, value in params_dict.items():
             p = RclParameter()
-            p.name = self._xy_tolerance_param
-            p.value = ParameterValue(
-                type=ParameterType.PARAMETER_DOUBLE,
-                double_value=float(xy_tol),
-            )
+            p.name = name
+            p.value = _make_ros_param_value(value)
             params.append(p)
-
-        if yaw_tol is not None:
-            p = RclParameter()
-            p.name = self._yaw_tolerance_param
-            p.value = ParameterValue(
-                type=ParameterType.PARAMETER_DOUBLE,
-                double_value=float(yaw_tol),
-            )
-            params.append(p)
-
-        if not self._set_params_client.service_is_ready():
-            self.get_logger().debug(
-                "[TOL] SetParameters service not available, skipping",
-            )
-            return
 
         req = SetParameters.Request()
         req.parameters = params
         future = self._set_params_client.call_async(req)
-        future.add_done_callback(self._tolerance_set_cb)
+        future.add_done_callback(self._set_params_cb)
 
-        self._last_xy_tol = xy_tol
-        self._last_yaw_tol = yaw_tol
-
-        self.get_logger().info(
-            "[TOL] Setting tolerances for '%s': xy=%.3f yaw=%.3f"
-            % (
-                node_name,
-                float(xy_tol) if xy_tol is not None else -1,
-                float(yaw_tol) if yaw_tol is not None else -1,
-            ),
-        )
-
-    def _tolerance_set_cb(self, future):
-        """Log result of tolerance parameter update."""
+    def _set_params_cb(self, future):
+        """Log the result of an async ``SetParameters`` call."""
         try:
             result = future.result()
-            failed = [
-                r for r in result.results if not r.successful
-            ]
+            failed = [r for r in result.results if not r.successful]
             if failed:
                 self.get_logger().warning(
-                    "[TOL] Some parameters failed to set",
+                    "[PARAM] %d parameter(s) failed to set" % len(failed),
                 )
         except Exception as exc:
             self.get_logger().debug(
-                "[TOL] SetParameters call failed: %s" % exc,
+                "[PARAM] SetParameters call failed: %s" % exc,
             )
+
+    def _apply_segment_parameters(self, segment):
+        """Apply ROS 2 parameters for a segment and save previous values.
+
+        Called at segment entrance.  For each parameter that will be
+        changed:
+
+        1. The current value is queried via ``GetParameters``.
+        2. The new value (derived from the segment) is sent via
+           ``SetParameters``.
+
+        The returned dict maps parameter name to the value that was in
+        place *before* this call; pass it to
+        :meth:`_restore_segment_parameters` after the segment
+        completes to undo the changes.
+
+        **Parameter sources**
+
+        - *Node-level goal tolerances* – ``xy_goal_tolerance`` and
+          ``yaw_goal_tolerance`` from the target node's properties.
+        - *Edge-level parameters* – any entry in the segment's edge
+          ``properties`` that is listed under ``ros_parameters`` in
+          the action's map configuration.  The ``ros_parameters`` dict
+          maps edge property name to the corresponding ROS 2 parameter
+          name on the goal-checker node::
+
+              actions:
+                row_traversal:
+                  ros_parameters:
+                    max_speed: FollowPath.max_robot_speed
+
+        All operations are best-effort; if the parameter service is
+        unavailable the segment still executes with the currently
+        configured values.
+
+        Args:
+            segment: The :class:`ActionSegment` about to be executed.
+
+        Returns:
+            ``{ros_param_name: previous_value}`` dict (may be empty).
+        """
+        params_to_set = {}
+
+        # -- Node-level goal tolerances --------------------------------
+        target_node = segment.last_target
+        if target_node and target_node in self._graph:
+            node_props = self._graph.nodes[target_node].get('properties', {})
+            xy_tol = node_props.get('xy_goal_tolerance')
+            yaw_tol = node_props.get('yaw_goal_tolerance')
+            if xy_tol is not None:
+                params_to_set[self._xy_tolerance_param] = float(xy_tol)
+            if yaw_tol is not None:
+                params_to_set[self._yaw_tolerance_param] = float(yaw_tol)
+
+        # -- Edge-level parameters from the action's ros_parameters ----
+        action = segment.action_type
+        info = self._action_clients.get(action) or {}
+        ros_param_mapping = (info.get('config') or {}).get(
+            'ros_parameters', {},
+        )
+        edge_props = segment.parameters  # consistent across segment
+        for prop_name, ros_param_name in ros_param_mapping.items():
+            if prop_name in edge_props:
+                params_to_set[ros_param_name] = edge_props[prop_name]
+
+        if not params_to_set:
+            return {}
+
+        # Query current values before making any changes
+        prev_values = self._get_ros_params_sync(list(params_to_set.keys()))
+
+        # Apply the new values
+        self._set_ros_params_async(params_to_set)
+
+        if params_to_set:
+            self.get_logger().info(
+                "[PARAM] Segment '%s': setting %s"
+                % (action, list(params_to_set.keys())),
+            )
+
+        return prev_values
+
+    def _restore_segment_parameters(self, prev_values):
+        """Restore ROS 2 parameters to the values saved before a segment.
+
+        Called after a segment completes (whether it succeeded, failed,
+        or was cancelled/aborted).  Sends a ``SetParameters`` request
+        (fire-and-forget) to put the affected parameters back to the
+        values that were recorded by :meth:`_apply_segment_parameters`.
+
+        Args:
+            prev_values: ``{ros_param_name: previous_value}`` dict as
+                returned by :meth:`_apply_segment_parameters`.  An
+                empty dict is a no-op.
+        """
+        if not prev_values:
+            return
+        self.get_logger().info(
+            "[PARAM] Restoring %d parameter(s) to pre-segment values"
+            % len(prev_values),
+        )
+        self._set_ros_params_async(prev_values)
 
     # =================================================================
     # Goal construction (map-driven)
@@ -1548,6 +1949,10 @@ class TopologicalNavServer(rclpy.node.Node):
             goal_handle, route_nodes[0], GoalStatus.STATUS_EXECUTING,
         )
         self._publish_route(route_nodes)
+        self._publish_route_segment_metric_map(
+            get_route_edges(self._graph, route_nodes),
+        )
+        self._wait_for_route_segment_costmap()
         success = self._execute_route(route_nodes, target)
 
         self._navigation_activated = False
@@ -1636,6 +2041,10 @@ class TopologicalNavServer(rclpy.node.Node):
             % (" -> ".join(route_nodes), len(route_nodes)),
         )
         self._publish_route(route_nodes)
+        self._publish_route_segment_metric_map(
+            get_route_edges(self._graph, route_nodes),
+        )
+        self._wait_for_route_segment_costmap()
         success = self._execute_route(route_nodes, target)
 
         # If the map was updated mid-execution, replan from scratch.
@@ -1650,6 +2059,22 @@ class TopologicalNavServer(rclpy.node.Node):
             self._sm.transition(NavState.FAILED)
             self._publish_status("FAILED")
         return success
+
+    def _wait_for_route_segment_costmap(self):
+        """Allow Nav2's static layer to ingest the newly published corridor."""
+        # Some tests and downstream users construct the server with __new__
+        # for isolated route execution. Preserve the zero-delay legacy
+        # behaviour when __init__ has not populated the parameter yet.
+        delay = max(
+            0.0,
+            float(getattr(self, "_route_segment_settle_time", 0.0)),
+        )
+        if delay <= 0.0:
+            return
+        self.get_logger().info(
+            "[MAP] Waiting %.2f s for global costmap route update" % delay,
+        )
+        time.sleep(delay)
 
     def _determine_origin(self, target):
         """Best origin: current_node > closest-edge > closest_node."""
@@ -1909,8 +2334,11 @@ class TopologicalNavServer(rclpy.node.Node):
             segment.edge_ids[0] if segment.edge_ids else "none",
         )
 
-        # Set Nav2 goal checker tolerances from target node properties
-        self._set_goal_tolerances(segment.last_target)
+        # Apply segment parameters (query current values, set new ones).
+        # Parameters are restored unconditionally in the finally block
+        # so that changes are undone whether the segment succeeds,
+        # fails, or is cancelled/aborted.
+        prev_params = self._apply_segment_parameters(segment)
 
         self.get_logger().info(
             "  Sending %d-wp %s goal" % (segment.num_edges, action),
@@ -1935,7 +2363,12 @@ class TopologicalNavServer(rclpy.node.Node):
 
         info = self._action_clients.get(action)
         client = info['client'] if info else None
-        status = self._send_nav2_goal(goal, action_client=client)
+        try:
+            status = self._send_nav2_goal(goal, action_client=client)
+        finally:
+            # Restore parameters regardless of outcome (success, failure,
+            # cancellation, or exception).
+            self._restore_segment_parameters(prev_params)
 
         self._publish_move_status(
             segment.last_target or "?", action, _status_str(status),
@@ -1997,8 +2430,8 @@ class TopologicalNavServer(rclpy.node.Node):
         frame_id = self._node_nav_frame(segment.first_source)
         poly = compute_boundary_polygon(
             self._graph, segment,
-            default_left=self._default_boundary_left,
-            default_right=self._default_boundary_right,
+            default_left=self._route_white_extension_m,
+            default_right=self._route_white_extension_m,
         )
         if poly:
             self._publish_boundary(poly, frame_id)

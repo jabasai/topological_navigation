@@ -64,6 +64,16 @@ class RasterResult:
     resolution: float
 
 
+@dataclass(frozen=True)
+class RouteEdgeSpec:
+    """Route edge geometry and corridor widths for rasterization."""
+
+    source: str
+    target: str
+    left_m: float
+    right_m: float
+
+
 def _as_float(value, field_name: str) -> float:
     try:
         return float(value)
@@ -195,6 +205,76 @@ def _all_geometry_points(
         yield geometry.nodes[target].point
 
 
+def _route_quad_points(
+    start: Point,
+    end: Point,
+    left_m: float,
+    right_m: float,
+) -> Tuple[Point, Point, Point, Point]:
+    """Build an oriented corridor quad around one directed route edge."""
+
+    dx = end[0] - start[0]
+    dy = end[1] - start[1]
+    seg_len = math.hypot(dx, dy)
+    if seg_len <= 1e-9:
+        raise ValueError("Route edge has zero length")
+
+    # Left normal for edge direction (start -> end).
+    nx = -dy / seg_len
+    ny = dx / seg_len
+
+    start_left = (start[0] + (nx * left_m), start[1] + (ny * left_m))
+    end_left = (end[0] + (nx * left_m), end[1] + (ny * left_m))
+    end_right = (end[0] - (nx * right_m), end[1] - (ny * right_m))
+    start_right = (start[0] - (nx * right_m), start[1] - (ny * right_m))
+    return (start_left, end_left, end_right, start_right)
+
+
+def _edge_width(value: object, default_value: float) -> float:
+    if value is None:
+        return default_value
+    width = _as_float(value, "boundary width")
+    if width < 0.0:
+        raise ValueError("Boundary widths must be >= 0")
+    return width
+
+
+def route_specs_from_edge_data(
+    route_edges: Sequence[dict],
+    default_left_m: float,
+    default_right_m: float,
+) -> Tuple[RouteEdgeSpec, ...]:
+    """Build route edge specs from route edge dictionaries.
+
+    Each route edge may optionally contain ``properties.boundary_left`` and
+    ``properties.boundary_right``. Missing values fall back to defaults.
+    """
+
+    if default_left_m < 0.0 or default_right_m < 0.0:
+        raise ValueError("Default boundary widths must be >= 0")
+
+    specs: List[RouteEdgeSpec] = []
+    for edge in route_edges:
+        source = edge.get("source")
+        target = edge.get("target")
+        if not source or not target:
+            continue
+
+        props = edge.get("properties", {}) or {}
+        left_m = _edge_width(props.get("boundary_left"), default_left_m)
+        right_m = _edge_width(props.get("boundary_right"), default_right_m)
+        specs.append(
+            RouteEdgeSpec(
+                source=str(source),
+                target=str(target),
+                left_m=left_m,
+                right_m=right_m,
+            )
+        )
+
+    return tuple(specs)
+
+
 def _draw_line_with_round_caps(
     draw: ImageDraw.ImageDraw,
     start: Tuple[int, int],
@@ -302,6 +382,138 @@ def rasterize_geometry(
             white_radius_px,
             free_value,
         )
+
+    return RasterResult(image=image, origin=(min_x, min_y), resolution=resolution)
+
+
+def rasterize_route_geometry(
+    geometry: MapGeometry,
+    route_edges: Sequence[RouteEdgeSpec],
+    border_width_m: float = 0.25,
+    resolution: float = 0.05,
+    padding_m: float = 0.0,
+    unknown_value: int = UNKNOWN_VALUE,
+    occupied_value: int = OCCUPIED_VALUE,
+    free_value: int = FREE_VALUE,
+    route_start: Optional[Point] = None,
+) -> RasterResult:
+    """Rasterize route edges with per-edge widths.
+
+    When ``route_start`` is supplied, it replaces the source-node position of
+    the first valid edge. This lets a live route corridor start at the robot's
+    current position while subsequent edges remain anchored to topological
+    nodes.
+    """
+
+    if border_width_m < 0.0:
+        raise ValueError("border_width_m must be >= 0")
+    if resolution <= 0.0:
+        raise ValueError("resolution must be > 0")
+    if padding_m < 0.0:
+        raise ValueError("padding_m must be >= 0")
+
+    for name, value in (
+        ("unknown_value", unknown_value),
+        ("occupied_value", occupied_value),
+        ("free_value", free_value),
+    ):
+        if value < 0 or value > 255:
+            raise ValueError(f"{name} must be in the range [0, 255]")
+
+    valid_edges: List[Tuple[RouteEdgeSpec, Point, Point]] = []
+    bounds_points: List[Point] = []
+
+    for edge in route_edges:
+        if edge.source not in geometry.nodes or edge.target not in geometry.nodes:
+            continue
+        if edge.left_m < 0.0 or edge.right_m < 0.0:
+            raise ValueError("Boundary widths must be >= 0")
+
+        start = (
+            route_start
+            if route_start is not None and not valid_edges
+            else geometry.nodes[edge.source].point
+        )
+        end = geometry.nodes[edge.target].point
+        try:
+            quad = _route_quad_points(start, end, edge.left_m, edge.right_m)
+        except ValueError:
+            continue
+
+        valid_edges.append((edge, start, end))
+        bounds_points.extend(quad)
+        radius = max(edge.left_m, edge.right_m) + border_width_m
+        bounds_points.extend(
+            [
+                (start[0] - radius, start[1] - radius),
+                (start[0] + radius, start[1] + radius),
+                (end[0] - radius, end[1] - radius),
+                (end[0] + radius, end[1] + radius),
+            ]
+        )
+
+    if not valid_edges or not bounds_points:
+        raise ValueError("No valid route edges to rasterize")
+
+    min_x = min(p[0] for p in bounds_points) - padding_m
+    max_x = max(p[0] for p in bounds_points) + padding_m
+    min_y = min(p[1] for p in bounds_points) - padding_m
+    max_y = max(p[1] for p in bounds_points) + padding_m
+
+    width = max(1, int(math.ceil((max_x - min_x) / resolution)) + 1)
+    height = max(1, int(math.ceil((max_y - min_y) / resolution)) + 1)
+    image_top_y = min_y + ((height - 1) * resolution)
+
+    def world_to_pixel(point: Point) -> Tuple[int, int]:
+        px = int(round((point[0] - min_x) / resolution))
+        py = int(round((image_top_y - point[1]) / resolution))
+        return px, py
+
+    image = Image.new("L", (width, height), unknown_value)
+    draw = ImageDraw.Draw(image)
+
+    # Draw occupied corridor border first.
+    for edge, start, end in valid_edges:
+        border_quad = _route_quad_points(
+            start,
+            end,
+            edge.left_m + border_width_m,
+            edge.right_m + border_width_m,
+        )
+        draw.polygon([world_to_pixel(p) for p in border_quad], fill=occupied_value)
+        border_radius_px = int(
+            math.ceil((max(edge.left_m, edge.right_m) + border_width_m) / resolution)
+        )
+        if border_radius_px > 0:
+            for point in (start, end):
+                cx, cy = world_to_pixel(point)
+                draw.ellipse(
+                    [
+                        cx - border_radius_px,
+                        cy - border_radius_px,
+                        cx + border_radius_px,
+                        cy + border_radius_px,
+                    ],
+                    fill=occupied_value,
+                )
+
+    # Draw free-space corridor inside border.
+    for edge, start, end in valid_edges:
+        free_quad = _route_quad_points(start, end, edge.left_m, edge.right_m)
+        draw.polygon([world_to_pixel(p) for p in free_quad], fill=free_value)
+        free_radius_px = int(math.ceil(max(edge.left_m, edge.right_m) / resolution))
+        if free_radius_px > 0:
+            for point in (start, end):
+                cx, cy = world_to_pixel(point)
+                draw.ellipse(
+                    [
+                        cx - free_radius_px,
+                        cy - free_radius_px,
+                        cx + free_radius_px,
+                        cy + free_radius_px,
+                    ],
+                    fill=free_value,
+                )
 
     return RasterResult(image=image, origin=(min_x, min_y), resolution=resolution)
 
