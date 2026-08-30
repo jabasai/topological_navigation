@@ -37,6 +37,10 @@ ros2 run topological_navigation map_analyser.py analyse my_map.tmap2.yaml --svg 
 # CI-friendly validity check (exit code reflects the result)
 ros2 run topological_navigation map_analyser.py check my_map.tmap2.yaml
 
+# Treat disconnected sub-maps as an error, and skip the influence-zone check
+ros2 run topological_navigation map_analyser.py check my_map.tmap2.yaml \
+  --sub-map-separation=error --influence-zone-overlap=false
+
 # SVG rendering only
 ros2 run topological_navigation map_analyser.py svg my_map.tmap2.yaml -o my_map.svg
 ```
@@ -45,6 +49,34 @@ The script can also be run directly without a ROS 2 environment:
 
 ```bash
 python3 topological_navigation/topological_navigation/map_analyser.py check my_map.tmap2.yaml
+```
+
+## Configuring check severities
+
+Each of the four checks can be independently turned off, or have its
+severity set to `warning` or `error`, via a `--<check>={false,warning,error}`
+switch on the `analyse`/`check` subcommands:
+
+| Switch | Check | Default severity |
+|--------|-------|-------------------|
+| `--schema-check` | Schema compliance | `error` |
+| `--orphaned-node` | Orphaned nodes | `error` |
+| `--sub-map-separation` | Disconnected sub-maps | `warning` |
+| `--influence-zone-overlap` | Overlapping influence zones | `warning` |
+
+* `false` (also accepted: `off`, `disable`, `disabled`, `none`) disables
+  the check entirely: it is neither run nor printed in the report.
+* `warning` runs the check and prints its result, but a failure does not
+  affect the `check` command's exit code.
+* `error` (also accepted: `true`, `on`) runs the check and a failure
+  causes `check` to exit with code `1`.
+
+Example: fail CI only on schema errors and orphaned nodes, ignore
+disconnected sub-maps and influence zone overlaps entirely:
+
+```bash
+map_analyser.py check my_map.tmap2.yaml \
+  --sub-map-separation=false --influence-zone-overlap=false
 ```
 
 ## `check` command exit codes
@@ -57,7 +89,7 @@ The `check` command is designed for use in a GitHub Actions workflow:
 | `1` | Map is invalid |
 | `2` | Map file not found, or another error occurred while loading it |
 
-A map is considered **valid** if:
+With the default severities, a map is considered **valid** if:
 
 1. It is compliant with the JSON schema.
 2. It has no orphaned nodes (nodes unreachable via any incoming edge).

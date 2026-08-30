@@ -26,6 +26,13 @@ Usage::
     python3 map_analyser.py check map.tmap2.yaml
     python3 map_analyser.py svg map.tmap2.yaml -o out.svg
 
+Each check can be individually turned off or have its severity changed
+between "warning" (printed, exit code unaffected) and "error" (printed,
+exit code 1) via ``--<check>={false,warning,error}`` switches, e.g.
+``--sub-map-separation=error`` or ``--influence-zone-overlap=false``.
+Defaults: schema/orphaned-node = error, sub-map-separation/
+influence-zone-overlap = warning.
+
 Exit codes for the ``check`` command:
     0 - Map is valid
     1 - Map is invalid
@@ -54,6 +61,32 @@ from topological_navigation.validate_map import validate_map
 
 
 Point = Tuple[float, float]
+
+# Identifiers for the individual "check" tests, and the severity each one
+# is treated with by default when computing overall map validity:
+#   "error"   - a failure makes the map INVALID (non-zero exit code)
+#   "warning" - a failure is printed but does not affect validity/exit code
+#   None      - the check is disabled entirely (not run, not printed)
+DEFAULT_CHECK_SEVERITY: Dict[str, Optional[str]] = {
+    "schema": "error",
+    "orphaned-node": "error",
+    "sub-map-separation": "warning",
+    "influence-zone-overlap": "warning",
+}
+
+
+def _parse_severity(value: str) -> Optional[str]:
+    """Parse a ``--<check>=<value>`` CLI value into a check severity."""
+    normalised = str(value).strip().lower()
+    if normalised in ("false", "off", "disable", "disabled", "none"):
+        return None
+    if normalised in ("warning", "warn"):
+        return "warning"
+    if normalised in ("error", "true", "on"):
+        return "error"
+    raise argparse.ArgumentTypeError(
+        f"invalid severity {value!r} (expected one of: false, warning, error)"
+    )
 
 # Deterministic, high-contrast colour palette used to colour-code edges by
 # their action name.  Falls back to a hash-based colour for unknown actions
@@ -458,16 +491,35 @@ class AnalysisResult:
     statistics: Dict[str, Any] = field(default_factory=dict)
     overlaps: List[Dict[str, Any]] = field(default_factory=list)
     svg_path: Optional[str] = None
+    check_severities: Dict[str, Optional[str]] = field(
+        default_factory=lambda: dict(DEFAULT_CHECK_SEVERITY)
+    )
+
+    def _status_label(self, check_id: str, failed: bool) -> str:
+        """Return PASS/WARNING/FAIL/SKIPPED for *check_id* given its severity."""
+        severity = self.check_severities.get(check_id, DEFAULT_CHECK_SEVERITY.get(check_id))
+        if severity is None:
+            return "SKIPPED"
+        if not failed:
+            return "PASS"
+        return "FAIL" if severity == "error" else "WARNING"
 
     @property
     def is_valid(self) -> bool:
-        """A map is valid if it is schema-compliant, has no orphaned nodes,
-        and has no overlapping influence zones. Disconnected sub-maps are
-        acceptable and only reported as a warning."""
-        return (
-            self.schema_valid
-            and not self.orphaned_nodes
-            and not self.overlaps
+        """A map is valid unless a check whose severity is "error" failed.
+
+        Checks whose severity is "warning" are reported but do not affect
+        validity; checks whose severity is ``None`` are disabled entirely.
+        """
+        failures = {
+            "schema": not self.schema_valid,
+            "orphaned-node": bool(self.orphaned_nodes),
+            "sub-map-separation": len(self.disconnected_components) > 1,
+            "influence-zone-overlap": bool(self.overlaps),
+        }
+        return not any(
+            failed and self.check_severities.get(check_id) == "error"
+            for check_id, failed in failures.items()
         )
 
     def format_report(self) -> str:
@@ -476,37 +528,51 @@ class AnalysisResult:
 
         lines.append("")
         lines.append("[Schema validation]")
-        lines.append(("  PASS" if self.schema_valid else "  FAIL") + f": {self.schema_message}")
+        label = self._status_label("schema", not self.schema_valid)
+        if label == "SKIPPED":
+            lines.append("  SKIPPED: check disabled")
+        else:
+            lines.append(f"  {label}: {self.schema_message}")
 
         lines.append("")
         lines.append("[Orphaned nodes]")
-        if self.orphaned_nodes:
-            lines.append(f"  FAIL: {len(self.orphaned_nodes)} orphaned node(s) found:")
+        label = self._status_label("orphaned-node", bool(self.orphaned_nodes))
+        if label == "SKIPPED":
+            lines.append("  SKIPPED: check disabled")
+        elif self.orphaned_nodes:
+            lines.append(f"  {label}: {len(self.orphaned_nodes)} orphaned node(s) found:")
             for n in self.orphaned_nodes:
                 lines.append(f"    - {n}")
         else:
-            lines.append("  PASS: No orphaned nodes found")
+            lines.append(f"  {label}: No orphaned nodes found")
 
         lines.append("")
         lines.append("[Disconnected sub-maps]")
-        if len(self.disconnected_components) > 1:
+        submaps_failed = len(self.disconnected_components) > 1
+        label = self._status_label("sub-map-separation", submaps_failed)
+        if label == "SKIPPED":
+            lines.append("  SKIPPED: check disabled")
+        elif submaps_failed:
             lines.append(
-                f"  WARNING: {len(self.disconnected_components)} disconnected "
+                f"  {label}: {len(self.disconnected_components)} disconnected "
                 "sub-map(s) found:"
             )
             for i, comp in enumerate(self.disconnected_components, start=1):
                 lines.append(f"    - sub-map {i}: {sorted(comp)}")
         else:
-            lines.append("  PASS: Map is fully connected")
+            lines.append(f"  {label}: Map is fully connected")
 
         lines.append("")
         lines.append("[Overlapping influence zones]")
-        if self.overlaps:
-            lines.append(f"  FAIL: {len(self.overlaps)} overlap(s) found:")
+        label = self._status_label("influence-zone-overlap", bool(self.overlaps))
+        if label == "SKIPPED":
+            lines.append("  SKIPPED: check disabled")
+        elif self.overlaps:
+            lines.append(f"  {label}: {len(self.overlaps)} overlap(s) found:")
             for o in self.overlaps:
                 lines.append(f"    - {o['node_a']} <-> {o['node_b']}: {o['reason']}")
         else:
-            lines.append("  PASS: No overlapping influence zones found")
+            lines.append(f"  {label}: No overlapping influence zones found")
 
         lines.append("")
         lines.append("[Statistics]")
@@ -532,9 +598,22 @@ def analyse_map(
     map_file: str,
     schema_file: Optional[str] = None,
     svg_path: Optional[str] = None,
+    check_severities: Optional[Dict[str, Optional[str]]] = None,
 ) -> AnalysisResult:
-    """Run the full map analysis pipeline and return an :class:`AnalysisResult`."""
-    is_valid, message = validate_map(map_file, schema_file)
+    """Run the full map analysis pipeline and return an :class:`AnalysisResult`.
+
+    *check_severities* optionally overrides the default severity (see
+    :data:`DEFAULT_CHECK_SEVERITY`) for each check; a severity of ``None``
+    disables that check so it is neither run nor reported.
+    """
+    severities = dict(DEFAULT_CHECK_SEVERITY)
+    if check_severities:
+        severities.update(check_severities)
+
+    if severities["schema"] is not None:
+        is_valid, message = validate_map(map_file, schema_file)
+    else:
+        is_valid, message = True, "Skipped (check disabled)"
 
     tmap_data = load_tmap2_file(map_file)
     graph = build_graph_from_tmap(tmap_data)
@@ -548,16 +627,26 @@ def analyse_map(
             disconnected_components=[],
             statistics={},
             overlaps=[],
+            check_severities=severities,
         )
 
     result = AnalysisResult(
         map_file=map_file,
         schema_valid=is_valid,
         schema_message=message,
-        orphaned_nodes=find_orphaned_nodes(graph),
-        disconnected_components=find_disconnected_components(graph),
+        orphaned_nodes=find_orphaned_nodes(graph) if severities["orphaned-node"] is not None else [],
+        disconnected_components=(
+            find_disconnected_components(graph)
+            if severities["sub-map-separation"] is not None
+            else []
+        ),
         statistics=compute_statistics(graph),
-        overlaps=find_overlapping_influence_zones(graph),
+        overlaps=(
+            find_overlapping_influence_zones(graph)
+            if severities["influence-zone-overlap"] is not None
+            else []
+        ),
+        check_severities=severities,
     )
 
     if svg_path:
@@ -576,6 +665,42 @@ def _add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--schema", "-s", help="Path to the schema YAML file (optional)")
 
 
+def _add_check_severity_args(parser: argparse.ArgumentParser) -> None:
+    """Add per-check ``{false,warning,error}`` severity override switches."""
+    parser.add_argument(
+        "--schema-check",
+        dest="severity_schema",
+        type=_parse_severity,
+        default=DEFAULT_CHECK_SEVERITY["schema"],
+        metavar="{false,warning,error}",
+        help="Severity of schema validation failures (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--orphaned-node",
+        dest="severity_orphaned_node",
+        type=_parse_severity,
+        default=DEFAULT_CHECK_SEVERITY["orphaned-node"],
+        metavar="{false,warning,error}",
+        help="Severity of orphaned nodes (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--sub-map-separation",
+        dest="severity_sub_map_separation",
+        type=_parse_severity,
+        default=DEFAULT_CHECK_SEVERITY["sub-map-separation"],
+        metavar="{false,warning,error}",
+        help="Severity of disconnected sub-maps (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--influence-zone-overlap",
+        dest="severity_influence_zone_overlap",
+        type=_parse_severity,
+        default=DEFAULT_CHECK_SEVERITY["influence-zone-overlap"],
+        metavar="{false,warning,error}",
+        help="Severity of overlapping influence zones (default: %(default)s)",
+    )
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Analyse topological map (.tmap2.yaml) files.",
@@ -585,6 +710,8 @@ Examples:
   %(prog)s analyse my_map.tmap2.yaml
   %(prog)s analyse my_map.tmap2.yaml --svg my_map.svg
   %(prog)s check my_map.tmap2.yaml
+  %(prog)s check my_map.tmap2.yaml --sub-map-separation=error
+  %(prog)s check my_map.tmap2.yaml --influence-zone-overlap=false
   %(prog)s svg my_map.tmap2.yaml -o my_map.svg
         """,
     )
@@ -594,6 +721,7 @@ Examples:
         "analyse", aliases=["analyze"], help="Run full analysis and print a report"
     )
     _add_common_args(analyse_parser)
+    _add_check_severity_args(analyse_parser)
     analyse_parser.add_argument("--svg", help="Also generate an SVG rendering of the map")
 
     check_parser = subparsers.add_parser(
@@ -601,6 +729,7 @@ Examples:
         help="Check map validity; exit code reflects the result (for CI use)",
     )
     _add_common_args(check_parser)
+    _add_check_severity_args(check_parser)
     check_parser.add_argument("--svg", help="Also generate an SVG rendering of the map")
 
     svg_parser = subparsers.add_parser("svg", help="Generate an SVG rendering of the map")
@@ -620,8 +749,19 @@ def main(argv: Optional[List[str]] = None) -> None:
 
     svg_path = getattr(args, "svg", None) or getattr(args, "output", None)
 
+    check_severities = None
+    if hasattr(args, "severity_schema"):
+        check_severities = {
+            "schema": args.severity_schema,
+            "orphaned-node": args.severity_orphaned_node,
+            "sub-map-separation": args.severity_sub_map_separation,
+            "influence-zone-overlap": args.severity_influence_zone_overlap,
+        }
+
     try:
-        result = analyse_map(args.map_file, args.schema, svg_path=svg_path)
+        result = analyse_map(
+            args.map_file, args.schema, svg_path=svg_path, check_severities=check_severities
+        )
     except Exception as exc:  # noqa: BLE001 - report any load/parsing error to the user
         print(f"Error analysing map: {exc}")
         sys.exit(2)
