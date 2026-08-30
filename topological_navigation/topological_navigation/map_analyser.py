@@ -22,7 +22,8 @@ by collapsing repeated node/edge sub-structures (e.g. shared
 anchors, and/or by dropping nodes/edges unreachable from a given node.
 
 This tool has no ROS 2 runtime dependency: it only needs ``pyyaml``,
-``jsonschema`` and ``networkx`` and can therefore be used in CI (e.g. a
+``jsonschema`` and ``networkx`` (plus ``numpy`` and ``scipy`` via
+:mod:`topological_navigation.networkx_utils`) and can therefore be used in CI (e.g. a
 GitHub Actions workflow) without a ROS 2 environment.
 
 Usage::

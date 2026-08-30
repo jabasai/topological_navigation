@@ -113,8 +113,8 @@ auto-generated ids, so the minified file stays human-readable.
 | `--anchors` / `--no-anchors` | Collapse repeated subtrees into named anchors | enabled |
 | `--strip-comments` | Drop the file's leading comment block | disabled (comments kept) |
 | `--flowstyle` | Emit compact flow-style YAML instead of block style | disabled |
-| `--min-size N` | Minimum serialised size (chars) of a subtree to qualify for anchoring | `40` |
-| `--min-occurrences N` | Minimum number of repeats required for a subtree to qualify for anchoring | `3` |
+| `--min-size N` | Minimum serialised size (chars) of a subtree to qualify for anchoring | `100` |
+| `--min-occurrences N` | Minimum number of repeats required for a subtree to qualify for anchoring | `5` |
 | `--strip-unreachable NODE` | Also drop nodes/edges not reachable via a directed path from `NODE` | disabled |
 
 Notes:
@@ -127,9 +127,7 @@ Notes:
   the result has no orphaned nodes (other than possibly `NODE` itself,
   if nothing points back to it) and is a single connected sub-map, so
   it always passes the `orphaned-node` and `sub-map-separation` checks.
-* The tool re-parses its own output and schema-validates it before
-  writing the file, to catch any minification bug before it reaches
-  disk; it logs a summary of the size savings achieved.
+* The tool re-parses its own output and schema-validates the written file, to catch any minification bug; it logs a summary of the size savings achieved.
 
 ## `check` command exit codes
 
