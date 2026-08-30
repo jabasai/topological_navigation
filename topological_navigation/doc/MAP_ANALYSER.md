@@ -2,8 +2,9 @@
 
 `map_analyser.py` is a stand-alone command-line tool for analysing
 `.tmap2.yaml` topological map files. It requires no ROS 2 runtime and
-only depends on `pyyaml`, `jsonschema` and `networkx`, so it can be run
-locally or in a CI pipeline (e.g. a GitHub Actions workflow).
+only depends on `pyyaml`, `jsonschema`, `networkx` and (for the `merge`
+subcommand) `pyproj`, so it can be run locally or in a CI pipeline
+(e.g. a GitHub Actions workflow).
 
 ## What it checks
 
@@ -28,6 +29,10 @@ locally or in a CI pipeline (e.g. a GitHub Actions workflow).
   the map by collapsing repeated data structures (e.g. shared
   `properties` or `verts` blocks) into named YAML anchors, and
   optionally stripping nodes/edges unreachable from a given node.
+* **Merging** – combines two or more maps into a single schema-valid
+  map, reprojecting node positions into the first map's GPS origin,
+  deduplicating node/edge names, and merging metadata (see
+  [`merge` command](#merge-command) below).
 
 ## Usage
 
@@ -50,6 +55,9 @@ ros2 run topological_navigation map_analyser.py svg my_map.tmap2.yaml -o my_map.
 
 # Minify (writes my_map.min.tmap2.yaml alongside the input by default)
 ros2 run topological_navigation map_analyser.py minify my_map.tmap2.yaml
+
+# Merge two or more maps into one (writes map_a.merged.tmap2.yaml by default)
+ros2 run topological_navigation map_analyser.py merge map_a.tmap2.yaml map_b.tmap2.yaml -o merged.tmap2.yaml
 ```
 
 The script can also be run directly without a ROS 2 environment:
@@ -130,6 +138,57 @@ Notes:
   if nothing points back to it) and is a single connected sub-map, so
   it always passes the `orphaned-node` and `sub-map-separation` checks.
 * The tool re-parses its own output and schema-validates the written file, to catch any minification bug; it logs a summary of the size savings achieved.
+
+## `merge` command
+
+Combines two or more `.tmap2.yaml` maps into a single schema-valid map,
+for example when several fields/sites were mapped independently and
+need to be navigated as one graph.
+
+```bash
+map_analyser.py merge map_a.tmap2.yaml map_b.tmap2.yaml
+map_analyser.py merge map_a.tmap2.yaml map_b.tmap2.yaml -o merged.tmap2.yaml
+map_analyser.py merge map_a.tmap2.yaml map_b.tmap2.yaml map_c.tmap2.yaml --name my_merged_map
+```
+
+If `-o`/`--output` is omitted, the output path is derived from the
+first input file by inserting `.merged` before the extension, e.g.
+`map_a.tmap2.yaml` -> `map_a.merged.tmap2.yaml`.
+
+Merge rules:
+
+* **Reference origin** \u2013 the first map's `meta.origin` (GPS
+  latitude/longitude/altitude) is used as the reference frame. Every
+  other map's nodes are reprojected (via `pyproj`, using an azimuthal
+  equidistant projection centred on the reference point) into metres
+  offset from that origin, and shifted accordingly. If a map has no
+  real GPS origin (missing, or `latitude`/`longitude` both `0`), its
+  positions are merged unchanged and a warning is recorded; if the
+  *reference* map itself has no real origin, reprojection is skipped
+  for all maps.
+* **Node/edge name deduplication** \u2013 node names and edge IDs must be
+  globally unique in the merged map. Colliding names from the second
+  and subsequent maps are renamed with a numeric suffix (`WP1` ->
+  `WP1_2` -> `WP1_3`, ...), a warning is recorded for each rename, and
+  every edge referencing a renamed node is updated to point at the new
+  name.
+* **Metadata merge** \u2013 top-level keys (`name`, `metric_map`,
+  `pointset`, `transformation`, `definitions`, `actions`,
+  `navigation_config_file`) and `meta` subkeys use
+  first-map-precedence: the first map's value is kept and a warning is
+  recorded if a later map defines a conflicting value. Two exceptions:
+  `meta.origin` always comes from the reference map, and
+  `meta.fields` (field/boundary definitions) are concatenated across
+  all maps with `field_number` renumbered sequentially to avoid
+  collisions. `meta.last_updated` is always regenerated.
+* **Schema validity** \u2013 the merged output is always re-validated
+  against `config/tmap-schema.yaml` before the command reports
+  success; the merge report includes a `[Schema validation of merged
+  output]` section.
+
+The `--name` argument overrides the merged map's
+`name`/`metric_map`/`pointset` fields (otherwise the first map's values
+are kept, per the metadata merge rule above).
 
 ## `check` command exit codes
 
