@@ -32,6 +32,7 @@ Usage::
     python3 map_analyser.py check map.tmap2.yaml
     python3 map_analyser.py svg map.tmap2.yaml -o out.svg
     python3 map_analyser.py minify map.tmap2.yaml [--anchors] [--strip-unreachable NODE]
+    python3 map_analyser.py merge map_a.tmap2.yaml map_b.tmap2.yaml -o merged.tmap2.yaml
 
 Each check can be individually turned off or have its severity changed
 between "warning" (printed, exit code unaffected) and "error" (printed,
@@ -71,6 +72,7 @@ except ImportError:
     print("Error: PyYAML is required. Install with: pip install pyyaml")
     sys.exit(2)
 
+from topological_navigation.map_merger import merge_maps
 from topological_navigation.networkx_utils import build_graph_from_tmap
 from topological_navigation.tmap_utils import CustomSafeLoader, NoAliasDumper, load_tmap2_file
 from topological_navigation.validate_map import validate_map
@@ -462,11 +464,11 @@ def generate_svg(
     for node_name in node_names:
         px, py = to_px(positions[node_name])
         svg_parts.append(
-            f'<circle cx="{px:.2f}" cy="{py:.2f}" r="6" fill="steelblue" '
-            f'stroke="black" stroke-width="1"><title>{_svg_text(node_name)}</title></circle>'
+            f'<circle cx="{px:.2f}" cy="{py:.2f}" r="2" fill="steelblue" '
+            f'stroke="black" stroke-width="0"><title>{_svg_text(node_name)}</title></circle>'
         )
         svg_parts.append(
-            f'<text x="{px + 8:.2f}" y="{py - 8:.2f}" font-size="10" '
+            f'<text x="{px + 2:.2f}" y="{py + 1.5:.2f}" font-size="3" '
             f'font-family="sans-serif">{_svg_text(node_name)}</text>'
         )
 
@@ -1141,6 +1143,7 @@ Examples:
   %(prog)s svg my_map.tmap2.yaml -o my_map.svg
   %(prog)s minify my_map.tmap2.yaml
   %(prog)s minify my_map.tmap2.yaml --strip-unreachable Charging --flowstyle
+  %(prog)s merge map_a.tmap2.yaml map_b.tmap2.yaml -o merged.tmap2.yaml
         """,
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -1207,6 +1210,17 @@ Examples:
         help="Also drop nodes/edges not reachable via a directed path from NODE",
     )
 
+    merge_parser = subparsers.add_parser(
+        "merge",
+        help="Merge two or more maps into one, reprojected into the first map's GPS origin",
+    )
+    merge_parser.add_argument("map_files", nargs="+", help="Paths to two or more topological map YAML files")
+    merge_parser.add_argument(
+        "--output", "-o", help="Output file path (default: <first-map-name>.merged.<ext>)"
+    )
+    merge_parser.add_argument("--schema", "-s", help="Path to the schema YAML file (optional)")
+    merge_parser.add_argument("--name", help="Override the merged map's name/metric_map/pointset")
+
     return parser
 
 
@@ -1215,6 +1229,24 @@ def main(argv: Optional[List[str]] = None) -> None:
 
     parser = build_arg_parser()
     args = parser.parse_args(argv)
+
+    if args.command == "merge":
+        if len(args.map_files) < 2:
+            print("Error: At least two map files are required to merge")
+            sys.exit(2)
+        for map_file in args.map_files:
+            if not os.path.isfile(map_file):
+                print(f"Error: Map file not found: {map_file}")
+                sys.exit(2)
+        try:
+            result = merge_maps(
+                args.map_files, output_file=args.output, schema_file=args.schema, name=args.name,
+            )
+        except Exception as exc:  # noqa: BLE001 - report any load/merge error to the user
+            print(f"Error merging maps: {exc}")
+            sys.exit(2)
+        print(result.format_report())
+        return
 
     if not os.path.isfile(args.map_file):
         print(f"Error: Map file not found: {args.map_file}")

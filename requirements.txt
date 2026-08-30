@@ -3,4 +3,5 @@ jsonschema
 networkx
 scipy
 numpy
+pyproj
 pytest
