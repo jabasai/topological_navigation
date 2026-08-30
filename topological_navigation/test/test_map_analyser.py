@@ -12,8 +12,11 @@ import os
 import networkx as nx
 import pytest
 
+import yaml
+
 from topological_navigation.map_analyser import (
     AnalysisResult,
+    MinifyResult,
     analyse_map,
     build_arg_parser,
     compute_statistics,
@@ -24,9 +27,11 @@ from topological_navigation.map_analyser import (
     get_node_polygon,
     is_bidirectional_edge,
     main,
+    minify_map,
     point_in_polygon,
     polygons_overlap,
 )
+from topological_navigation.tmap_utils import CustomSafeLoader, load_tmap2_file
 
 
 FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures")
@@ -348,6 +353,100 @@ class TestAnalyseMap:
 
 
 # ---------------------------------------------------------------------------
+# Minification
+# ---------------------------------------------------------------------------
+
+class TestMinifyMap:
+    def test_default_anchors_produce_smaller_valid_roundtrip(self, tmp_path):
+        out = tmp_path / "out.min.yaml"
+        result = minify_map(COMPLEX_MAP, output_file=str(out))
+
+        assert isinstance(result, MinifyResult)
+        assert out.is_file()
+        assert result.minified_size <= result.original_size
+        assert result.schema_valid is True
+
+        with open(out, encoding="utf-8") as fh:
+            reparsed = yaml.load(fh, Loader=CustomSafeLoader)
+        reparsed_body = {k: v for k, v in reparsed.items() if k != "anchors"}
+        assert reparsed_body == load_tmap2_file(COMPLEX_MAP)
+
+    def test_low_thresholds_create_anchors(self, tmp_path):
+        out = tmp_path / "out.min.yaml"
+        result = minify_map(
+            COMPLEX_MAP, output_file=str(out), min_size=1, min_occurrences=2
+        )
+        assert result.anchors_created > 0
+        assert result.occurrences_collapsed >= result.anchors_created * 2
+
+        with open(out, encoding="utf-8") as fh:
+            text = fh.read()
+        assert "anchors:" in text
+        assert "&" in text  # at least one anchor definition
+        assert "*" in text  # at least one alias reference
+
+    def test_no_anchors_disables_anchor_section(self, tmp_path):
+        out = tmp_path / "out.min.yaml"
+        result = minify_map(
+            COMPLEX_MAP, output_file=str(out), anchors=False, min_size=1, min_occurrences=2
+        )
+        assert result.anchors_created == 0
+        assert result.occurrences_collapsed == 0
+
+        with open(out, encoding="utf-8") as fh:
+            text = fh.read()
+        assert "anchors:" not in text
+
+    def test_strip_comments_removes_leading_banner(self, tmp_path):
+        out_kept = tmp_path / "kept.min.yaml"
+        out_stripped = tmp_path / "stripped.min.yaml"
+        minify_map(COMPLEX_MAP, output_file=str(out_kept), strip_comments=False)
+        minify_map(COMPLEX_MAP, output_file=str(out_stripped), strip_comments=True)
+
+        with open(COMPLEX_MAP, encoding="utf-8") as fh:
+            original_first_line = fh.readline()
+
+        if original_first_line.lstrip().startswith("#"):
+            assert out_kept.read_text().startswith("#")
+            assert not out_stripped.read_text().startswith("#")
+
+    def test_strip_unreachable_removes_isolated_nodes_and_stays_valid(self, tmp_path):
+        graph_before = load_tmap2_file(COMPLEX_MAP)
+        node_names = [n["node"]["name"] for n in graph_before["nodes"]]
+        start = node_names[0]
+
+        out = tmp_path / "out.min.yaml"
+        result = minify_map(COMPLEX_MAP, output_file=str(out), strip_unreachable_from=start)
+
+        assert result.stripped_nodes >= 0
+        analysis = analyse_map(str(out))
+        assert analysis.orphaned_nodes == [] or analysis.orphaned_nodes == [start]
+        assert len(analysis.disconnected_components) <= 1
+
+    def test_strip_unreachable_raises_for_unknown_node(self, tmp_path):
+        out = tmp_path / "out.min.yaml"
+        with pytest.raises(ValueError):
+            minify_map(COMPLEX_MAP, output_file=str(out), strip_unreachable_from="NoSuchNode")
+
+    def test_derives_output_path_when_not_given(self, tmp_path):
+        src = tmp_path / "my_map.tmap2.yaml"
+        src.write_text(open(COMPLEX_MAP, encoding="utf-8").read())
+        result = minify_map(str(src))
+        expected = tmp_path / "my_map.min.tmap2.yaml"
+        assert result.output_file == str(expected)
+        assert expected.is_file()
+
+    def test_format_report_contains_key_figures(self, tmp_path):
+        out = tmp_path / "out.min.yaml"
+        result = minify_map(COMPLEX_MAP, output_file=str(out), min_size=1, min_occurrences=2)
+        report = result.format_report()
+        assert "Original size" in report
+        assert "Minified size" in report
+        assert "Reduction" in report
+        assert "Anchors created" in report
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -381,3 +480,21 @@ class TestCli:
         parser = build_arg_parser()
         with pytest.raises(SystemExit):
             parser.parse_args([])
+
+    def test_minify_command_writes_file_and_prints_report(self, tmp_path, capsys):
+        out = tmp_path / "cli_out.min.yaml"
+        main(["minify", COMPLEX_MAP, "-o", str(out)])
+        assert out.is_file()
+        captured = capsys.readouterr()
+        assert "Minify report" in captured.out
+
+    def test_minify_command_exits_two_for_missing_file(self, capsys):
+        with pytest.raises(SystemExit) as exc_info:
+            main(["minify", "/no/such/file.yaml"])
+        assert exc_info.value.code == 2
+
+    def test_minify_command_exits_two_for_bad_strip_unreachable(self, tmp_path, capsys):
+        out = tmp_path / "cli_out.min.yaml"
+        with pytest.raises(SystemExit) as exc_info:
+            main(["minify", COMPLEX_MAP, "-o", str(out), "--strip-unreachable", "NoSuchNode"])
+        assert exc_info.value.code == 2

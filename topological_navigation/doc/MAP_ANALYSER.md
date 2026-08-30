@@ -24,6 +24,10 @@ locally or in a CI pipeline (e.g. a GitHub Actions workflow).
   edges colour-coded by action, bidirectional edges drawn as plain
   lines (no arrow head), and unidirectional edges drawn with an arrow
   head indicating direction of travel.
+* **Minification** – writes a smaller, semantically-identical copy of
+  the map by collapsing repeated data structures (e.g. shared
+  `properties` or `verts` blocks) into named YAML anchors, and
+  optionally stripping nodes/edges unreachable from a given node.
 
 ## Usage
 
@@ -43,6 +47,9 @@ ros2 run topological_navigation map_analyser.py check my_map.tmap2.yaml \
 
 # SVG rendering only
 ros2 run topological_navigation map_analyser.py svg my_map.tmap2.yaml -o my_map.svg
+
+# Minify (writes my_map.min.tmap2.yaml alongside the input by default)
+ros2 run topological_navigation map_analyser.py minify my_map.tmap2.yaml
 ```
 
 The script can also be run directly without a ROS 2 environment:
@@ -78,6 +85,51 @@ disconnected sub-maps and influence zone overlaps entirely:
 map_analyser.py check my_map.tmap2.yaml \
   --sub-map-separation=false --influence-zone-overlap=false
 ```
+
+## `minify` command
+
+Topological maps often contain many repeated data structures (e.g. the
+same `properties` dict or influence-zone `verts` polygon reused across
+dozens of nodes/edges). `minify` rewrites the map into an equivalent but
+smaller file by finding these repeated subtrees and replacing them with
+YAML anchors/aliases, collected under a top-level `anchors:` key.
+
+```bash
+map_analyser.py minify my_map.tmap2.yaml
+map_analyser.py minify my_map.tmap2.yaml -o compact.tmap2.yaml
+map_analyser.py minify my_map.tmap2.yaml --strip-unreachable Charging
+```
+
+If `-o`/`--output` is omitted, the output path is derived from the
+input file by inserting `.min` before the extension, e.g.
+`my_map.tmap2.yaml` -> `my_map.min.tmap2.yaml`.
+
+Anchor names are chosen from the map's schema/content (e.g.
+`properties_row_entry`, `verts_2x2`) rather than being generic
+auto-generated ids, so the minified file stays human-readable.
+
+| Switch | Meaning | Default |
+|--------|---------|---------|
+| `--anchors` / `--no-anchors` | Collapse repeated subtrees into named anchors | enabled |
+| `--strip-comments` | Drop the file's leading comment block | disabled (comments kept) |
+| `--flowstyle` | Emit compact flow-style YAML instead of block style | disabled |
+| `--min-size N` | Minimum serialised size (chars) of a subtree to qualify for anchoring | `40` |
+| `--min-occurrences N` | Minimum number of repeats required for a subtree to qualify for anchoring | `3` |
+| `--strip-unreachable NODE` | Also drop nodes/edges not reachable via a directed path from `NODE` | disabled |
+
+Notes:
+
+* Only the leading top-of-file comment block is preserved; inline/
+  per-node comments are not (the tool re-serialises the map from its
+  parsed data structure, like the rest of this codebase).
+* `--strip-unreachable NODE` computes the directed descendants of
+  `NODE` (plus `NODE` itself) and keeps only those. This guarantees
+  the result has no orphaned nodes (other than possibly `NODE` itself,
+  if nothing points back to it) and is a single connected sub-map, so
+  it always passes the `orphaned-node` and `sub-map-separation` checks.
+* The tool re-parses its own output and schema-validates it before
+  writing the file, to catch any minification bug before it reaches
+  disk; it logs a summary of the size savings achieved.
 
 ## `check` command exit codes
 
