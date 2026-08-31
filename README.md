@@ -34,6 +34,7 @@ Originally developed for the [STRANDS](https://strands-project.eu/) long-term au
     - [topological\_localisation (localisation2.py)](#topological_localisation-localisation2py)
     - [topological\_map\_manager\_2 (map\_manager2.py)](#topological_map_manager_2-map_manager2py)
     - [manual\_tmapping\_node (manual\_topomapping.py)](#manual_tmapping_node-manual_topomappingpy)
+    - [map\_recorder (map\_recorder.py)](#map_recorder-map_recorderpy)
     - [topological\_map\_visualiser (topological\_map\_visualiser.py)](#topological_map_visualiser-topological_map_visualiserpy)
     - [route\_visualiser / occupancy\_visualiser (topological\_visual.py)](#route_visualiser--occupancy_visualiser-topological_visualpy)
     - [fake\_nav2\_server (fake\_nav2\_server.py — simulator)](#fake_nav2_server-fake_nav2_serverpy--simulator)
@@ -120,6 +121,8 @@ Originally developed for the [STRANDS](https://strands-project.eu/) long-term au
 | `scripts/localisation2.py` | Topological localisation — determines current/closest node using KD-tree + influence zone checks |
 | `scripts/map_manager2.py` | Loads `.tmap2.yaml` maps, validates them against JSON schema, publishes to ROS topics |
 | `scripts/manual_topomapping.py` | Joystick-driven waypoint recording for field mapping |
+| `scripts/map_recorder.py` | ROS 2 action-driven topological map recorder with loop closure, latched `/recorded_tmap` preview, and load/save services |
+| `map_recorder_utils.py` | Pure-Python map-building core used by `map_recorder.py` (node/edge creation, loop closure, bidirectional edges) |
 | `networkx_utils.py` | NetworkX graph construction, KD-tree spatial indexing, point-in-polygon, edge distance calculations |
 | `navigation_graph.py` | Navigation state machine, route planning, segment merging |
 | `tmap_utils.py` | YAML map loading utilities |
@@ -421,6 +424,17 @@ ros2 action send_goal /topological_navigation \
 | `topic_pose` | string | `"/gps_base/odometry"` | Robot pose input topic |
 | `topic_imu` | string | `"/gps_base/yaw"` | IMU yaw input topic |
 
+### map_recorder (map_recorder.py)
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `node_distance` | double | `1.0` | Minimum distance (m) travelled before a new node is recorded |
+| `pointset` | string | `"recorded_map"` | Name/pointset given to the recorded map |
+| `site_name` | string | `"map"` | Site name / metric map used for map meta data and TF frame |
+| `tmap_dir` | string | `""` | Default directory used to resolve relative filenames for the save/load services |
+| `pose_topic` | string | `"/odometry/filtered"` | `nav_msgs/Odometry` topic used as the robot pose source while recording |
+| `source_tmap_topic` | string | `"/topological_map_2"` | Topic to inherit map meta data (transformation, actions, definitions) from when starting a fresh recording |
+
 ### topological_map_visualiser (topological_map_visualiser.py)
 
 | Parameter | Type | Default | Description |
@@ -489,6 +503,7 @@ ros2 action send_goal /topological_navigation \
 | `topological_route_visualisation` | `visualization_msgs/MarkerArray` | Route Visualiser | Active route highlight markers |
 | `/topological_navigation/visual/occupied_node` | `visualization_msgs/MarkerArray` | Occupancy Visualiser | Occupied node indicators |
 | `/tmapping_nodes` | `visualization_msgs/MarkerArray` | Manual Mapping | Recorded waypoint markers |
+| `/recorded_tmap` | `std_msgs/String` | Map Recorder | Topological map being built, as a YAML string (latched, updated as nodes are added) |
 
 ### Subscribed Topics
 
@@ -502,6 +517,8 @@ ros2 action send_goal /topological_navigation \
 | `topological_navigation/Route` | `topological_navigation_msgs/TopologicalRoute` | Route Visualiser | Route to highlight |
 | `/topological_navigation/occupied_node` | `topological_navigation_msgs/TopologicalOccupiedNode` | Occupancy Visualiser | Nodes occupied by other robots |
 | `/joy` | `sensor_msgs/Joy` | Manual Mapping | Joystick input for waypoint recording |
+| `/odometry/filtered` | `nav_msgs/Odometry` | Map Recorder | Robot pose used to trigger automatic node recording |
+| `/topological_map_2` | `std_msgs/String` | Map Recorder | Source map to inherit meta data (transformation, actions) from when starting a new recording |
 | `mdp_plan_exec/current_policy_mode` | `topological_navigation_msgs/NavRoute` | Policy Marker | Policy route for arrow rendering |
 
 ### TF Broadcasts
@@ -525,6 +542,11 @@ ros2 action send_goal /topological_navigation \
 | `/tmapping_robot/save_waypoints` | `std_srvs/Trigger` | Manual Mapping | Save raw waypoints to file |
 | `/tmapping_robot/save_map` | `std_srvs/Trigger` | Manual Mapping | Generate and save topological map from waypoints |
 | `<visualiser>/save_map` | `std_srvs/Trigger` | Map Visualiser | Save the edited map to YAML |
+| `/map_recorder/add_node` | `std_srvs/Trigger` | Map Recorder | Explicitly add the current pose as a new node |
+| `/map_recorder/delete_last_node` | `std_srvs/Trigger` | Map Recorder | Remove the most recently recorded node |
+| `/map_recorder/reset_map` | `std_srvs/Trigger` | Map Recorder | Clear the recorded map completely |
+| `/map_recorder/save_map` | `WriteTopologicalMap` | Map Recorder | Save the recorded map to a YAML file |
+| `/map_recorder/load_map` | `LoadTmap` | Map Recorder | Load a (partial) map from a file so recording can continue from it |
 
 ---
 
@@ -539,6 +561,7 @@ ros2 action send_goal /topological_navigation \
 | `/navigate_to_pose` | `nav2_msgs/NavigateToPose` | Fake Nav2 | Simulated single-goal metric navigation |
 | `/navigate_through_poses` | `nav2_msgs/NavigateThroughPoses` | Fake Nav2 | Simulated multi-waypoint metric navigation |
 | `/follow_waypoints` | `nav2_msgs/FollowWaypoints` | Fake Nav2 | Simulated waypoint-following navigation |
+| `/record` | `RecordMap` | Map Recorder | Continuously record a topological map; cancel to stop recording |
 
 ### Action Clients
 
@@ -598,6 +621,7 @@ All definitions reside in the `topological_navigation_msgs` package.
 | **GetRouteTo** | `string goal` → `NavRoute route` | Get route from current position to goal node |
 | **GetRouteBetween** | `string origin, string goal` → `NavRoute route` | Get route between two named nodes |
 | **WriteTopologicalMap** | `string filename, bool no_alias` → `bool success, string message` | Write / save a topological map to disk |
+| **LoadTmap** | `string filename` → `bool success, string message, int32 num_nodes` | Load a (partial) tmap2 YAML file into the map recorder |
 | **EvaluateEdge** | `string state, string edge, bool runtime` → `bool success, bool evaluation` | Evaluate restrictions on an edge |
 | **EvaluateNode** | `string state, string node, bool runtime` → `bool success, bool evaluation` | Evaluate restrictions on a node |
 | **ReconfAtEdges** | `string edge_id` → `bool success` | Reconfigure parameters at edge traversal |
@@ -611,6 +635,7 @@ All definitions reside in the `topological_navigation_msgs` package.
 | **GotoNode** | `string target`, `bool no_orientation` | `bool success` | `string route` |
 | **ExecutePolicyMode** | `NavRoute route` | `bool success` | `string current_wp`, `uint8 status` |
 | **BuildTopPrediction** | `Time start_range`, `Time end_range` | `bool success` | `string result` |
+| **RecordMap** | `string map_name`, `float64 node_distance` | `bool success`, `string message`, `int32 num_nodes` | `int32 num_nodes`, `string last_node`, `string status` |
 
 ---
 
@@ -714,6 +739,17 @@ tolerance = props.get("xy_goal_tolerance", 0.5)
 
 See [doc/PROPERTIES.md](topological_navigation/doc/PROPERTIES.md) for full documentation.
 
+### Recording Maps
+
+`ros2 run topological_navigation map_recorder.py` builds a `.tmap2.yaml` map while driving the robot around, using the `record` ROS 2 action (see [ROS 2 Actions](#ros-2-actions)):
+
+- New meta data (transformation, `actions`, `definitions`) is inherited from the currently active map (`/topological_map_2`) or sensible defaults.
+- A node is added automatically every `node_distance` metres; nodes can also be added explicitly via the `add_node` service.
+- **Loop closure**: if the robot re-enters an existing node's influence zone, that node is reused and linked to the previous one instead of duplicating it.
+- Nodes are connected successively with **bidirectional** edges (an edge in each direction between consecutive nodes).
+- Every recorded node gets `properties.map.source: recording` so it can be told apart from hand-authored nodes.
+- The map under construction is published continuously on the latched `/recorded_tmap` topic, and can be saved (`save_map`), reset (`reset_map`), trimmed (`delete_last_node`), or extended from a file (`load_map`) at any time — even while recording is in progress.
+
 ### Map Validation
 
 ```bash
@@ -737,6 +773,8 @@ ros2 run topological_navigation validate_map.py /path/to/map.tmap2.yaml -v
 | `ros2 topic echo /current_node` | Monitor which node the robot is at |
 | `ros2 topic echo /closest_node` | Monitor the nearest node |
 | `ros2 service call /topological_localisation/localise_pose topological_navigation_msgs/srv/LocalisePose "{pose: {position: {x: 1.0, y: 2.0, z: 0.0}}}"` | Localise an arbitrary pose |
+| `ros2 action send_goal /record topological_navigation_msgs/action/RecordMap "{map_name: 'my_map', node_distance: 1.0}"` | Start recording a topological map (Ctrl-C / cancel the goal to stop) |
+| `ros2 service call /map_recorder/save_map topological_navigation_msgs/srv/WriteTopologicalMap "{filename: 'my_map.tmap2.yaml'}"` | Save the currently recorded map to disk |
 
 > `map_analyser.py` runs standalone without ROS 2 — see [Running the CLI Tools Without ROS 2](#running-the-cli-tools-without-ros-2).
 
