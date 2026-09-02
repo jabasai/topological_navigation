@@ -296,6 +296,7 @@ class TopologicalNavServer(rclpy.node.Node):
         self._tmap = None
         self._graph = None
         self._topol_map = ""
+        self._global_metric_map_bounds = None
 
         # -- Deferred map update (thread-safe buffering) -------------
         self._pending_map_msg = None
@@ -1041,6 +1042,7 @@ class TopologicalNavServer(rclpy.node.Node):
 
     def _publish_topological_metric_map(self):
         """Publish a coarse metric occupancy map for the full topological map."""
+        self._global_metric_map_bounds = None
         if not self._tmap:
             return
 
@@ -1055,8 +1057,17 @@ class TopologicalNavServer(rclpy.node.Node):
                 padding_m=full_corridor,
                 include_node_polygons=False,
             )
-            self._map_pub.publish(
-                self._raster_to_occupancy_grid(raster, geometry.frame_id),
+            metric_map = self._raster_to_occupancy_grid(
+                raster, geometry.frame_id,
+            )
+            self._map_pub.publish(metric_map)
+            self._global_metric_map_bounds = (
+                float(metric_map.info.origin.position.x),
+                float(metric_map.info.origin.position.y),
+                float(metric_map.info.origin.position.x)
+                + (float(metric_map.info.width) * float(metric_map.info.resolution)),
+                float(metric_map.info.origin.position.y)
+                + (float(metric_map.info.height) * float(metric_map.info.resolution)),
             )
             self.get_logger().info(
                 "[MAP] Published /map (%dx%d, %.3f m/px)"
@@ -1079,6 +1090,13 @@ class TopologicalNavServer(rclpy.node.Node):
         try:
             geometry = geometry_from_tmap(self._tmap, apply_transform=True)
             route_start = self._robot_position_in_frame(geometry.frame_id)
+            if not self._position_within_global_metric_map(route_start):
+                if route_start is not None:
+                    self.get_logger().warning(
+                        "[MAP] Robot pose is outside the global metric map; "
+                        "route segment will start at its source node",
+                    )
+                route_start = None
             specs = route_specs_from_edge_data(
                 route_edges,
                 default_left_m=float(self._route_white_extension_m),
@@ -1126,6 +1144,18 @@ class TopologicalNavServer(rclpy.node.Node):
 
         translation = transform.transform.translation
         return float(translation.x), float(translation.y)
+
+    def _position_within_global_metric_map(self, position):
+        """Return whether a finite x/y position lies within the global map."""
+        if position is None or self._global_metric_map_bounds is None:
+            return False
+
+        x, y = position
+        if not math.isfinite(x) or not math.isfinite(y):
+            return False
+
+        min_x, min_y, max_x, max_y = self._global_metric_map_bounds
+        return min_x <= x < max_x and min_y <= y < max_y
 
     # =================================================================
     # Status publishers

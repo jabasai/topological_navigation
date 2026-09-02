@@ -148,6 +148,7 @@ def _make_server():
     }
     server._graph = _FakePolicyGraph([('WP1', 'WP2')])
     server._topol_map = 'test_map'
+    server._global_metric_map_bounds = None
     server._map_actions = {}
     server._map_definitions = {}
     server._bt_files = {}
@@ -571,9 +572,19 @@ def test_parameters_callback_rejects_invalid_metric_map_values():
     assert result.successful is False
 
 
-def test_route_segment_map_passes_robot_position_to_rasterizer(monkeypatch):
-    """The live route corridor should begin at the latest TF robot pose."""
+@pytest.mark.parametrize(
+    ('robot_position', 'expected_route_start'),
+    [
+        ((3.5, -1.25), (3.5, -1.25)),
+        ((5.0, -1.25), None),
+    ],
+)
+def test_route_segment_map_validates_robot_position(
+    monkeypatch, robot_position, expected_route_start,
+):
+    """Only a robot within the global metric map should start the corridor."""
     server = _make_server()
+    server._global_metric_map_bounds = (0.0, -2.0, 5.0, 2.0)
     server._route_white_extension_m = 2.0
     server._route_segment_border_width = 0.25
     server._route_segment_resolution = 0.05
@@ -581,7 +592,7 @@ def test_route_segment_map_passes_robot_position_to_rasterizer(monkeypatch):
     server._base_frame = 'base_link'
     server._raster_to_occupancy_grid = lambda raster, frame: (raster, frame)
 
-    translation = SimpleNamespace(x=3.5, y=-1.25)
+    translation = SimpleNamespace(x=robot_position[0], y=robot_position[1])
     transform = SimpleNamespace(
         transform=SimpleNamespace(translation=translation),
     )
@@ -622,5 +633,5 @@ def test_route_segment_map_passes_robot_position_to_rasterizer(monkeypatch):
 
     server._publish_route_segment_metric_map([{'source': 'A', 'target': 'B'}])
 
-    assert captured['route_start'] == (3.5, -1.25)
+    assert captured['route_start'] == expected_route_start
     assert published == [(raster, 'map')]
