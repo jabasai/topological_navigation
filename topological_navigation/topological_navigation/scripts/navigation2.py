@@ -44,7 +44,7 @@ ROS 2 interfaces
         route_algorithm           (string)  -- 'astar' | 'dijkstra'
         route_weight_attr         (string)  -- edge attribute for cost
 
-Last Updated: 2026-02-25
+Last Updated: 2026-09-02
 """
 
 import importlib
@@ -297,6 +297,7 @@ class TopologicalNavServer(rclpy.node.Node):
         self._graph = None
         self._topol_map = ""
         self._global_metric_map_bounds = None
+        self._global_metric_map = None
 
         # -- Deferred map update (thread-safe buffering) -------------
         self._pending_map_msg = None
@@ -1043,6 +1044,7 @@ class TopologicalNavServer(rclpy.node.Node):
     def _publish_topological_metric_map(self):
         """Publish a coarse metric occupancy map for the full topological map."""
         self._global_metric_map_bounds = None
+        self._global_metric_map = None
         if not self._tmap:
             return
 
@@ -1060,6 +1062,7 @@ class TopologicalNavServer(rclpy.node.Node):
             metric_map = self._raster_to_occupancy_grid(
                 raster, geometry.frame_id,
             )
+            self._global_metric_map = metric_map
             self._map_pub.publish(metric_map)
             self._global_metric_map_bounds = (
                 float(metric_map.info.origin.position.x),
@@ -1085,18 +1088,15 @@ class TopologicalNavServer(rclpy.node.Node):
     def _publish_route_segment_metric_map(self, route_edges):
         """Publish a fine map whose first corridor starts at the robot."""
         if not route_edges or not self._tmap:
-            return
+            return False
 
         try:
             geometry = geometry_from_tmap(self._tmap, apply_transform=True)
             route_start = self._robot_position_in_frame(geometry.frame_id)
-            if not self._position_within_global_metric_map(route_start):
-                if route_start is not None:
-                    self.get_logger().warning(
-                        "[MAP] Robot pose is outside the global metric map; "
-                        "route segment will start at its source node",
-                    )
-                route_start = None
+            if not self._ensure_robot_within_main_map(
+                geometry.frame_id, route_start,
+            ):
+                return False
             specs = route_specs_from_edge_data(
                 route_edges,
                 default_left_m=float(self._route_white_extension_m),
@@ -1122,10 +1122,12 @@ class TopologicalNavServer(rclpy.node.Node):
                     self._route_segment_resolution,
                 ),
             )
+            return True
         except Exception as exc:
             self.get_logger().error(
                 "[MAP] Failed to publish /topo_map_route_segment: %s" % exc,
             )
+            return False
 
     def _robot_position_in_frame(self, frame_id):
         """Return the latest robot x/y position in ``frame_id`` from TF."""
@@ -1137,8 +1139,8 @@ class TopologicalNavServer(rclpy.node.Node):
             )
         except (TransformException, AttributeError) as exc:
             self.get_logger().warning(
-                "[MAP] Robot pose unavailable in '%s'; route segment will "
-                "start at its source node: %s" % (frame_id, exc),
+                "[MAP] Robot pose unavailable in '%s'; navigation will be "
+                "refused: %s" % (frame_id, exc),
             )
             return None
 
@@ -1146,16 +1148,80 @@ class TopologicalNavServer(rclpy.node.Node):
         return float(translation.x), float(translation.y)
 
     def _position_within_global_metric_map(self, position):
-        """Return whether a finite x/y position lies within the global map."""
-        if position is None or self._global_metric_map_bounds is None:
+        """Return whether a position occupies a free coarse-map cell."""
+        metric_map = self._global_metric_map
+        if position is None or metric_map is None:
             return False
 
         x, y = position
         if not math.isfinite(x) or not math.isfinite(y):
             return False
 
-        min_x, min_y, max_x, max_y = self._global_metric_map_bounds
-        return min_x <= x < max_x and min_y <= y < max_y
+        resolution = float(metric_map.info.resolution)
+        width = int(metric_map.info.width)
+        height = int(metric_map.info.height)
+        if resolution <= 0.0 or width <= 0 or height <= 0:
+            return False
+
+        col = math.floor(
+            (x - float(metric_map.info.origin.position.x)) / resolution,
+        )
+        row = math.floor(
+            (y - float(metric_map.info.origin.position.y)) / resolution,
+        )
+        if col < 0 or col >= width or row < 0 or row >= height:
+            return False
+
+        cell_index = (row * width) + col
+        if cell_index >= len(metric_map.data):
+            return False
+
+        # Only known-free space belongs to the coarse main map. Unknown (-1)
+        # and occupied (100) cells are both outside its navigable area.
+        return int(metric_map.data[cell_index]) == 0
+
+    def _ensure_robot_within_main_map(
+        self, frame_id=None, robot_position=None,
+    ):
+        """Fail closed unless the robot pose is inside the coarse main map."""
+        if self._global_metric_map is None:
+            self.get_logger().error(
+                "[MAP] Main occupancy map is unavailable; refusing navigation",
+            )
+            self._publish_status("MAIN_MAP_UNAVAILABLE")
+            return False
+
+        if frame_id is None:
+            try:
+                frame_id = geometry_from_tmap(
+                    self._tmap, apply_transform=True,
+                ).frame_id
+            except Exception as exc:
+                self.get_logger().error(
+                    "[MAP] Cannot determine the main map frame; refusing "
+                    "navigation: %s" % exc,
+                )
+                self._publish_status("MAIN_MAP_UNAVAILABLE")
+                return False
+
+        if robot_position is None:
+            robot_position = self._robot_position_in_frame(frame_id)
+        if robot_position is None:
+            self.get_logger().error(
+                "[MAP] Robot pose is unavailable; refusing navigation",
+            )
+            self._publish_status("ROBOT_POSE_UNAVAILABLE")
+            return False
+
+        if not self._position_within_global_metric_map(robot_position):
+            self.get_logger().error(
+                "[MAP] Robot is outside the free area of the main map; "
+                "refusing to create a local metric map or plan a route",
+            )
+            self._publish_status("OUTSIDE_MAIN_MAP")
+            return False
+
+        return True
 
     # =================================================================
     # Status publishers
@@ -1958,6 +2024,11 @@ class TopologicalNavServer(rclpy.node.Node):
             goal_handle.abort()
             return ExecutePolicyMode.Result(success=False)
 
+        if not self._ensure_robot_within_main_map():
+            self._navigation_activated = False
+            goal_handle.abort()
+            return ExecutePolicyMode.Result(success=False)
+
         route_nodes = list(route.source)
         if route.edge_id:
             last_e = get_edge_from_id_tmap2(
@@ -1979,9 +2050,13 @@ class TopologicalNavServer(rclpy.node.Node):
             goal_handle, route_nodes[0], GoalStatus.STATUS_EXECUTING,
         )
         self._publish_route(route_nodes)
-        self._publish_route_segment_metric_map(
+        if not self._publish_route_segment_metric_map(
             get_route_edges(self._graph, route_nodes),
-        )
+        ):
+            self._sm.transition(NavState.FAILED)
+            self._navigation_activated = False
+            goal_handle.abort()
+            return ExecutePolicyMode.Result(success=False)
         self._wait_for_route_segment_costmap()
         success = self._execute_route(route_nodes, target)
 
@@ -2035,6 +2110,10 @@ class TopologicalNavServer(rclpy.node.Node):
             self._publish_status("FAILED")
             return False
 
+        if not self._ensure_robot_within_main_map():
+            self._sm.transition(NavState.FAILED)
+            return False
+
         origin = self._determine_origin(target)
         if origin is None:
             self.get_logger().error("[NAV] Cannot determine origin")
@@ -2071,9 +2150,11 @@ class TopologicalNavServer(rclpy.node.Node):
             % (" -> ".join(route_nodes), len(route_nodes)),
         )
         self._publish_route(route_nodes)
-        self._publish_route_segment_metric_map(
+        if not self._publish_route_segment_metric_map(
             get_route_edges(self._graph, route_nodes),
-        )
+        ):
+            self._sm.transition(NavState.FAILED)
+            return False
         self._wait_for_route_segment_costmap()
         success = self._execute_route(route_nodes, target)
 
