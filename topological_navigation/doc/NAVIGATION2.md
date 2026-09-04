@@ -115,6 +115,15 @@ Creates both action servers and transitions state machine to `READY`.
 
 ## Route Planning and Execution Flow
 
+Before either action entry point can plan or execute a route, the robot pose
+must be available in the coarse main-map frame and occupy a known-free (`0`)
+cell in the published main occupancy grid. Unknown (`-1`), occupied (`100`),
+and out-of-grid positions are outside. This check fails closed: the server
+does not plan a route, generate `/topo_map_route_segment`, or send a Nav2 goal
+when the pose cannot be proven to be inside the main map. The latched operation
+status is set to `OUTSIDE_MAIN_MAP`, `ROBOT_POSE_UNAVAILABLE`, or
+`MAIN_MAP_UNAVAILABLE`, as appropriate.
+
 ## Goal entry points
 
 - `GotoNode`: plan from current estimated origin to target
@@ -514,4 +523,4 @@ configure it as the static default in your Nav2 controller configuration.
 
 ---
 
-Last Updated: 2026-05-30
+Last Updated: 2026-09-02

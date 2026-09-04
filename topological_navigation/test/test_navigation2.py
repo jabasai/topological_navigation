@@ -107,6 +107,9 @@ class _FakePolicyGraph:
     def has_edge(self, src, tgt):
         return (src, tgt) in self._edges
 
+    def __contains__(self, node):
+        return any(node in edge for edge in self._edges)
+
     def __getitem__(self, src):
         edge_map = {}
         for u, v in self._edges:
@@ -148,6 +151,8 @@ def _make_server():
     }
     server._graph = _FakePolicyGraph([('WP1', 'WP2')])
     server._topol_map = 'test_map'
+    server._global_metric_map_bounds = None
+    server._global_metric_map = None
     server._map_actions = {}
     server._map_definitions = {}
     server._bt_files = {}
@@ -156,7 +161,11 @@ def _make_server():
     server._yaw_tolerance_param = 'goal_checker.yaw_goal_tolerance'
     server._publish_status = lambda *_args, **_kwargs: None
     server._publish_route = lambda *_args, **_kwargs: None
+    server._publish_route_segment_metric_map = (
+        lambda *_args, **_kwargs: True
+    )
     server._execute_route = lambda *_args, **_kwargs: True
+    server._ensure_robot_within_main_map = lambda *_args, **_kwargs: True
     server._cancel_nav2_goal = lambda *_args, **_kwargs: None
     server._navigate = lambda *_args, **_kwargs: True
     return server
@@ -571,22 +580,42 @@ def test_parameters_callback_rejects_invalid_metric_map_values():
     assert result.successful is False
 
 
-def test_route_segment_map_passes_robot_position_to_rasterizer(monkeypatch):
-    """The live route corridor should begin at the latest TF robot pose."""
+@pytest.mark.parametrize(
+    ('robot_position', 'expected_route_start', 'expected_publish_count'),
+    [
+        ((3.5, -1.25), (3.5, -1.25), 1),
+        ((5.0, -1.25), None, 0),
+    ],
+)
+def test_route_segment_map_validates_robot_position(
+    monkeypatch, robot_position, expected_route_start, expected_publish_count,
+):
+    """Do not create a local metric map when the robot is outside."""
     server = _make_server()
+    server._global_metric_map_bounds = (0.0, -2.0, 5.0, 2.0)
+    server._global_metric_map = SimpleNamespace(
+        info=SimpleNamespace(
+            resolution=1.0,
+            width=5,
+            height=4,
+            origin=SimpleNamespace(
+                position=SimpleNamespace(x=0.0, y=-2.0),
+            ),
+        ),
+        data=[0] * 20,
+    )
     server._route_white_extension_m = 2.0
     server._route_segment_border_width = 0.25
     server._route_segment_resolution = 0.05
     server._route_segment_padding = 0.0
     server._base_frame = 'base_link'
+    server._publish_status = lambda *_args, **_kwargs: None
+    del server._ensure_robot_within_main_map
+    del server._publish_route_segment_metric_map
     server._raster_to_occupancy_grid = lambda raster, frame: (raster, frame)
 
-    translation = SimpleNamespace(x=3.5, y=-1.25)
-    transform = SimpleNamespace(
-        transform=SimpleNamespace(translation=translation),
-    )
-    server._tf_buffer = SimpleNamespace(
-        lookup_transform=lambda target, source, stamp: transform,
+    server._robot_position_in_frame = (
+        lambda frame_id: robot_position
     )
     published = []
     server._route_segment_map_pub = SimpleNamespace(
@@ -622,5 +651,89 @@ def test_route_segment_map_passes_robot_position_to_rasterizer(monkeypatch):
 
     server._publish_route_segment_metric_map([{'source': 'A', 'target': 'B'}])
 
-    assert captured['route_start'] == (3.5, -1.25)
-    assert published == [(raster, 'map')]
+    assert captured.get('route_start') == expected_route_start
+    assert len(published) == expected_publish_count
+
+
+def test_navigate_outside_main_map_does_not_plan_or_publish(monkeypatch):
+    """An outside robot must be rejected before route planning starts."""
+    server = _make_server()
+    server._ensure_robot_within_main_map = lambda: False
+    server._determine_origin = lambda target: 'WP1'
+    server._publish_route_segment_metric_map = lambda edges: pytest.fail(
+        'local metric map must not be created',
+    )
+    monkeypatch.setattr(
+        navigation2_module,
+        'plan_route',
+        lambda *args, **kwargs: pytest.fail('route must not be planned'),
+    )
+
+    result = TopologicalNavServer._navigate(server, 'WP2')
+
+    assert result is False
+    assert NavState.FAILED in server._sm.transitions
+
+
+def test_outside_main_map_publishes_explicit_status():
+    """The operator-facing status should identify the containment failure."""
+    server = _make_server()
+    del server._ensure_robot_within_main_map
+    server._global_metric_map_bounds = (0.0, -2.0, 5.0, 2.0)
+    server._global_metric_map = SimpleNamespace(
+        info=SimpleNamespace(
+            resolution=1.0,
+            width=5,
+            height=4,
+            origin=SimpleNamespace(
+                position=SimpleNamespace(x=0.0, y=-2.0),
+            ),
+        ),
+        data=[0] * 20,
+    )
+    statuses = []
+    server._publish_status = statuses.append
+
+    result = server._ensure_robot_within_main_map('map', (5.0, 0.0))
+
+    assert result is False
+    assert statuses == ['OUTSIDE_MAIN_MAP']
+
+
+@pytest.mark.parametrize('occupancy', [-1, 100])
+def test_unknown_or_occupied_main_map_cell_is_outside(occupancy):
+    """Only a known-free coarse-map cell can authorize navigation."""
+    server = _make_server()
+    server._global_metric_map = SimpleNamespace(
+        info=SimpleNamespace(
+            resolution=1.0,
+            width=2,
+            height=2,
+            origin=SimpleNamespace(
+                position=SimpleNamespace(x=0.0, y=0.0),
+            ),
+        ),
+        data=[occupancy, 0, 0, 0],
+    )
+
+    assert server._position_within_global_metric_map((0.5, 0.5)) is False
+    assert server._position_within_global_metric_map((1.5, 0.5)) is True
+
+
+def test_policy_outside_main_map_does_not_create_local_map():
+    """A supplied policy route is also rejected when the robot is outside."""
+    server = _make_server()
+    server._ensure_robot_within_main_map = lambda: False
+    server._publish_route_segment_metric_map = lambda edges: pytest.fail(
+        'local metric map must not be created',
+    )
+    server._execute_route = lambda *args: pytest.fail(
+        'route must not be executed',
+    )
+    route = SimpleNamespace(source=['WP1'], edge_id=['WP1_WP2'])
+    goal_handle = _FakePolicyGoalHandle(route)
+
+    result = server._exec_policy_cb(goal_handle)
+
+    assert result.success is False
+    assert goal_handle.final_state == 'aborted'
