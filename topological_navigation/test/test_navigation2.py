@@ -1,6 +1,7 @@
 """Targeted tests for ``navigation2.py`` action-server behavior."""
 
 import pytest
+import networkx as nx
 from types import SimpleNamespace
 
 from rclpy import Parameter
@@ -169,6 +170,76 @@ def _make_server():
     server._cancel_nav2_goal = lambda *_args, **_kwargs: None
     server._navigate = lambda *_args, **_kwargs: True
     return server
+
+
+def _make_closest_edge_server(edges, closest_edge_ids, distances, target):
+    """Create a server double for closest-edge route planning tests."""
+    server = _make_server()
+    server._current_node = 'none'
+    server._closest_node = 'A'
+    server._max_dist_to_closest_edge = 1.0
+    server._closest_edges = SimpleNamespace(
+        edge_ids=closest_edge_ids,
+        distances=distances,
+    )
+    server._route_algorithm = 'astar'
+    server._route_weight = 'weight'
+    server._graph = nx.DiGraph()
+    for node, x in [('A', 0.0), ('X', 1.0), ('B', 2.0), ('C', 3.0)]:
+        server._graph.add_node(node, x=x, y=0.0)
+    for source, destination, edge_id in edges:
+        server._graph.add_edge(
+            source, destination, edge_id=edge_id, weight=1.0,
+        )
+    server._test_target = target
+    return server
+
+
+def test_closest_edge_is_preserved_as_first_route_segment():
+    """A threshold-qualified edge and its action must remain in the route."""
+    server = _make_closest_edge_server(
+        [
+            ('A', 'X', 'A_X'),
+            ('X', 'B', 'X_B'),
+        ],
+        ['A_X'],
+        [0.1],
+        'B',
+    )
+
+    route = server._route_from_closest_edge('B')
+
+    assert route == ['A', 'X', 'B']
+
+
+def test_bidirectional_closest_edge_selects_direction_toward_goal():
+    """Equal-distance reverse edges choose the shorter continuation route."""
+    server = _make_closest_edge_server(
+        [
+            ('A', 'B', 'A_B'),
+            ('B', 'A', 'B_A'),
+            ('B', 'C', 'B_C'),
+        ],
+        ['A_B', 'B_A'],
+        [0.1, 0.1],
+        'C',
+    )
+
+    route = server._route_from_closest_edge('C')
+
+    assert route == ['A', 'B', 'C']
+
+
+def test_closest_edge_outside_threshold_returns_no_forced_route():
+    """The existing closest-node route fallback remains available."""
+    server = _make_closest_edge_server(
+        [('A', 'B', 'A_B')],
+        ['A_B'],
+        [1.1],
+        'B',
+    )
+
+    assert server._route_from_closest_edge('B') is None
 
 
 def test_cancel_goto_callback_accepts_cancel():
