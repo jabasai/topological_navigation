@@ -242,6 +242,20 @@ def test_closest_edge_outside_threshold_returns_no_forced_route():
     assert server._route_from_closest_edge('B') is None
 
 
+def test_bidirectional_closest_edge_origin_follows_goal_direction():
+    """The origin follows the closest edge direction toward the goal."""
+    server = _make_closest_edge_server(
+        [
+            ('A', 'B', 'A_B'),
+            ('B', 'A', 'B_A'),
+        ],
+        ['A_B', 'B_A'],
+        [0.1, 0.1],
+        'B',
+    )
+    assert server._determine_origin('B') == 'A'
+
+
 def test_cancel_goto_callback_accepts_cancel():
     """Cancel requests should be accepted and forwarded to Nav2."""
     server = _make_server()
