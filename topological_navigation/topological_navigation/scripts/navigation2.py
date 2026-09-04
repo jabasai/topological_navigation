@@ -2131,12 +2131,14 @@ class TopologicalNavServer(rclpy.node.Node):
             self._publish_status("SUCCEEDED")
             return True
 
-        route_nodes = plan_route(
-            self._graph, origin, target,
-            logger=self.get_logger(),
-            algorithm=self._route_algorithm,
-            weight=self._route_weight,
-        )
+        route_nodes = self._route_from_closest_edge(target)
+        if route_nodes is None:
+            route_nodes = plan_route(
+                self._graph, origin, target,
+                logger=self.get_logger(),
+                algorithm=self._route_algorithm,
+                weight=self._route_weight,
+            )
         if not route_nodes or len(route_nodes) < 2:
             self.get_logger().error(
                 "[NAV] No route '%s' -> '%s'" % (origin, target),
@@ -2170,6 +2172,60 @@ class TopologicalNavServer(rclpy.node.Node):
             self._sm.transition(NavState.FAILED)
             self._publish_status("FAILED")
         return success
+
+    def _route_from_closest_edge(self, target):
+        """Return a route that starts with the closest edge when applicable.
+
+        The closest edge is a directed graph edge, so preserving it in the
+        route is necessary to preserve its action. For bidirectional edges,
+        each direction is a candidate and the direction with the shortest
+        complete route to *target* is selected.
+
+        Returns ``None`` when the closest-edge heuristic is not applicable.
+        Returns an empty list when it is applicable but no continuation to
+        *target* exists, preventing a silent fallback that would discard the
+        closest edge action.
+        """
+        closest_edges = getattr(self, '_closest_edges', None)
+        distances = getattr(closest_edges, 'distances', [])
+        edge_ids = getattr(closest_edges, 'edge_ids', [])
+        if (
+            not distances
+            or distances[0] > self._max_dist_to_closest_edge
+        ):
+            return None
+
+        candidates = []
+        min_distance = distances[0]
+        for edge_id, distance in zip(edge_ids, distances):
+            if distance != min_distance:
+                break
+            for source, destination, edge_data in self._graph.edges(data=True):
+                if edge_data.get('edge_id') != edge_id:
+                    continue
+                remainder = plan_route(
+                    self._graph, destination, target,
+                    logger=self.get_logger(),
+                    algorithm=self._route_algorithm,
+                    weight=self._route_weight,
+                )
+                if remainder:
+                    route = [source] + remainder
+                    candidates.append((
+                        get_route_distance(self._graph, route),
+                        route,
+                    ))
+                break
+
+        if not candidates:
+            self.get_logger().error(
+                "[NAV] Closest edge is within threshold but no route "
+                "continues to '%s'" % target,
+            )
+            return []
+
+        candidates.sort(key=lambda candidate: candidate[0])
+        return candidates[0][1]
 
     def _wait_for_route_segment_costmap(self):
         """Allow Nav2's static layer to ingest the newly published corridor."""
