@@ -21,6 +21,15 @@ subcommand) `pyproj`, so it can be run locally or in a CI pipeline
 * **Overlapping influence zones** – pairs of nodes whose influence
   zone polygons (`verts`) overlap, including the case where a node's
   position falls inside another node's polygon.
+* **Grid angle deviation** *(disabled by default)* – for a configurable
+  set of nodes, checks that each node's own incoming/outgoing edges are
+  mutually separated by multiples of 90 degrees (i.e. the node looks
+  like a right-angle grid corner/cross/T, regardless of how the node's
+  local neighbourhood is oriented relative to the rest of the map).
+  Edges whose bearing deviates from the node's best-fit local
+  right-angle pattern by more than a configurable threshold (default 5
+  degrees) are flagged. See
+  [Grid angle deviation check](#grid-angle-deviation-check) below.
 * **SVG rendering** – a full-map SVG image with nodes as circles,
   edges colour-coded by action, bidirectional edges drawn as plain
   lines (no arrow head), and unidirectional edges drawn with an arrow
@@ -33,6 +42,11 @@ subcommand) `pyproj`, so it can be run locally or in a CI pipeline
   map, reprojecting node positions into the first map's GPS origin,
   deduplicating node/edge names, and merging metadata (see
   [`merge` command](#merge-command) below).
+* **Grid alignment** – in a separate mode (the `grid-align` command,
+  as opposed to a `check`), the tool can reposition the nodes selected
+  for the grid angle deviation check so that their own incident edges
+  become mutually right-angled, and save the adjusted map (see
+  [`grid-align` command](#grid-align-command) below).
 
 ## Usage
 
@@ -58,6 +72,16 @@ ros2 run topological_navigation map_analyser.py minify my_map.tmap2.yaml
 
 # Merge two or more maps into one (writes map_a.merged.tmap2.yaml by default)
 ros2 run topological_navigation map_analyser.py merge map_a.tmap2.yaml map_b.tmap2.yaml -o merged.tmap2.yaml
+
+# Check that nodes named Row* have mutually right-angled edges
+ros2 run topological_navigation map_analyser.py check my_map.tmap2.yaml \
+  --grid-angle-deviation=error --grid-angle-filter "name:Row*"
+
+# Reposition the nodes matched by the filter to minimise the deviation of
+# their own edges from a 90 degree multiple of one another
+# (writes my_map.gridalign.tmap2.yaml alongside the input by default)
+ros2 run topological_navigation map_analyser.py grid-align my_map.tmap2.yaml \
+  --grid-angle-filter "name:Row*"
 ```
 
 ## Running without ROS 2
@@ -90,7 +114,7 @@ the `merge` subcommand) `pyproj`, all listed in
 
 ## Configuring check severities
 
-Each of the four checks can be independently turned off, or have its
+Each of the checks can be independently turned off, or have its
 severity set to `warning` or `error`, via a `--<check>={false,warning,error}`
 switch on the `analyse`/`check` subcommands:
 
@@ -100,6 +124,7 @@ switch on the `analyse`/`check` subcommands:
 | `--orphaned-node` | Orphaned nodes | `error` |
 | `--sub-map-separation` | Disconnected sub-maps | `warning` |
 | `--influence-zone-overlap` | Overlapping influence zones | `warning` |
+| `--grid-angle-deviation` | Grid angle deviation | disabled (`false`) |
 
 * `false` (also accepted: `off`, `disable`, `disabled`, `none`) disables
   the check entirely: it is neither run nor printed in the report.
@@ -115,6 +140,133 @@ disconnected sub-maps and influence zone overlaps entirely:
 map_analyser.py check my_map.tmap2.yaml \
   --sub-map-separation=false --influence-zone-overlap=false
 ```
+
+## Grid angle deviation check
+
+Many topological maps are expected to have nodes that look locally
+like right-angle grid corners/crosses/T-junctions, e.g. rows in a
+field, aisles in a warehouse — even if the whole layout is rotated
+relative to the map's x/y axes, or different areas of the map are
+rotated relative to one another. The grid-angle-deviation check looks
+at the bearing of every edge incident to a node (both incoming and
+outgoing) and flags any edge whose direction deviates by more than a
+threshold from the *node's own* best-fit right-angle pattern (i.e. the
+angle **between** that node's edges), since such edges often indicate
+a mapping mistake. It does **not** compare edge bearings to the map's
+global 0/90/180/270 degree axes: a node whose edges point at, say,
+30/120/210/300 degrees passes the check just as well as one whose
+edges point at 0/90/180/270, because in both cases every edge is a
+90-degree multiple away from every other edge at that node. A node
+needs at least two incident edges for there to be an angle between
+edges to check; nodes with zero or one incident edge are never
+flagged.
+
+This check is **disabled by default**, since not every map (or every
+node in a map) is expected to have right-angled edges. Enable it with
+`--grid-angle-deviation=warning` (report only) or
+`--grid-angle-deviation=error` (also fail `check`), and restrict which
+nodes it applies to with one or more `--grid-angle-filter`/
+`--grid-angle-exclude` switches:
+
+| Switch | Meaning | Default |
+|--------|---------|---------|
+| `--grid-angle-threshold DEG` | Maximum allowed deviation (degrees) of an edge from the node's own best-fit 90 degree multiple pattern before it is flagged | `5.0` |
+| `--grid-angle-filter FILTER` | Select nodes expected to have mutually right-angled edges. Repeatable; the selected set is the union (OR) of every match | every node |
+| `--grid-angle-exclude FILTER` | Remove nodes matching `FILTER` from the selected set (applied after all `--grid-angle-filter` matches are unioned). Repeatable | none |
+
+Both `--grid-angle-filter` and `--grid-angle-exclude` accept the same
+`FILTER` syntax:
+
+* `name:<glob>` – matches node names against a shell-style wildcard
+  pattern (`*`, `?`, `[seq]`), e.g. `name:Row*` or `name:Junction?`.
+* `property:<key>` – matches nodes whose `properties` dict has a
+  truthy value at `<key>` (dotted for nested keys, e.g.
+  `property:roboflow.enabled`).
+* `property:<key>=<value>` – matches nodes whose `properties` dict has
+  a value at `<key>` that case-insensitively equals `<value>` as a
+  string, e.g. `property:semantics=row_entry`.
+
+If no `--grid-angle-filter` is given, every node in the map is
+selected (minus any `--grid-angle-exclude` matches). Multiple
+`--grid-angle-filter` switches are combined with OR (disjunction); the
+final selected set is that disjunction minus every node matched by any
+`--grid-angle-exclude`.
+
+```bash
+# Only check nodes whose name starts with "Row", ignoring the parking bay
+map_analyser.py check my_map.tmap2.yaml --grid-angle-deviation=error \
+  --grid-angle-filter "name:Row*" --grid-angle-exclude "name:RowParking"
+
+# Only check nodes explicitly tagged as grid-aligned via a property
+map_analyser.py check my_map.tmap2.yaml --grid-angle-deviation=error \
+  --grid-angle-filter "property:grid_aligned"
+
+# Use a looser 10 degree threshold
+map_analyser.py check my_map.tmap2.yaml --grid-angle-deviation=warning \
+  --grid-angle-threshold 10
+```
+
+## `grid-align` command
+
+`grid-align` automatically repositions the nodes selected by
+`--grid-angle-filter`/`--grid-angle-exclude` (same syntax as the
+grid-angle-deviation check above) to minimise the deviation of their
+incident edges from a 90 degree multiple of one another, and writes
+the result to a new map file. Nodes not selected by the filters (i.e.
+the neighbours used as reference points) are never moved.
+
+```bash
+map_analyser.py grid-align my_map.tmap2.yaml
+map_analyser.py grid-align my_map.tmap2.yaml -o aligned.tmap2.yaml
+map_analyser.py grid-align my_map.tmap2.yaml --grid-angle-filter "name:Row*"
+map_analyser.py grid-align my_map.tmap2.yaml --grid-angle-threshold 10
+```
+
+If `-o`/`--output` is omitted, the output path is derived from the
+input file by inserting `.gridalign` before the extension, e.g.
+`my_map.tmap2.yaml` -> `my_map.gridalign.tmap2.yaml`.
+
+For each selected node, the node's own best-fit local right-angle
+pattern is first computed from the bearings of all of its own
+incident edges (before any node is moved). Every neighbour it shares
+an edge with (incoming or outgoing) is then classified as lying
+roughly "along" or "across" that local pattern, and the node is moved
+onto the average alignment of those neighbours within that same
+locally-oriented frame (e.g. a node with one neighbour roughly along
+its pattern and one neighbour roughly across it is moved to share
+each neighbour's corresponding coordinate in that frame). This works
+the same way regardless of how the node's local neighbourhood happens
+to be rotated relative to the rest of the map — it never snaps nodes
+onto the map's global x/y axes. Neighbouring nodes themselves are
+never moved by this process, even if they are also part of the
+selected set: each selected node is repositioned independently, in a
+single pass, based on the original (pre-alignment) positions of all
+its neighbours.
+
+If, after being repositioned, a node still has at least one incident
+edge outside the angle threshold (e.g. because its neighbours are not
+themselves consistently aligned), the node is left at its **original**
+position and reported as **unresolved**; these nodes are listed in the
+report and the command exits with code `1` (the output map is still
+written with whatever adjustments could be made to the other nodes).
+
+```bash
+$ map_analyser.py grid-align my_map.tmap2.yaml --grid-angle-filter "name:Row*"
+Grid-align report: my_map.tmap2.yaml -> my_map.gridalign.tmap2.yaml
+============================================================
+  Angle threshold: 5 deg
+  Nodes adjusted:  2
+    - Row1Start: (1.200, 0.950) -> (1.200, 1.000) [max deviation 4.2 deg -> 0.0 deg]
+    - Row1End: (11.100, 1.050) -> (11.100, 1.000) [max deviation 3.1 deg -> 0.0 deg]
+  Unresolved nodes: 1 (could not be aligned):
+    - Row2End
+  Schema check on output: PASS: Validation successful
+```
+
+`grid-align` shares the `--schema`/`-s` switch with the other commands
+(to validate against a non-default schema file) and, like `minify`,
+re-parses and schema-validates its own output before reporting
+success.
 
 ## `minify` command
 
