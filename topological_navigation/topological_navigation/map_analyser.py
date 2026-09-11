@@ -799,6 +799,26 @@ def generate_svg(
         py = margin + (max_y - point[1]) * scale
         return px, py
 
+    # Characteristic pixel spacing between connected nodes, used below to
+    # scale marker/line/font sizes so they stay clearly visible regardless
+    # of the map's physical scale or node density. Falls back to an
+    # estimate from the drawable area and node count for edgeless maps.
+    edge_px_lengths = [
+        math.hypot(x2 - x1, y2 - y1)
+        for u, v in graph.edges()
+        for (x1, y1), (x2, y2) in [(to_px(positions[u]), to_px(positions[v]))]
+        if u != v
+    ]
+    if edge_px_lengths:
+        char_length = sum(edge_px_lengths) / len(edge_px_lengths)
+    else:
+        char_length = min(drawable_w, drawable_h) / max(math.sqrt(len(node_names)), 1.0)
+
+    node_radius = max(1.0, min(char_length * 0.06, 6.0))
+    highlight_radius = node_radius * 1.5
+    edge_stroke_width = max(0.5, min(char_length * 0.03, 4.0))
+    font_size = max(3.0, min(char_length * 0.09, 14.0))
+
     svg_parts: List[str] = []
     svg_parts.append(
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" '
@@ -851,7 +871,7 @@ def generate_svg(
 
         svg_parts.append(
             f'<line x1="{x1:.2f}" y1="{y1:.2f}" x2="{x2:.2f}" y2="{y2:.2f}" '
-            f'stroke="{colour}" stroke-width="1"{marker_attr}>'
+            f'stroke="{colour}" stroke-width="{edge_stroke_width:.2f}"{marker_attr}>'
             f'<title>{_svg_text(data.get("edge_id", ""))} ({_svg_text(action)})</title>'
             f'</line>'
         )
@@ -861,14 +881,14 @@ def generate_svg(
         px, py = to_px(positions[node_name])
         severity = node_highlights.get(node_name)
         colour = _SEVERITY_COLOURS.get(severity, "steelblue")
-        radius = 1.5 if severity else 1
+        radius = highlight_radius if severity else node_radius
         svg_parts.append(
-            f'<circle cx="{px:.2f}" cy="{py:.2f}" r="{radius}" fill="{colour}" '
+            f'<circle cx="{px:.2f}" cy="{py:.2f}" r="{radius:.2f}" fill="{colour}" '
             f'stroke="black" stroke-width="0"><title>{_svg_text(node_name)}</title></circle>'
         )
         svg_parts.append(
-            f'<text x="{px + 2:.2f}" y="{py + 1.5:.2f}" font-size="3" '
-            f'font-family="sans-serif">{_svg_text(node_name)}</text>'
+            f'<text x="{px + radius + 1:.2f}" y="{py + font_size * 0.35:.2f}" '
+            f'font-size="{font_size:.2f}" font-family="sans-serif">{_svg_text(node_name)}</text>'
         )
 
     # --- legend --------------------------------------------------------
