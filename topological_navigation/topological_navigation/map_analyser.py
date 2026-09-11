@@ -152,6 +152,13 @@ _FALLBACK_PALETTE = [
     "#e377c2", "#7f7f7f", "#bcbd22", "#17becf", "#d62728",
 ]
 
+# Colours used to highlight nodes that failed a check, keyed by that check's
+# configured severity (see DEFAULT_CHECK_SEVERITY / --<check> switches).
+_SEVERITY_COLOURS = {
+    "error": "#d62728",    # red
+    "warning": "#ff9900",  # amber
+}
+
 
 def _colour_for_action(action: str) -> str:
     """Return a stable hex colour for an action name."""
@@ -730,6 +737,7 @@ def generate_svg(
     width: int = 1200,
     height: int = 900,
     margin: float = 40.0,
+    node_highlights: Optional[Dict[str, str]] = None,
 ) -> str:
     """Render the topological map graph as an SVG file.
 
@@ -744,10 +752,15 @@ def generate_svg(
         title: Optional title rendered at the top of the image.
         width, height: Output image size in pixels.
         margin: Margin in pixels around the map content.
+        node_highlights: Optional ``{node_name: 'error'|'warning'}`` mapping
+            (see :func:`compute_node_highlights`) used to colour nodes that
+            failed the influence-zone-overlap or grid-angle-deviation checks;
+            unlisted nodes are drawn in the default colour.
 
     Returns:
         The SVG document as a string (also written to ``output_path``).
     """
+    node_highlights = node_highlights or {}
     node_names = list(graph.nodes())
     if not node_names:
         raise ValueError("Cannot render SVG for an empty map")
@@ -838,7 +851,7 @@ def generate_svg(
 
         svg_parts.append(
             f'<line x1="{x1:.2f}" y1="{y1:.2f}" x2="{x2:.2f}" y2="{y2:.2f}" '
-            f'stroke="{colour}" stroke-width="2"{marker_attr}>'
+            f'stroke="{colour}" stroke-width="1"{marker_attr}>'
             f'<title>{_svg_text(data.get("edge_id", ""))} ({_svg_text(action)})</title>'
             f'</line>'
         )
@@ -846,8 +859,11 @@ def generate_svg(
     # --- nodes -------------------------------------------------------------
     for node_name in node_names:
         px, py = to_px(positions[node_name])
+        severity = node_highlights.get(node_name)
+        colour = _SEVERITY_COLOURS.get(severity, "steelblue")
+        radius = 1.5 if severity else 1
         svg_parts.append(
-            f'<circle cx="{px:.2f}" cy="{py:.2f}" r="2" fill="steelblue" '
+            f'<circle cx="{px:.2f}" cy="{py:.2f}" r="{radius}" fill="{colour}" '
             f'stroke="black" stroke-width="0"><title>{_svg_text(node_name)}</title></circle>'
         )
         svg_parts.append(
@@ -860,7 +876,19 @@ def generate_svg(
         str(data.get("action", "unknown") or "unknown")
         for _, _, data in graph.edges(data=True)
     })
-    legend_y = height - 20 * len(actions) - 10
+    used_severities = sorted(set(node_highlights.values()), reverse=True)  # error before warning
+    legend_y = height - 20 * (len(actions) + len(used_severities)) - 10
+    for i, severity in enumerate(used_severities):
+        colour = _SEVERITY_COLOURS.get(severity, "steelblue")
+        ly = legend_y + i * 20
+        svg_parts.append(
+            f'<circle cx="{width - 175}" cy="{ly}" r="4" fill="{colour}"/>'
+        )
+        svg_parts.append(
+            f'<text x="{width - 145}" y="{ly + 4:.1f}" font-size="11" '
+            f'font-family="sans-serif">Node {_svg_text(severity)}</text>'
+        )
+    legend_y += 20 * len(used_severities)
     for i, action in enumerate(actions):
         colour = _colour_for_action(action)
         ly = legend_y + i * 20
@@ -995,12 +1023,16 @@ class AnalysisResult:
                 f"{self.grid_angle_threshold_deg:g} deg from a 90 deg multiple of another edge "
                 f"at the same node:"
             )
+            by_node: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
             for d in self.grid_angle_deviations:
-                edges = ", ".join(d["edge_ids"])
-                lines.append(
-                    f"    - {d['node']} <-> {d['neighbour']} "
-                    f"(bearing={d['bearing_deg']:.1f} deg, deviation={d['deviation_deg']:.1f} deg) [{edges}]"
+                by_node[d["node"]].append(d)
+            for node in sorted(by_node):
+                findings = by_node[node]
+                edge_descs = ", ".join(
+                    f"'{d['neighbour']}' (deviation={d['deviation_deg']:.1f} deg)" for d in findings
                 )
+                edge_ids = ", ".join(sorted({eid for d in findings for eid in d["edge_ids"]}))
+                lines.append(f"    - Node '{node}': {edge_descs} [{edge_ids}]")
         else:
             lines.append(f"  {label}: No irregular grid angles found")
 
@@ -1022,6 +1054,37 @@ class AnalysisResult:
             lines.append(f"[SVG] Generated at {self.svg_path}")
 
         return "\n".join(lines)
+
+
+def compute_node_highlights(
+    overlaps: List[Dict[str, Any]],
+    grid_angle_deviations: List[Dict[str, Any]],
+    check_severities: Dict[str, Optional[str]],
+) -> Dict[str, str]:
+    """Return ``{node_name: 'error'|'warning'}`` for nodes that failed the
+    influence-zone-overlap or grid-angle-deviation checks, for use as the
+    ``node_highlights`` argument to :func:`generate_svg`.
+
+    A node's severity is that of whichever failing check it is worst under;
+    ``'error'`` always wins over ``'warning'`` if a node fails both.
+    """
+    highlights: Dict[str, str] = {}
+
+    def _mark(node: str, severity: Optional[str]) -> None:
+        if severity is None or highlights.get(node) == "error":
+            return
+        highlights[node] = severity
+
+    overlap_severity = check_severities.get("influence-zone-overlap")
+    for o in overlaps:
+        _mark(o["node_a"], overlap_severity)
+        _mark(o["node_b"], overlap_severity)
+
+    grid_severity = check_severities.get("grid-angle-deviation")
+    for d in grid_angle_deviations:
+        _mark(d["node"], grid_severity)
+
+    return highlights
 
 
 def analyse_map(
@@ -1070,6 +1133,12 @@ def analyse_map(
             check_severities=severities,
         )
 
+    overlaps: List[Dict[str, Any]] = (
+        find_overlapping_influence_zones(graph)
+        if severities["influence-zone-overlap"] is not None
+        else []
+    )
+
     grid_angle_deviations: List[Dict[str, Any]] = []
     if severities["grid-angle-deviation"] is not None:
         selected_nodes = select_nodes_by_filters(graph, grid_angle_filters, grid_angle_exclude_filters)
@@ -1088,18 +1157,15 @@ def analyse_map(
             else []
         ),
         statistics=compute_statistics(graph),
-        overlaps=(
-            find_overlapping_influence_zones(graph)
-            if severities["influence-zone-overlap"] is not None
-            else []
-        ),
+        overlaps=overlaps,
         grid_angle_deviations=grid_angle_deviations,
         grid_angle_threshold_deg=grid_angle_threshold_deg,
         check_severities=severities,
     )
 
     if svg_path:
-        generate_svg(graph, svg_path, title=os.path.basename(map_file))
+        node_highlights = compute_node_highlights(overlaps, grid_angle_deviations, severities)
+        generate_svg(graph, svg_path, title=os.path.basename(map_file), node_highlights=node_highlights)
         result.svg_path = svg_path
 
     return result
