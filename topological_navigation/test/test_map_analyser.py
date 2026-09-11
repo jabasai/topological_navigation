@@ -2,7 +2,8 @@
 
 Covers geometry helpers (polygon overlap / point-in-polygon), graph
 analysis (orphaned nodes, disconnected components, statistics),
-SVG generation, and the top-level ``analyse_map`` / CLI ``check``
+grid-angle-deviation node filtering/detection/alignment, SVG
+generation, and the top-level ``analyse_map`` / CLI ``check``
 behaviour.
 """
 
@@ -16,21 +17,31 @@ import yaml
 
 from topological_navigation.map_analyser import (
     DEFAULT_ANCHORS_KEY,
+    DEFAULT_GRID_ANGLE_THRESHOLD_DEG,
     AnalysisResult,
+    GridAlignResult,
     MinifyResult,
     analyse_map,
     build_arg_parser,
+    compute_edge_bearing,
+    compute_grid_alignment_adjustments,
     compute_statistics,
     find_disconnected_components,
+    find_grid_angle_deviations,
     find_orphaned_nodes,
     find_overlapping_influence_zones,
     generate_svg,
     get_node_polygon,
+    grid_align_map,
+    grid_angle_deviation,
     is_bidirectional_edge,
     main,
     minify_map,
+    node_matches_filter,
+    parse_node_filter,
     point_in_polygon,
     polygons_overlap,
+    select_nodes_by_filters,
 )
 from topological_navigation.tmap_utils import CustomSafeLoader, load_tmap2_file
 
@@ -167,6 +178,268 @@ class TestFindOverlappingInfluenceZones:
     def test_simple_map_has_no_overlaps(self):
         result = analyse_map(SIMPLE_MAP)
         assert result.overlaps == []
+
+
+# ---------------------------------------------------------------------------
+# Node filtering (name/property, used by grid-angle-deviation / grid-align)
+# ---------------------------------------------------------------------------
+
+def _make_filter_graph() -> "nx.DiGraph":
+    graph = nx.DiGraph()
+    graph.add_node(
+        "RowA1", x=0.0, y=0.0,
+        properties={"semantics": "row_entry", "roboflow": {"enabled": True}},
+    )
+    graph.add_node("RowA2", x=1.0, y=0.0, properties={"semantics": "row_exit"})
+    graph.add_node("Junction1", x=2.0, y=0.0, properties={})
+    return graph
+
+
+class TestParseNodeFilter:
+    def test_parses_name_filter(self):
+        node_filter = parse_node_filter("name:Row*")
+        assert node_filter.kind == "name"
+        assert node_filter.pattern == "Row*"
+
+    def test_parses_property_presence_filter(self):
+        node_filter = parse_node_filter("property:roboflow.enabled")
+        assert node_filter.kind == "property"
+        assert node_filter.key == "roboflow.enabled"
+        assert node_filter.value is None
+
+    def test_parses_property_value_filter(self):
+        node_filter = parse_node_filter("property:semantics=row_entry")
+        assert node_filter.kind == "property"
+        assert node_filter.key == "semantics"
+        assert node_filter.value == "row_entry"
+
+    def test_missing_colon_raises(self):
+        with pytest.raises(ValueError):
+            parse_node_filter("bogus-spec")
+
+    def test_unknown_filter_type_raises(self):
+        with pytest.raises(ValueError):
+            parse_node_filter("foo:bar")
+
+    def test_empty_name_pattern_raises(self):
+        with pytest.raises(ValueError):
+            parse_node_filter("name:")
+
+    def test_empty_property_key_raises(self):
+        with pytest.raises(ValueError):
+            parse_node_filter("property:")
+
+
+class TestNodeMatchesFilter:
+    def test_name_glob_matches(self):
+        graph = _make_filter_graph()
+        assert node_matches_filter(graph, "RowA1", parse_node_filter("name:Row*")) is True
+        assert node_matches_filter(graph, "Junction1", parse_node_filter("name:Row*")) is False
+
+    def test_property_presence_matches(self):
+        graph = _make_filter_graph()
+        node_filter = parse_node_filter("property:roboflow.enabled")
+        assert node_matches_filter(graph, "RowA1", node_filter) is True
+        assert node_matches_filter(graph, "RowA2", node_filter) is False
+
+    def test_property_value_matches_case_insensitively(self):
+        graph = _make_filter_graph()
+        node_filter = parse_node_filter("property:semantics=ROW_EXIT")
+        assert node_matches_filter(graph, "RowA2", node_filter) is True
+        assert node_matches_filter(graph, "RowA1", node_filter) is False
+
+    def test_missing_property_key_does_not_match(self):
+        graph = _make_filter_graph()
+        node_filter = parse_node_filter("property:nosuchkey")
+        assert node_matches_filter(graph, "RowA1", node_filter) is False
+
+
+class TestSelectNodesByFilters:
+    def test_no_filters_selects_all_nodes(self):
+        graph = _make_filter_graph()
+        assert select_nodes_by_filters(graph) == set(graph.nodes())
+
+    def test_single_name_filter(self):
+        graph = _make_filter_graph()
+        assert select_nodes_by_filters(graph, filters=["name:Row*"]) == {"RowA1", "RowA2"}
+
+    def test_disjunction_of_multiple_filters(self):
+        graph = _make_filter_graph()
+        selected = select_nodes_by_filters(graph, filters=["name:RowA1", "name:Junction1"])
+        assert selected == {"RowA1", "Junction1"}
+
+    def test_exclude_filter_removes_matches(self):
+        graph = _make_filter_graph()
+        selected = select_nodes_by_filters(
+            graph, filters=["name:Row*"], exclude_filters=["name:RowA2"]
+        )
+        assert selected == {"RowA1"}
+
+    def test_exclude_without_include_applies_to_all_nodes(self):
+        graph = _make_filter_graph()
+        selected = select_nodes_by_filters(graph, exclude_filters=["name:Junction1"])
+        assert selected == {"RowA1", "RowA2"}
+
+
+# ---------------------------------------------------------------------------
+# Grid angle deviation
+# ---------------------------------------------------------------------------
+
+def _axis_aligned_graph() -> "nx.DiGraph":
+    graph = nx.DiGraph()
+    graph.add_node("A", x=0.0, y=0.0)
+    graph.add_node("B", x=10.0, y=0.0)  # due east of A
+    graph.add_node("C", x=0.0, y=10.0)  # due north of A
+    graph.add_edge(
+        "A", "B", edge_id="A_B", action="navigate_to_pose", action_type="", properties={}, weight=1.0
+    )
+    graph.add_edge(
+        "A", "C", edge_id="A_C", action="navigate_to_pose", action_type="", properties={}, weight=1.0
+    )
+    return graph
+
+
+class TestGridAngleDeviationHelpers:
+    def test_grid_angle_deviation_zero_on_cardinal_directions(self):
+        for bearing in (0.0, 90.0, 180.0, 270.0, 360.0):
+            assert grid_angle_deviation(bearing) == pytest.approx(0.0, abs=1e-9)
+
+    def test_grid_angle_deviation_max_at_45_degrees(self):
+        assert grid_angle_deviation(45.0) == pytest.approx(45.0)
+        assert grid_angle_deviation(135.0) == pytest.approx(45.0)
+
+    def test_compute_edge_bearing(self):
+        graph = _axis_aligned_graph()
+        assert compute_edge_bearing(graph, "A", "B") == pytest.approx(0.0)
+        assert compute_edge_bearing(graph, "A", "C") == pytest.approx(90.0)
+        assert compute_edge_bearing(graph, "B", "A") == pytest.approx(180.0)
+
+
+class TestFindGridAngleDeviations:
+    def test_axis_aligned_grid_has_no_deviations(self):
+        graph = _axis_aligned_graph()
+        assert find_grid_angle_deviations(graph) == []
+
+    def test_diagonal_edge_is_flagged_from_both_ends(self):
+        graph = nx.DiGraph()
+        graph.add_node("A", x=0.0, y=0.0)
+        graph.add_node("B", x=10.0, y=10.0)  # 45 degrees
+        graph.add_edge(
+            "A", "B", edge_id="A_B", action="navigate_to_pose", action_type="", properties={}, weight=1.0
+        )
+
+        findings = find_grid_angle_deviations(graph)
+        assert len(findings) == 2
+        assert {f["node"] for f in findings} == {"A", "B"}
+        assert all(f["deviation_deg"] == pytest.approx(45.0) for f in findings)
+        assert all(f["edge_ids"] == ["A_B"] for f in findings)
+
+    def test_incoming_edge_is_considered(self):
+        """A node with only an incoming edge must still be checked."""
+        graph = nx.DiGraph()
+        graph.add_node("A", x=0.0, y=0.0)
+        graph.add_node("B", x=10.0, y=10.0)
+        graph.add_edge(
+            "B", "A", edge_id="B_A", action="navigate_to_pose", action_type="", properties={}, weight=1.0
+        )
+
+        findings = find_grid_angle_deviations(graph, nodes=["A"])
+        assert len(findings) == 1
+        assert findings[0]["node"] == "A"
+        assert findings[0]["neighbour"] == "B"
+
+    def test_threshold_suppresses_small_deviations(self):
+        graph = nx.DiGraph()
+        graph.add_node("A", x=0.0, y=0.0)
+        graph.add_node("B", x=10.0, y=1.0)  # ~5.7 degrees off horizontal
+        graph.add_edge(
+            "A", "B", edge_id="A_B", action="navigate_to_pose", action_type="", properties={}, weight=1.0
+        )
+
+        assert find_grid_angle_deviations(graph, threshold_deg=10.0) == []
+        assert len(find_grid_angle_deviations(graph, threshold_deg=1.0)) == 2
+
+    def test_nodes_argument_restricts_scope(self):
+        graph = nx.DiGraph()
+        graph.add_node("A", x=0.0, y=0.0)
+        graph.add_node("B", x=10.0, y=10.0)
+        graph.add_edge(
+            "A", "B", edge_id="A_B", action="navigate_to_pose", action_type="", properties={}, weight=1.0
+        )
+
+        findings = find_grid_angle_deviations(graph, nodes=["A"])
+        assert {f["node"] for f in findings} == {"A"}
+
+
+class TestComputeGridAlignmentAdjustments:
+    def test_already_aligned_node_is_left_untouched(self):
+        graph = _axis_aligned_graph()
+        adjustments, unresolved = compute_grid_alignment_adjustments(graph, ["A"])
+        assert adjustments == []
+        assert unresolved == []
+
+    def test_node_without_edges_is_skipped(self):
+        graph = nx.DiGraph()
+        graph.add_node("Isolated", x=0.0, y=0.0)
+        adjustments, unresolved = compute_grid_alignment_adjustments(graph, ["Isolated"])
+        assert adjustments == []
+        assert unresolved == []
+
+    def test_single_neighbour_node_snaps_onto_the_grid(self):
+        graph = nx.DiGraph()
+        graph.add_node("A", x=1.0, y=1.0)  # slightly off due-east of B
+        graph.add_node("B", x=10.0, y=0.0)
+        graph.add_edge(
+            "A", "B", edge_id="A_B", action="navigate_to_pose", action_type="", properties={}, weight=1.0
+        )
+
+        adjustments, unresolved = compute_grid_alignment_adjustments(graph, ["A"])
+        assert unresolved == []
+        assert len(adjustments) == 1
+        adj = adjustments[0]
+        assert adj.node == "A"
+        assert adj.max_deviation_after == pytest.approx(0.0, abs=1e-6)
+        # The neighbour itself must never be modified.
+        assert graph.nodes["B"]["x"] == 10.0 and graph.nodes["B"]["y"] == 0.0
+
+    def test_corner_node_with_two_perpendicular_neighbours(self):
+        graph = nx.DiGraph()
+        graph.add_node("Corner", x=1.0, y=1.0)
+        graph.add_node("East", x=10.0, y=0.0)
+        graph.add_node("North", x=0.0, y=10.0)
+        graph.add_edge(
+            "Corner", "East", edge_id="c_e", action="navigate_to_pose",
+            action_type="", properties={}, weight=1.0,
+        )
+        graph.add_edge(
+            "Corner", "North", edge_id="c_n", action="navigate_to_pose",
+            action_type="", properties={}, weight=1.0,
+        )
+
+        adjustments, unresolved = compute_grid_alignment_adjustments(graph, ["Corner"])
+        assert unresolved == []
+        assert len(adjustments) == 1
+        new_x, new_y = adjustments[0].new_position
+        assert new_y == pytest.approx(0.0)  # aligned with East
+        assert new_x == pytest.approx(0.0)  # aligned with North
+
+    def test_conflicting_neighbours_are_left_unresolved(self):
+        graph = nx.DiGraph()
+        graph.add_node("A", x=5.0, y=5.0)
+        graph.add_node("B", x=0.0, y=0.0)   # diagonal from A
+        graph.add_node("C", x=20.0, y=5.0)  # already axis-aligned with A
+        graph.add_edge(
+            "A", "B", edge_id="a_b", action="navigate_to_pose", action_type="", properties={}, weight=1.0
+        )
+        graph.add_edge(
+            "A", "C", edge_id="a_c", action="navigate_to_pose", action_type="", properties={}, weight=1.0
+        )
+
+        adjustments, unresolved = compute_grid_alignment_adjustments(
+            graph, ["A"], threshold_deg=DEFAULT_GRID_ANGLE_THRESHOLD_DEG
+        )
+        assert adjustments == []
+        assert unresolved == ["A"]
 
 
 # ---------------------------------------------------------------------------
@@ -348,9 +621,79 @@ class TestAnalyseMap:
         for section in (
             "[Schema validation]", "[Orphaned nodes]",
             "[Disconnected sub-maps]", "[Overlapping influence zones]",
-            "[Statistics]",
+            "[Grid angle deviation]", "[Statistics]",
         ):
             assert section in report
+
+
+class TestAnalyseMapGridAngleDeviation:
+    """COMPLEX_MAP contains genuinely diagonal (45 deg) edges around
+    Entry/Row1Start/Row1End/Row2End/Junction2 (see test/fixtures/README.md);
+    these are used here to exercise the (disabled-by-default) check."""
+
+    def test_disabled_by_default(self):
+        result = analyse_map(COMPLEX_MAP)
+        assert result.grid_angle_deviations == []
+        assert result.check_severities["grid-angle-deviation"] is None
+
+    def test_enabled_finds_deviations(self):
+        result = analyse_map(COMPLEX_MAP, check_severities={"grid-angle-deviation": "warning"})
+        assert len(result.grid_angle_deviations) > 0
+        assert "Row1Start" in {d["node"] for d in result.grid_angle_deviations}
+
+    def test_error_severity_makes_map_invalid(self):
+        result = analyse_map(
+            COMPLEX_MAP,
+            check_severities={
+                "schema": None, "orphaned-node": None,
+                "sub-map-separation": None, "influence-zone-overlap": None,
+                "grid-angle-deviation": "error",
+            },
+        )
+        assert result.is_valid is False
+
+    def test_warning_severity_does_not_invalidate_map(self):
+        result = analyse_map(
+            COMPLEX_MAP,
+            check_severities={
+                "schema": None, "orphaned-node": None,
+                "sub-map-separation": None, "influence-zone-overlap": None,
+                "grid-angle-deviation": "warning",
+            },
+        )
+        assert len(result.grid_angle_deviations) > 0
+        assert result.is_valid is True
+
+    def test_filter_restricts_selected_nodes(self):
+        result = analyse_map(
+            COMPLEX_MAP,
+            check_severities={"grid-angle-deviation": "warning"},
+            grid_angle_filters=["name:Row1*"],
+        )
+        nodes = {d["node"] for d in result.grid_angle_deviations}
+        assert nodes and nodes <= {"Row1Start", "Row1End"}
+
+    def test_exclude_filter_removes_matches(self):
+        result = analyse_map(
+            COMPLEX_MAP,
+            check_severities={"grid-angle-deviation": "warning"},
+            grid_angle_exclude_filters=["name:Row1Start"],
+        )
+        assert "Row1Start" not in {d["node"] for d in result.grid_angle_deviations}
+
+    def test_looser_threshold_clears_deviations(self):
+        result = analyse_map(
+            COMPLEX_MAP,
+            check_severities={"grid-angle-deviation": "warning"},
+            grid_angle_threshold_deg=60.0,
+        )
+        assert result.grid_angle_deviations == []
+
+    def test_format_report_shows_skipped_when_disabled(self):
+        result = analyse_map(COMPLEX_MAP)
+        report = result.format_report()
+        section = report.split("[Grid angle deviation]")[1].split("[Statistics]")[0]
+        assert "SKIPPED" in section
 
 
 # ---------------------------------------------------------------------------
@@ -474,6 +817,61 @@ class TestMinifyMap:
 
 
 # ---------------------------------------------------------------------------
+# Grid alignment
+# ---------------------------------------------------------------------------
+
+class TestGridAlignMap:
+    def test_writes_output_and_reports_schema_validity(self, tmp_path):
+        out = tmp_path / "aligned.yaml"
+        result = grid_align_map(COMPLEX_MAP, output_file=str(out), filters=["name:Row1*"])
+
+        assert isinstance(result, GridAlignResult)
+        assert out.is_file()
+        assert result.schema_valid is True
+
+    def test_derives_output_path_when_not_given(self, tmp_path):
+        src = tmp_path / "my_map.tmap2.yaml"
+        src.write_text(open(COMPLEX_MAP, encoding="utf-8").read())
+        result = grid_align_map(str(src))
+        expected = tmp_path / "my_map.gridalign.tmap2.yaml"
+        assert result.output_file == str(expected)
+        assert expected.is_file()
+
+    def test_unresolved_nodes_are_listed_and_left_unmoved(self, tmp_path):
+        out = tmp_path / "aligned.yaml"
+        original = load_tmap2_file(COMPLEX_MAP)
+        original_position = next(
+            n["node"]["pose"]["position"] for n in original["nodes"] if n["node"]["name"] == "Row1Start"
+        )
+
+        result = grid_align_map(COMPLEX_MAP, output_file=str(out), filters=["name:Row1Start"])
+
+        assert "Row1Start" in result.unresolved_nodes
+        assert result.adjustments == []
+
+        aligned = load_tmap2_file(str(out))
+        aligned_position = next(
+            n["node"]["pose"]["position"] for n in aligned["nodes"] if n["node"]["name"] == "Row1Start"
+        )
+        assert aligned_position == original_position
+
+    def test_format_report_contains_key_sections(self, tmp_path):
+        out = tmp_path / "aligned.yaml"
+        result = grid_align_map(COMPLEX_MAP, output_file=str(out), filters=["name:Row1*"])
+        report = result.format_report()
+        assert "Angle threshold" in report
+        assert "Nodes adjusted" in report
+        assert "Unresolved nodes" in report
+
+    def test_raises_for_map_with_no_nodes_field(self, tmp_path):
+        out = tmp_path / "aligned.yaml"
+        empty = tmp_path / "empty.yaml"
+        empty.write_text("meta: {}\n")
+        with pytest.raises(ValueError):
+            grid_align_map(str(empty), output_file=str(out))
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -524,4 +922,71 @@ class TestCli:
         out = tmp_path / "cli_out.min.yaml"
         with pytest.raises(SystemExit) as exc_info:
             main(["minify", COMPLEX_MAP, "-o", str(out), "--strip-unreachable", "NoSuchNode"])
+        assert exc_info.value.code == 2
+
+    def test_check_grid_angle_deviation_disabled_by_default(self, capsys):
+        with pytest.raises(SystemExit) as exc_info:
+            main([
+                "check", COMPLEX_MAP,
+                "--orphaned-node=false", "--sub-map-separation=false",
+                "--influence-zone-overlap=false",
+            ])
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        assert "SKIPPED" in captured.out
+
+    def test_check_grid_angle_deviation_error_severity_fails(self, capsys):
+        with pytest.raises(SystemExit) as exc_info:
+            main([
+                "check", COMPLEX_MAP, "--grid-angle-deviation=error",
+                "--orphaned-node=false", "--sub-map-separation=false",
+                "--influence-zone-overlap=false",
+            ])
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        assert "Grid angle deviation" in captured.out
+
+    def test_check_grid_angle_deviation_warning_passes(self, capsys):
+        with pytest.raises(SystemExit) as exc_info:
+            main([
+                "check", COMPLEX_MAP, "--grid-angle-deviation=warning",
+                "--orphaned-node=false", "--sub-map-separation=false",
+                "--influence-zone-overlap=false",
+            ])
+        assert exc_info.value.code == 0
+
+    def test_check_grid_angle_filter_restricts_failures(self, capsys):
+        with pytest.raises(SystemExit) as exc_info:
+            main([
+                "check", COMPLEX_MAP, "--grid-angle-deviation=error",
+                "--orphaned-node=false", "--sub-map-separation=false",
+                "--influence-zone-overlap=false",
+                "--grid-angle-filter", "name:NoSuchNode*",
+            ])
+        assert exc_info.value.code == 0
+
+    def test_grid_align_command_writes_file_and_prints_report(self, tmp_path, capsys):
+        out = tmp_path / "aligned.yaml"
+        main([
+            "grid-align", COMPLEX_MAP, "-o", str(out),
+            "--grid-angle-filter", "name:Exit",
+        ])
+        assert out.is_file()
+        captured = capsys.readouterr()
+        assert "Grid-align report" in captured.out
+
+    def test_grid_align_command_exits_one_when_unresolved(self, tmp_path, capsys):
+        out = tmp_path / "aligned.yaml"
+        with pytest.raises(SystemExit) as exc_info:
+            main([
+                "grid-align", COMPLEX_MAP, "-o", str(out),
+                "--grid-angle-filter", "name:Row1Start",
+            ])
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        assert "Row1Start" in captured.out
+
+    def test_grid_align_command_exits_two_for_missing_file(self, capsys):
+        with pytest.raises(SystemExit) as exc_info:
+            main(["grid-align", "/no/such/file.yaml"])
         assert exc_info.value.code == 2

@@ -10,16 +10,22 @@ Analyses a ``.tmap2.yaml`` topological map file and reports:
   type breakdown, bidirectional edge count, etc.)
 * overlapping influence zones (node polygons that overlap, or a node
   whose position falls inside another node's polygon)
+* grid angle deviation (disabled by default) - flags edges whose
+  bearing deviates too far from a multiple of 90 degrees, for nodes
+  that are expected to sit on a regular grid
 
 It can also render an SVG representation of the whole map, with
 bidirectional edges drawn without arrow heads, directional edges drawn
 with an arrow head indicating direction, and edges colour-coded by
 their action name.
 
-Finally, it can produce a smaller, semantically identical copy of a map
+It can produce a smaller, semantically identical copy of a map
 by collapsing repeated node/edge sub-structures (e.g. shared
 ``properties``, ``verts`` or ``orientation`` dicts) into named YAML
 anchors, and/or by dropping nodes/edges unreachable from a given node.
+
+Finally, it can reposition nodes to reduce grid angle deviation (the
+``grid-align`` command) and save the adjusted map.
 
 This tool has no ROS 2 runtime dependency: it only needs ``pyyaml``,
 ``jsonschema`` and ``networkx`` (plus ``numpy`` and ``scipy`` via
@@ -33,13 +39,21 @@ Usage::
     python3 map_analyser.py svg map.tmap2.yaml -o out.svg
     python3 map_analyser.py minify map.tmap2.yaml [--anchors] [--strip-unreachable NODE]
     python3 map_analyser.py merge map_a.tmap2.yaml map_b.tmap2.yaml -o merged.tmap2.yaml
+    python3 map_analyser.py grid-align map.tmap2.yaml --grid-angle-filter "name:Row*"
 
 Each check can be individually turned off or have its severity changed
 between "warning" (printed, exit code unaffected) and "error" (printed,
 exit code 1) via ``--<check>={false,warning,error}`` switches, e.g.
 ``--sub-map-separation=error`` or ``--influence-zone-overlap=false``.
 Defaults: schema/orphaned-node = error, sub-map-separation/
-influence-zone-overlap = warning.
+influence-zone-overlap = warning, grid-angle-deviation = disabled.
+
+The grid-angle-deviation check (and the ``grid-align`` command) select
+which nodes are expected to lie on a regular grid via repeatable
+``--grid-angle-filter``/``--grid-angle-exclude`` switches, each of the
+form ``name:<glob>`` or ``property:<key>[=<value>]``; the selected set
+is the union of every ``--grid-angle-filter`` match (or every node, if
+none given), minus any ``--grid-angle-exclude`` match.
 
 Exit codes for the ``check`` command:
     0 - Map is valid
@@ -48,6 +62,7 @@ Exit codes for the ``check`` command:
 """
 
 import argparse
+import fnmatch
 import itertools
 import logging
 import math
@@ -57,7 +72,7 @@ import sys
 from collections import Counter, defaultdict
 from copy import deepcopy
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 from xml.sax.saxutils import escape as _xml_escape
 
 try:
@@ -92,11 +107,19 @@ DEFAULT_CHECK_SEVERITY: Dict[str, Optional[str]] = {
     "orphaned-node": "error",
     "sub-map-separation": "warning",
     "influence-zone-overlap": "warning",
+    # Disabled by default: most maps are not laid out on a regular grid, so
+    # this check must be explicitly opted into via --grid-angle-deviation.
+    "grid-angle-deviation": None,
 }
 
 # Top-level YAML key under which minify_map() collects collapsed anchors;
 # double-underscore prefix keeps it visually distinct from real map data.
 DEFAULT_ANCHORS_KEY = "__yaml_anchors"
+
+# Default maximum allowed deviation (degrees) of an edge's bearing from the
+# nearest multiple of 90 degrees before it is flagged by the
+# grid-angle-deviation check / grid-align command.
+DEFAULT_GRID_ANGLE_THRESHOLD_DEG = 5.0
 
 
 def _parse_severity(value: str) -> Optional[str]:
@@ -337,6 +360,277 @@ def compute_statistics(graph: "nx.DiGraph") -> Dict[str, Any]:
 
 
 # =====================================================================
+# Node filtering (used by the grid-angle-deviation check / grid-align)
+# =====================================================================
+
+@dataclass
+class NodeFilter:
+    """A single node selection criterion.
+
+    Parsed from a ``name:<glob>`` or ``property:<key>[=<value>]`` spec
+    string by :func:`parse_node_filter`.
+    """
+
+    kind: str  # "name" or "property"
+    pattern: Optional[str] = None  # glob pattern, for kind == "name"
+    key: Optional[str] = None  # dotted property key, for kind == "property"
+    value: Optional[str] = None  # expected value (as string); None means "any value"
+
+
+def parse_node_filter(spec: str) -> NodeFilter:
+    """Parse a ``name:<glob>`` or ``property:<key>[=<value>]`` filter spec string.
+
+    ``name:<glob>`` matches node names via shell-style wildcards (see
+    :mod:`fnmatch`), e.g. ``"name:Row*"``. ``property:<key>[=<value>]``
+    matches a (optionally dotted, for nested properties) key in the node's
+    ``properties`` dict, e.g. ``"property:semantics=row_entry"`` or
+    ``"property:roboflow.enabled"`` (presence-only, any truthy value).
+    """
+    if ":" not in spec:
+        raise ValueError(
+            f"Invalid node filter {spec!r}: expected 'name:<glob>' or 'property:<key>[=<value>]'"
+        )
+    kind, _, rest = spec.partition(":")
+    kind = kind.strip().lower()
+    if kind == "name":
+        if not rest:
+            raise ValueError(f"Invalid node filter {spec!r}: empty glob pattern")
+        return NodeFilter(kind="name", pattern=rest)
+    if kind == "property":
+        if not rest:
+            raise ValueError(f"Invalid node filter {spec!r}: empty property key")
+        key, sep, value = rest.partition("=")
+        return NodeFilter(kind="property", key=key, value=value if sep else None)
+    raise ValueError(
+        f"Invalid node filter {spec!r}: unknown filter type {kind!r} (expected 'name' or 'property')"
+    )
+
+
+def _lookup_nested(mapping: Optional[Dict[str, Any]], dotted_key: str) -> Tuple[Any, bool]:
+    """Look up a dotted key path (e.g. ``"roboflow.enabled"``) in a nested dict.
+
+    Returns ``(value, found)``.
+    """
+    obj: Any = mapping or {}
+    for part in dotted_key.split("."):
+        if not isinstance(obj, dict) or part not in obj:
+            return None, False
+        obj = obj[part]
+    return obj, True
+
+
+def node_matches_filter(graph: "nx.DiGraph", node_name: str, node_filter: NodeFilter) -> bool:
+    """Return True if *node_name* matches *node_filter*."""
+    if node_filter.kind == "name":
+        return fnmatch.fnmatch(node_name, node_filter.pattern)
+    if node_filter.kind == "property":
+        props = graph.nodes[node_name].get("properties") or {}
+        value, found = _lookup_nested(props, node_filter.key)
+        if not found:
+            return False
+        if node_filter.value is None:
+            return bool(value)
+        return str(value).strip().lower() == node_filter.value.strip().lower()
+    return False
+
+
+def select_nodes_by_filters(
+    graph: "nx.DiGraph",
+    filters: Optional[List[str]] = None,
+    exclude_filters: Optional[List[str]] = None,
+) -> Set[str]:
+    """Return the set of node names selected by *filters*/*exclude_filters*.
+
+    The selected set is the disjunction (union) of every positive filter
+    match, minus every negative (*exclude_filters*) match. If *filters* is
+    empty/None, every node in the graph is selected before exclusions are
+    applied.
+    """
+    include = [parse_node_filter(f) for f in (filters or [])]
+    exclude = [parse_node_filter(f) for f in (exclude_filters or [])]
+
+    if include:
+        selected = {n for n in graph.nodes() if any(node_matches_filter(graph, n, f) for f in include)}
+    else:
+        selected = set(graph.nodes())
+
+    if exclude:
+        selected -= {n for n in graph.nodes() if any(node_matches_filter(graph, n, f) for f in exclude)}
+
+    return selected
+
+
+# =====================================================================
+# Grid angle deviation
+# =====================================================================
+
+def _incident_edges(
+    graph: "nx.DiGraph", node: str
+) -> Dict[str, List[Tuple[str, str, Dict[str, Any]]]]:
+    """Return ``{neighbour_name: [(u, v, edge_data), ...]}`` for every edge
+    connecting *node* to a neighbour, in either direction (outgoing or
+    incoming)."""
+    incident: Dict[str, List[Tuple[str, str, Dict[str, Any]]]] = defaultdict(list)
+    for u, v, data in graph.out_edges(node, data=True):
+        if v != node:
+            incident[v].append((u, v, data))
+    for u, v, data in graph.in_edges(node, data=True):
+        if u != node:
+            incident[u].append((u, v, data))
+    return incident
+
+
+def compute_edge_bearing(graph: "nx.DiGraph", u: str, v: str) -> float:
+    """Return the bearing, in degrees ``[0, 360)``, of the straight line from
+    node *u* to node *v*."""
+    ux, uy = graph.nodes[u]["x"], graph.nodes[u]["y"]
+    vx, vy = graph.nodes[v]["x"], graph.nodes[v]["y"]
+    return math.degrees(math.atan2(vy - uy, vx - ux)) % 360.0
+
+
+def grid_angle_deviation(bearing_deg: float) -> float:
+    """Return how far *bearing_deg* is from the nearest multiple of 90 degrees.
+
+    The result is always in ``[0, 45]``.
+    """
+    remainder = bearing_deg % 90.0
+    return min(remainder, 90.0 - remainder)
+
+
+def find_grid_angle_deviations(
+    graph: "nx.DiGraph",
+    threshold_deg: float = DEFAULT_GRID_ANGLE_THRESHOLD_DEG,
+    nodes: Optional[Iterable[str]] = None,
+) -> List[Dict[str, Any]]:
+    """Find edges whose bearing deviates too far from a 90-degree grid.
+
+    For every node in *nodes* (or every node in the graph, if *nodes* is
+    None), every incident edge (whether the node is the edge's source or
+    target) is checked; an edge is flagged if
+    :func:`grid_angle_deviation` of its bearing exceeds *threshold_deg*.
+
+    Returns a list of dicts: ``{'node', 'neighbour', 'bearing_deg',
+    'deviation_deg', 'edge_ids'}``, sorted by node then neighbour name.
+    """
+    findings: List[Dict[str, Any]] = []
+    candidates = sorted(nodes) if nodes is not None else sorted(graph.nodes())
+    for node in candidates:
+        if node not in graph:
+            continue
+        for neighbour, edges in sorted(_incident_edges(graph, node).items()):
+            bearing = compute_edge_bearing(graph, node, neighbour)
+            deviation = grid_angle_deviation(bearing)
+            if deviation > threshold_deg:
+                edge_ids = sorted({data.get("edge_id") or f"{u}->{v}" for u, v, data in edges})
+                findings.append({
+                    "node": node,
+                    "neighbour": neighbour,
+                    "bearing_deg": bearing,
+                    "deviation_deg": deviation,
+                    "edge_ids": edge_ids,
+                })
+    return findings
+
+
+@dataclass
+class GridAlignmentAdjustment:
+    """A single node position change computed by
+    :func:`compute_grid_alignment_adjustments`."""
+
+    node: str
+    old_position: Point
+    new_position: Point
+    max_deviation_before: float
+    max_deviation_after: float
+
+
+def compute_grid_alignment_adjustments(
+    graph: "nx.DiGraph",
+    nodes: Iterable[str],
+    threshold_deg: float = DEFAULT_GRID_ANGLE_THRESHOLD_DEG,
+) -> Tuple[List[GridAlignmentAdjustment], List[str]]:
+    """Compute new positions for *nodes* that align their incident edges to
+    the nearest cardinal (horizontal/vertical) direction.
+
+    For each node, every incident edge (incoming or outgoing) is classified
+    as "horizontal" or "vertical" depending on which axis its current
+    bearing is closer to; the node is then moved to the average y (of its
+    "horizontal" neighbours) and/or average x (of its "vertical"
+    neighbours) that would make those edges exactly axis-aligned.
+    Neighbour positions are never modified, and nodes already within
+    *threshold_deg* on every incident edge are left untouched.
+
+    Returns ``(adjustments, unresolved)``:
+
+    * *adjustments* - :class:`GridAlignmentAdjustment` for every node that
+      was moved and, after the move, satisfies *threshold_deg* on every
+      incident edge.
+    * *unresolved* - node names that have at least one edge outside
+      *threshold_deg* which could not be fixed by a single coherent
+      axis-aligned move (e.g. neighbours that conflict along the same
+      axis, or edges that are inherently diagonal).
+    """
+    adjustments: List[GridAlignmentAdjustment] = []
+    unresolved: List[str] = []
+
+    for node in sorted(set(nodes)):
+        if node not in graph:
+            continue
+        incident = _incident_edges(graph, node)
+        if not incident:
+            continue
+
+        orig_x = graph.nodes[node]["x"]
+        orig_y = graph.nodes[node]["y"]
+
+        deviations_before = []
+        horizontal_ys = []
+        vertical_xs = []
+        for neighbour in incident:
+            bearing = compute_edge_bearing(graph, node, neighbour)
+            deviations_before.append(grid_angle_deviation(bearing))
+
+            # Classify the edge as (closer to) horizontal or vertical: the
+            # residual mod 180 is near 0/180 for a horizontal edge, near 90
+            # for a vertical one.
+            residual = bearing % 180.0
+            dist_horizontal = min(residual, 180.0 - residual)
+            dist_vertical = abs(residual - 90.0)
+            if dist_horizontal <= dist_vertical:
+                horizontal_ys.append(graph.nodes[neighbour]["y"])
+            else:
+                vertical_xs.append(graph.nodes[neighbour]["x"])
+
+        max_before = max(deviations_before) if deviations_before else 0.0
+        if max_before <= threshold_deg:
+            continue  # already compliant, nothing to do
+
+        new_x = (sum(vertical_xs) / len(vertical_xs)) if vertical_xs else orig_x
+        new_y = (sum(horizontal_ys) / len(horizontal_ys)) if horizontal_ys else orig_y
+
+        deviations_after = []
+        for neighbour in incident:
+            neighbour_x = graph.nodes[neighbour]["x"]
+            neighbour_y = graph.nodes[neighbour]["y"]
+            bearing = math.degrees(math.atan2(neighbour_y - new_y, neighbour_x - new_x)) % 360.0
+            deviations_after.append(grid_angle_deviation(bearing))
+        max_after = max(deviations_after) if deviations_after else 0.0
+
+        if max_after <= threshold_deg:
+            adjustments.append(GridAlignmentAdjustment(
+                node=node,
+                old_position=(orig_x, orig_y),
+                new_position=(new_x, new_y),
+                max_deviation_before=max_before,
+                max_deviation_after=max_after,
+            ))
+        else:
+            unresolved.append(node)
+
+    return adjustments, unresolved
+
+
+# =====================================================================
 # SVG generation
 # =====================================================================
 
@@ -514,6 +808,8 @@ class AnalysisResult:
     disconnected_components: List[Set[str]] = field(default_factory=list)
     statistics: Dict[str, Any] = field(default_factory=dict)
     overlaps: List[Dict[str, Any]] = field(default_factory=list)
+    grid_angle_deviations: List[Dict[str, Any]] = field(default_factory=list)
+    grid_angle_threshold_deg: float = DEFAULT_GRID_ANGLE_THRESHOLD_DEG
     svg_path: Optional[str] = None
     check_severities: Dict[str, Optional[str]] = field(
         default_factory=lambda: dict(DEFAULT_CHECK_SEVERITY)
@@ -540,6 +836,7 @@ class AnalysisResult:
             "orphaned-node": bool(self.orphaned_nodes),
             "sub-map-separation": len(self.disconnected_components) > 1,
             "influence-zone-overlap": bool(self.overlaps),
+            "grid-angle-deviation": bool(self.grid_angle_deviations),
         }
         return not any(
             failed and self.check_severities.get(check_id) == "error"
@@ -599,6 +896,25 @@ class AnalysisResult:
             lines.append(f"  {label}: No overlapping influence zones found")
 
         lines.append("")
+        lines.append("[Grid angle deviation]")
+        label = self._status_label("grid-angle-deviation", bool(self.grid_angle_deviations))
+        if label == "SKIPPED":
+            lines.append("  SKIPPED: check disabled (enable with --grid-angle-deviation=warning|error)")
+        elif self.grid_angle_deviations:
+            lines.append(
+                f"  {label}: {len(self.grid_angle_deviations)} edge(s) deviate more than "
+                f"{self.grid_angle_threshold_deg:g} deg from a 90 deg grid multiple:"
+            )
+            for d in self.grid_angle_deviations:
+                edges = ", ".join(d["edge_ids"])
+                lines.append(
+                    f"    - {d['node']} <-> {d['neighbour']} "
+                    f"(bearing={d['bearing_deg']:.1f} deg, deviation={d['deviation_deg']:.1f} deg) [{edges}]"
+                )
+        else:
+            lines.append(f"  {label}: No irregular grid angles found")
+
+        lines.append("")
         lines.append("[Statistics]")
         stats = self.statistics
         lines.append(f"  Nodes: {stats.get('num_nodes', 0)}")
@@ -623,12 +939,19 @@ def analyse_map(
     schema_file: Optional[str] = None,
     svg_path: Optional[str] = None,
     check_severities: Optional[Dict[str, Optional[str]]] = None,
+    grid_angle_threshold_deg: float = DEFAULT_GRID_ANGLE_THRESHOLD_DEG,
+    grid_angle_filters: Optional[List[str]] = None,
+    grid_angle_exclude_filters: Optional[List[str]] = None,
 ) -> AnalysisResult:
     """Run the full map analysis pipeline and return an :class:`AnalysisResult`.
 
     *check_severities* optionally overrides the default severity (see
     :data:`DEFAULT_CHECK_SEVERITY`) for each check; a severity of ``None``
-    disables that check so it is neither run nor reported.
+    disables that check so it is neither run nor reported. The
+    grid-angle-deviation check (disabled by default) additionally accepts
+    *grid_angle_threshold_deg* (maximum allowed deviation, in degrees, from
+    a 90-degree multiple) and *grid_angle_filters*/*grid_angle_exclude_filters*
+    (see :func:`select_nodes_by_filters`) to restrict which nodes it applies to.
     """
     severities = dict(DEFAULT_CHECK_SEVERITY)
     if check_severities:
@@ -651,7 +974,16 @@ def analyse_map(
             disconnected_components=[],
             statistics={},
             overlaps=[],
+            grid_angle_deviations=[],
+            grid_angle_threshold_deg=grid_angle_threshold_deg,
             check_severities=severities,
+        )
+
+    grid_angle_deviations: List[Dict[str, Any]] = []
+    if severities["grid-angle-deviation"] is not None:
+        selected_nodes = select_nodes_by_filters(graph, grid_angle_filters, grid_angle_exclude_filters)
+        grid_angle_deviations = find_grid_angle_deviations(
+            graph, threshold_deg=grid_angle_threshold_deg, nodes=selected_nodes
         )
 
     result = AnalysisResult(
@@ -670,6 +1002,8 @@ def analyse_map(
             if severities["influence-zone-overlap"] is not None
             else []
         ),
+        grid_angle_deviations=grid_angle_deviations,
+        grid_angle_threshold_deg=grid_angle_threshold_deg,
         check_severities=severities,
     )
 
@@ -904,11 +1238,11 @@ def _leading_comment_block(text: str) -> str:
     return "".join(block)
 
 
-def _derive_output_path(map_file: str) -> str:
-    """Derive a sibling `<name>.min.<ext>` output path for *map_file*."""
+def _derive_output_path(map_file: str, suffix: str = "min") -> str:
+    """Derive a sibling `<name>.<suffix>.<ext>` output path for *map_file*."""
     directory, base = os.path.split(map_file)
     stem, sep, rest = base.partition(".")
-    derived = f"{stem}.min{sep}{rest}" if sep else f"{stem}.min"
+    derived = f"{stem}.{suffix}{sep}{rest}" if sep else f"{stem}.{suffix}"
     return os.path.join(directory, derived) if directory else derived
 
 
@@ -1085,6 +1419,124 @@ def minify_map(
 
 
 # =====================================================================
+# Grid alignment
+# =====================================================================
+
+@dataclass
+class GridAlignResult:
+    """Outcome of running :func:`grid_align_map`."""
+
+    map_file: str
+    output_file: str
+    threshold_deg: float
+    adjustments: List[GridAlignmentAdjustment] = field(default_factory=list)
+    unresolved_nodes: List[str] = field(default_factory=list)
+    schema_valid: Optional[bool] = None
+    schema_message: str = ""
+
+    def format_report(self) -> str:
+        lines = [f"Grid-align report: {self.map_file} -> {self.output_file}", "=" * 60]
+        lines.append(f"  Angle threshold: {self.threshold_deg:g} deg")
+        lines.append(f"  Nodes adjusted:  {len(self.adjustments)}")
+        for adj in self.adjustments:
+            lines.append(
+                f"    - {adj.node}: ({adj.old_position[0]:.3f}, {adj.old_position[1]:.3f}) -> "
+                f"({adj.new_position[0]:.3f}, {adj.new_position[1]:.3f}) "
+                f"[max deviation {adj.max_deviation_before:.1f} deg -> {adj.max_deviation_after:.1f} deg]"
+            )
+        if self.unresolved_nodes:
+            lines.append(f"  Unresolved nodes: {len(self.unresolved_nodes)} (could not be aligned):")
+            for n in self.unresolved_nodes:
+                lines.append(f"    - {n}")
+        else:
+            lines.append("  Unresolved nodes: none")
+        if self.schema_valid is not None:
+            status = "PASS" if self.schema_valid else "FAIL"
+            lines.append(f"  Schema check on output: {status}: {self.schema_message}")
+        return "\n".join(lines)
+
+
+def _set_node_position(tmap_data: Dict[str, Any], node_name: str, x: float, y: float) -> bool:
+    """Set the ``pose.position.x``/``y`` of *node_name* in *tmap_data*, in place.
+
+    Returns True if the node was found and updated, False otherwise.
+    """
+    for entry in tmap_data.get("nodes") or []:
+        node = entry.get("node") or {}
+        if node.get("name") == node_name:
+            position = node.setdefault("pose", {}).setdefault("position", {})
+            position["x"] = x
+            position["y"] = y
+            return True
+    return False
+
+
+def grid_align_map(
+    map_file: str,
+    output_file: Optional[str] = None,
+    threshold_deg: float = DEFAULT_GRID_ANGLE_THRESHOLD_DEG,
+    filters: Optional[List[str]] = None,
+    exclude_filters: Optional[List[str]] = None,
+    schema_file: Optional[str] = None,
+    logger: Optional[logging.Logger] = None,
+) -> GridAlignResult:
+    """Reposition filtered nodes to minimise grid-angle deviation, and write
+    the result to a new map file.
+
+    Nodes are selected the same way as the grid-angle-deviation check (see
+    :func:`select_nodes_by_filters`): the disjunction of *filters* (or every
+    node, if *filters* is empty/None), minus any node matched by
+    *exclude_filters*. Nodes already within *threshold_deg* on every
+    incident edge are left unchanged. See
+    :func:`compute_grid_alignment_adjustments` for the adjustment algorithm
+    and the definition of "unresolved" nodes (listed in the result, and
+    left at their original position).
+    """
+    log = logger or _LOGGER
+
+    tmap_data = load_tmap2_file(map_file)
+    graph = build_graph_from_tmap(tmap_data)
+    if graph is None:
+        raise ValueError(f"Could not build a graph from '{map_file}' (invalid/empty map)")
+
+    selected_nodes = select_nodes_by_filters(graph, filters, exclude_filters)
+    adjustments, unresolved = compute_grid_alignment_adjustments(
+        graph, selected_nodes, threshold_deg=threshold_deg
+    )
+
+    aligned = deepcopy(tmap_data)
+    for adj in adjustments:
+        _set_node_position(aligned, adj.node, adj.new_position[0], adj.new_position[1])
+
+    out_path = output_file or _derive_output_path(map_file, suffix="gridalign")
+    directory = os.path.dirname(os.path.abspath(out_path))
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    with open(out_path, "w", encoding="utf-8") as fh:
+        yaml.dump(
+            aligned, fh, Dumper=NoAliasDumper,
+            default_flow_style=False, sort_keys=False, allow_unicode=True,
+        )
+
+    schema_valid, schema_message = validate_map(out_path, schema_file)
+
+    result = GridAlignResult(
+        map_file=map_file,
+        output_file=out_path,
+        threshold_deg=threshold_deg,
+        adjustments=adjustments,
+        unresolved_nodes=unresolved,
+        schema_valid=schema_valid,
+        schema_message=schema_message,
+    )
+    log.info(
+        "Grid-aligned %s -> %s: %d node(s) adjusted, %d unresolved node(s)",
+        map_file, out_path, len(adjustments), len(unresolved),
+    )
+    return result
+
+
+# =====================================================================
 # CLI
 # =====================================================================
 
@@ -1127,6 +1579,52 @@ def _add_check_severity_args(parser: argparse.ArgumentParser) -> None:
         metavar="{false,warning,error}",
         help="Severity of overlapping influence zones (default: %(default)s)",
     )
+    parser.add_argument(
+        "--grid-angle-deviation",
+        dest="severity_grid_angle_deviation",
+        type=_parse_severity,
+        default=DEFAULT_CHECK_SEVERITY["grid-angle-deviation"],
+        metavar="{false,warning,error}",
+        help=(
+            "Severity of grid-angle deviations (edges deviating too far from a 90 degree "
+            "multiple, see --grid-angle-*); disabled by default (default: %(default)s)"
+        ),
+    )
+
+
+def _add_grid_angle_args(parser: argparse.ArgumentParser) -> None:
+    """Add ``--grid-angle-threshold``/``--grid-angle-filter``/``--grid-angle-exclude`` switches."""
+    parser.add_argument(
+        "--grid-angle-threshold",
+        type=float,
+        default=DEFAULT_GRID_ANGLE_THRESHOLD_DEG,
+        metavar="DEG",
+        help=(
+            "Max allowed deviation (degrees) of an edge's bearing from the nearest 90 degree "
+            "multiple before it is flagged (default: %(default)s)"
+        ),
+    )
+    parser.add_argument(
+        "--grid-angle-filter",
+        dest="grid_angle_filters",
+        action="append",
+        metavar="FILTER",
+        help=(
+            "Select nodes expected to lie on a regular grid: 'name:<glob>' or "
+            "'property:<key>[=<value>]'. Repeatable; the selected set is the union of all "
+            "matches (default: every node)"
+        ),
+    )
+    parser.add_argument(
+        "--grid-angle-exclude",
+        dest="grid_angle_exclude_filters",
+        action="append",
+        metavar="FILTER",
+        help=(
+            "Exclude nodes matching this filter (same syntax as --grid-angle-filter) from the "
+            "selected set. Repeatable."
+        ),
+    )
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -1140,11 +1638,13 @@ Examples:
   %(prog)s check my_map.tmap2.yaml
   %(prog)s check my_map.tmap2.yaml --sub-map-separation=error
   %(prog)s check my_map.tmap2.yaml --influence-zone-overlap=false
+  %(prog)s check my_map.tmap2.yaml --grid-angle-deviation=error --grid-angle-filter "name:Row*"
   %(prog)s svg my_map.tmap2.yaml -o my_map.svg
   %(prog)s minify my_map.tmap2.yaml
   %(prog)s minify my_map.tmap2.yaml --strip-unreachable Charging --flowstyle
   %(prog)s merge map_a.tmap2.yaml map_b.tmap2.yaml -o merged.tmap2.yaml
   %(prog)s merge map_a.tmap2.yaml map_b.tmap2.yaml --connect-closest
+  %(prog)s grid-align my_map.tmap2.yaml --grid-angle-filter "name:Row*"
         """,
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -1154,6 +1654,7 @@ Examples:
     )
     _add_common_args(analyse_parser)
     _add_check_severity_args(analyse_parser)
+    _add_grid_angle_args(analyse_parser)
     analyse_parser.add_argument("--svg", help="Also generate an SVG rendering of the map")
 
     check_parser = subparsers.add_parser(
@@ -1162,6 +1663,7 @@ Examples:
     )
     _add_common_args(check_parser)
     _add_check_severity_args(check_parser)
+    _add_grid_angle_args(check_parser)
     check_parser.add_argument("--svg", help="Also generate an SVG rendering of the map")
 
     svg_parser = subparsers.add_parser("svg", help="Generate an SVG rendering of the map")
@@ -1234,6 +1736,17 @@ Examples:
         help="Action type used for connecting edges (default: %(default)s)",
     )
 
+    grid_align_parser = subparsers.add_parser(
+        "grid-align",
+        help="Move selected nodes to minimise grid-angle deviation, and save the result",
+    )
+    _add_common_args(grid_align_parser)
+    _add_grid_angle_args(grid_align_parser)
+    grid_align_parser.add_argument(
+        "--output", "-o",
+        help="Output file path (default: <name>.gridalign.<ext> next to the input)",
+    )
+
     return parser
 
 
@@ -1287,6 +1800,24 @@ def main(argv: Optional[List[str]] = None) -> None:
         print(result.format_report())
         return
 
+    if args.command == "grid-align":
+        try:
+            result = grid_align_map(
+                args.map_file,
+                output_file=args.output,
+                threshold_deg=args.grid_angle_threshold,
+                filters=args.grid_angle_filters,
+                exclude_filters=args.grid_angle_exclude_filters,
+                schema_file=args.schema,
+            )
+        except Exception as exc:  # noqa: BLE001 - report any load/parsing error to the user
+            print(f"Error grid-aligning map: {exc}")
+            sys.exit(2)
+        print(result.format_report())
+        if result.unresolved_nodes:
+            sys.exit(1)
+        return
+
     svg_path = getattr(args, "svg", None) or getattr(args, "output", None)
 
     check_severities = None
@@ -1296,11 +1827,15 @@ def main(argv: Optional[List[str]] = None) -> None:
             "orphaned-node": args.severity_orphaned_node,
             "sub-map-separation": args.severity_sub_map_separation,
             "influence-zone-overlap": args.severity_influence_zone_overlap,
+            "grid-angle-deviation": args.severity_grid_angle_deviation,
         }
 
     try:
         result = analyse_map(
-            args.map_file, args.schema, svg_path=svg_path, check_severities=check_severities
+            args.map_file, args.schema, svg_path=svg_path, check_severities=check_severities,
+            grid_angle_threshold_deg=getattr(args, "grid_angle_threshold", DEFAULT_GRID_ANGLE_THRESHOLD_DEG),
+            grid_angle_filters=getattr(args, "grid_angle_filters", None),
+            grid_angle_exclude_filters=getattr(args, "grid_angle_exclude_filters", None),
         )
     except Exception as exc:  # noqa: BLE001 - report any load/parsing error to the user
         print(f"Error analysing map: {exc}")
