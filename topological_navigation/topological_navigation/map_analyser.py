@@ -52,9 +52,10 @@ influence-zone-overlap = warning, grid-angle-deviation = disabled.
 The grid-angle-deviation check (and the ``grid-align`` command) select
 which nodes are expected to have mutually right-angled edges via
 repeatable ``--grid-angle-filter``/``--grid-angle-exclude`` switches,
-each of the form ``name:<glob>`` or ``property:<key>[=<value>]``; the
-selected set is the union of every ``--grid-angle-filter`` match (or
-every node, if none given), minus any ``--grid-angle-exclude`` match.
+each of the form ``name:<glob>``, ``tag:<glob>`` or
+``property:<key>[=<value>]``; the selected set is the union of every
+``--grid-angle-filter`` match (or every node, if none given), minus any
+``--grid-angle-exclude`` match.
 
 Exit codes for the ``check`` command:
     0 - Map is valid
@@ -369,28 +370,32 @@ def compute_statistics(graph: "nx.DiGraph") -> Dict[str, Any]:
 class NodeFilter:
     """A single node selection criterion.
 
-    Parsed from a ``name:<glob>`` or ``property:<key>[=<value>]`` spec
-    string by :func:`parse_node_filter`.
+    Parsed from a ``name:<glob>``, ``tag:<glob>`` or
+    ``property:<key>[=<value>]`` spec string by :func:`parse_node_filter`.
     """
 
-    kind: str  # "name" or "property"
-    pattern: Optional[str] = None  # glob pattern, for kind == "name"
+    kind: str  # "name", "tag" or "property"
+    pattern: Optional[str] = None  # glob pattern, for kind == "name" or "tag"
     key: Optional[str] = None  # dotted property key, for kind == "property"
     value: Optional[str] = None  # expected value (as string); None means "any value"
 
 
 def parse_node_filter(spec: str) -> NodeFilter:
-    """Parse a ``name:<glob>`` or ``property:<key>[=<value>]`` filter spec string.
+    """Parse a ``name:<glob>``, ``tag:<glob>`` or ``property:<key>[=<value>]`` filter spec string.
 
     ``name:<glob>`` matches node names via shell-style wildcards (see
-    :mod:`fnmatch`), e.g. ``"name:Row*"``. ``property:<key>[=<value>]``
-    matches a (optionally dotted, for nested properties) key in the node's
-    ``properties`` dict, e.g. ``"property:semantics=row_entry"`` or
-    ``"property:roboflow.enabled"`` (presence-only, any truthy value).
+    :mod:`fnmatch`), e.g. ``"name:Row*"``. ``tag:<glob>`` matches any of the
+    node's ``meta.tag`` entries via the same shell-style wildcards, e.g.
+    ``"tag:node_semantic::indoor"`` or ``"tag:node_semantic::*"``.
+    ``property:<key>[=<value>]`` matches a (optionally dotted, for nested
+    properties) key in the node's ``properties`` dict, e.g.
+    ``"property:semantics=row_entry"`` or ``"property:roboflow.enabled"``
+    (presence-only, any truthy value).
     """
     if ":" not in spec:
         raise ValueError(
-            f"Invalid node filter {spec!r}: expected 'name:<glob>' or 'property:<key>[=<value>]'"
+            f"Invalid node filter {spec!r}: expected 'name:<glob>', 'tag:<glob>' or "
+            "'property:<key>[=<value>]'"
         )
     kind, _, rest = spec.partition(":")
     kind = kind.strip().lower()
@@ -398,13 +403,18 @@ def parse_node_filter(spec: str) -> NodeFilter:
         if not rest:
             raise ValueError(f"Invalid node filter {spec!r}: empty glob pattern")
         return NodeFilter(kind="name", pattern=rest)
+    if kind == "tag":
+        if not rest:
+            raise ValueError(f"Invalid node filter {spec!r}: empty glob pattern")
+        return NodeFilter(kind="tag", pattern=rest)
     if kind == "property":
         if not rest:
             raise ValueError(f"Invalid node filter {spec!r}: empty property key")
         key, sep, value = rest.partition("=")
         return NodeFilter(kind="property", key=key, value=value if sep else None)
     raise ValueError(
-        f"Invalid node filter {spec!r}: unknown filter type {kind!r} (expected 'name' or 'property')"
+        f"Invalid node filter {spec!r}: unknown filter type {kind!r} "
+        "(expected 'name', 'tag' or 'property')"
     )
 
 
@@ -425,6 +435,9 @@ def node_matches_filter(graph: "nx.DiGraph", node_name: str, node_filter: NodeFi
     """Return True if *node_name* matches *node_filter*."""
     if node_filter.kind == "name":
         return fnmatch.fnmatch(node_name, node_filter.pattern)
+    if node_filter.kind == "tag":
+        tags = (graph.nodes[node_name].get("meta") or {}).get("tag") or []
+        return any(fnmatch.fnmatch(str(tag), node_filter.pattern) for tag in tags)
     if node_filter.kind == "property":
         props = graph.nodes[node_name].get("properties") or {}
         value, found = _lookup_nested(props, node_filter.key)
@@ -1689,9 +1702,9 @@ def _add_grid_angle_args(parser: argparse.ArgumentParser) -> None:
         action="append",
         metavar="FILTER",
         help=(
-            "Select nodes expected to have mutually right-angled edges: 'name:<glob>' or "
-            "'property:<key>[=<value>]'. Repeatable; the selected set is the union of all "
-            "matches (default: every node)"
+            "Select nodes expected to have mutually right-angled edges: 'name:<glob>', "
+            "'tag:<glob>' or 'property:<key>[=<value>]'. Repeatable; the selected set is the "
+            "union of all matches (default: every node)"
         ),
     )
     parser.add_argument(
