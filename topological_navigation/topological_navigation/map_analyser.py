@@ -947,6 +947,8 @@ class AnalysisResult:
     overlaps: List[Dict[str, Any]] = field(default_factory=list)
     grid_angle_deviations: List[Dict[str, Any]] = field(default_factory=list)
     grid_angle_threshold_deg: float = DEFAULT_GRID_ANGLE_THRESHOLD_DEG
+    grid_angle_nodes_checked: int = 0
+    grid_angle_nodes_total: int = 0
     svg_path: Optional[str] = None
     check_severities: Dict[str, Optional[str]] = field(
         default_factory=lambda: dict(DEFAULT_CHECK_SEVERITY)
@@ -1041,7 +1043,8 @@ class AnalysisResult:
             lines.append(
                 f"  {label}: {len(self.grid_angle_deviations)} edge(s) deviate more than "
                 f"{self.grid_angle_threshold_deg:g} deg from a 90 deg multiple of another edge "
-                f"at the same node:"
+                f"at the same node ({self.grid_angle_nodes_checked} of "
+                f"{self.grid_angle_nodes_total} node(s) checked):"
             )
             by_node: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
             for d in self.grid_angle_deviations:
@@ -1054,7 +1057,10 @@ class AnalysisResult:
                 edge_ids = ", ".join(sorted({eid for d in findings for eid in d["edge_ids"]}))
                 lines.append(f"    - Node '{node}': {edge_descs} [{edge_ids}]")
         else:
-            lines.append(f"  {label}: No irregular grid angles found")
+            lines.append(
+                f"  {label}: No irregular grid angles found ({self.grid_angle_nodes_checked} of "
+                f"{self.grid_angle_nodes_total} node(s) checked)"
+            )
 
         lines.append("")
         lines.append("[Statistics]")
@@ -1160,8 +1166,10 @@ def analyse_map(
     )
 
     grid_angle_deviations: List[Dict[str, Any]] = []
+    grid_angle_nodes_checked = 0
     if severities["grid-angle-deviation"] is not None:
         selected_nodes = select_nodes_by_filters(graph, grid_angle_filters, grid_angle_exclude_filters)
+        grid_angle_nodes_checked = len(selected_nodes)
         grid_angle_deviations = find_grid_angle_deviations(
             graph, threshold_deg=grid_angle_threshold_deg, nodes=selected_nodes
         )
@@ -1180,6 +1188,8 @@ def analyse_map(
         overlaps=overlaps,
         grid_angle_deviations=grid_angle_deviations,
         grid_angle_threshold_deg=grid_angle_threshold_deg,
+        grid_angle_nodes_checked=grid_angle_nodes_checked,
+        grid_angle_nodes_total=graph.number_of_nodes(),
         check_severities=severities,
     )
 
