@@ -284,6 +284,12 @@ class TestSelectNodesByFilters:
 # ---------------------------------------------------------------------------
 # Grid angle deviation
 # ---------------------------------------------------------------------------
+#
+# The grid-angle-deviation check is about the angle *between* a node's own
+# edges, not about the edges' absolute orientation relative to the map's
+# global x/y axes: a node whose edges are mutually at right angles must
+# never be flagged, no matter how the whole map (or just that node's local
+# neighbourhood) happens to be rotated.
 
 def _axis_aligned_graph() -> "nx.DiGraph":
     graph = nx.DiGraph()
@@ -299,6 +305,23 @@ def _axis_aligned_graph() -> "nx.DiGraph":
     return graph
 
 
+def _bearing_graph(center: str, center_pos, edges) -> "nx.DiGraph":
+    """Build a star graph: *center* at *center_pos*, with one outgoing edge
+    to a node placed at each ``(name, bearing_deg)`` pair in *edges*
+    (10 units away from the centre)."""
+    graph = nx.DiGraph()
+    graph.add_node(center, x=center_pos[0], y=center_pos[1])
+    for name, bearing in edges:
+        x = center_pos[0] + 10.0 * math.cos(math.radians(bearing))
+        y = center_pos[1] + 10.0 * math.sin(math.radians(bearing))
+        graph.add_node(name, x=x, y=y)
+        graph.add_edge(
+            center, name, edge_id=f"{center}_{name}", action="navigate_to_pose",
+            action_type="", properties={}, weight=1.0,
+        )
+    return graph
+
+
 class TestGridAngleDeviationHelpers:
     def test_grid_angle_deviation_zero_on_cardinal_directions(self):
         for bearing in (0.0, 90.0, 180.0, 270.0, 360.0):
@@ -307,6 +330,14 @@ class TestGridAngleDeviationHelpers:
     def test_grid_angle_deviation_max_at_45_degrees(self):
         assert grid_angle_deviation(45.0) == pytest.approx(45.0)
         assert grid_angle_deviation(135.0) == pytest.approx(45.0)
+
+    def test_grid_angle_deviation_uses_reference_phase(self):
+        """A bearing that is a 90-degree multiple away from a non-zero
+        reference phase (i.e. a locally-rotated grid) has zero deviation,
+        not a deviation relative to the global 0/90/180/270 axes."""
+        assert grid_angle_deviation(120.0, reference_phase_deg=30.0) == pytest.approx(0.0, abs=1e-9)
+        assert grid_angle_deviation(30.0, reference_phase_deg=30.0) == pytest.approx(0.0, abs=1e-9)
+        assert grid_angle_deviation(75.0, reference_phase_deg=30.0) == pytest.approx(45.0)
 
     def test_compute_edge_bearing(self):
         graph = _axis_aligned_graph()
@@ -320,51 +351,84 @@ class TestFindGridAngleDeviations:
         graph = _axis_aligned_graph()
         assert find_grid_angle_deviations(graph) == []
 
-    def test_diagonal_edge_is_flagged_from_both_ends(self):
+    def test_rotated_but_mutually_perpendicular_edges_have_no_deviations(self):
+        """Edges at 30/120/210/300 degrees are all still 90-degree
+        multiples *of one another*, even though none of them lines up
+        with the global 0/90/180/270 directions."""
+        graph = _bearing_graph("A", (0.0, 0.0), [
+            ("B", 30.0), ("C", 120.0), ("D", 210.0), ("E", 300.0),
+        ])
+        assert find_grid_angle_deviations(graph) == []
+
+    def test_single_edge_node_is_never_flagged(self):
+        """A lone diagonal edge has no other edge at the same node to
+        measure an angle against, so it must not be flagged even though
+        its absolute bearing is 45 degrees away from the global grid."""
         graph = nx.DiGraph()
         graph.add_node("A", x=0.0, y=0.0)
         graph.add_node("B", x=10.0, y=10.0)  # 45 degrees
         graph.add_edge(
             "A", "B", edge_id="A_B", action="navigate_to_pose", action_type="", properties={}, weight=1.0
         )
+        assert find_grid_angle_deviations(graph) == []
 
+    def test_odd_edge_out_is_flagged_among_consistent_edges(self):
+        """Two edges at right angles to each other plus one diagonal edge:
+        only the diagonal edge is inconsistent with the other two, so only
+        it should be flagged."""
+        graph = _bearing_graph("A", (0.0, 0.0), [
+            ("East", 0.0), ("North", 90.0), ("Diag", 45.0),
+        ])
         findings = find_grid_angle_deviations(graph)
-        assert len(findings) == 2
-        assert {f["node"] for f in findings} == {"A", "B"}
-        assert all(f["deviation_deg"] == pytest.approx(45.0) for f in findings)
-        assert all(f["edge_ids"] == ["A_B"] for f in findings)
+        assert {f["node"] for f in findings} == {"A"}
+        assert {f["neighbour"] for f in findings} == {"Diag"}
+        assert findings[0]["deviation_deg"] == pytest.approx(45.0)
+        assert findings[0]["edge_ids"] == ["A_Diag"]
 
     def test_incoming_edge_is_considered(self):
-        """A node with only an incoming edge must still be checked."""
+        """Incoming edges must contribute to the local reference phase and
+        be checked, exactly like outgoing edges: here East (outgoing) and
+        North (incoming) reinforce each other at a right angle, so the
+        diagonal incoming edge is the only one flagged."""
         graph = nx.DiGraph()
         graph.add_node("A", x=0.0, y=0.0)
-        graph.add_node("B", x=10.0, y=10.0)
+        graph.add_node("East", x=10.0, y=0.0)
+        graph.add_node("North", x=0.0, y=10.0)
+        graph.add_node("Diag", x=10.0, y=10.0)
         graph.add_edge(
-            "B", "A", edge_id="B_A", action="navigate_to_pose", action_type="", properties={}, weight=1.0
+            "A", "East", edge_id="A_East", action="navigate_to_pose", action_type="", properties={}, weight=1.0
+        )
+        graph.add_edge(
+            "North", "A", edge_id="North_A", action="navigate_to_pose", action_type="", properties={}, weight=1.0
+        )
+        graph.add_edge(
+            "Diag", "A", edge_id="Diag_A", action="navigate_to_pose", action_type="", properties={}, weight=1.0
         )
 
         findings = find_grid_angle_deviations(graph, nodes=["A"])
         assert len(findings) == 1
         assert findings[0]["node"] == "A"
-        assert findings[0]["neighbour"] == "B"
+        assert findings[0]["neighbour"] == "Diag"
 
     def test_threshold_suppresses_small_deviations(self):
-        graph = nx.DiGraph()
-        graph.add_node("A", x=0.0, y=0.0)
-        graph.add_node("B", x=10.0, y=1.0)  # ~5.7 degrees off horizontal
-        graph.add_edge(
-            "A", "B", edge_id="A_B", action="navigate_to_pose", action_type="", properties={}, weight=1.0
-        )
+        """East and North reinforce a right angle; C drifts 10 degrees off
+        North, so it is the only edge whose deviation grows with the
+        threshold."""
+        graph = _bearing_graph("A", (0.0, 0.0), [
+            ("East", 0.0), ("North", 90.0), ("C", 100.0),
+        ])
 
         assert find_grid_angle_deviations(graph, threshold_deg=10.0) == []
-        assert len(find_grid_angle_deviations(graph, threshold_deg=1.0)) == 2
+        findings = find_grid_angle_deviations(graph, threshold_deg=5.0)
+        assert len(findings) == 1
+        assert findings[0]["neighbour"] == "C"
 
     def test_nodes_argument_restricts_scope(self):
-        graph = nx.DiGraph()
-        graph.add_node("A", x=0.0, y=0.0)
-        graph.add_node("B", x=10.0, y=10.0)
+        graph = _bearing_graph("A", (0.0, 0.0), [("East", 0.0), ("Diag", 45.0)])
+        graph.add_node("Z", x=100.0, y=100.0)
+        graph.add_node("Z2", x=110.0, y=145.0)
         graph.add_edge(
-            "A", "B", edge_id="A_B", action="navigate_to_pose", action_type="", properties={}, weight=1.0
+            "Z", "Z2", edge_id="Z_Z2", action="navigate_to_pose", action_type="", properties={}, weight=1.0
         )
 
         findings = find_grid_angle_deviations(graph, nodes=["A"])
@@ -378,6 +442,12 @@ class TestComputeGridAlignmentAdjustments:
         assert adjustments == []
         assert unresolved == []
 
+    def test_already_aligned_but_rotated_node_is_left_untouched(self):
+        graph = _bearing_graph("A", (0.0, 0.0), [("B", 30.0), ("C", 120.0)])
+        adjustments, unresolved = compute_grid_alignment_adjustments(graph, ["A"])
+        assert adjustments == []
+        assert unresolved == []
+
     def test_node_without_edges_is_skipped(self):
         graph = nx.DiGraph()
         graph.add_node("Isolated", x=0.0, y=0.0)
@@ -385,22 +455,19 @@ class TestComputeGridAlignmentAdjustments:
         assert adjustments == []
         assert unresolved == []
 
-    def test_single_neighbour_node_snaps_onto_the_grid(self):
+    def test_single_edge_node_is_skipped(self):
+        """With only one edge there is no angle between edges to correct,
+        so the node must be left untouched even if its lone edge is
+        diagonal."""
         graph = nx.DiGraph()
-        graph.add_node("A", x=1.0, y=1.0)  # slightly off due-east of B
-        graph.add_node("B", x=10.0, y=0.0)
+        graph.add_node("A", x=0.0, y=0.0)
+        graph.add_node("B", x=10.0, y=10.0)
         graph.add_edge(
             "A", "B", edge_id="A_B", action="navigate_to_pose", action_type="", properties={}, weight=1.0
         )
-
         adjustments, unresolved = compute_grid_alignment_adjustments(graph, ["A"])
+        assert adjustments == []
         assert unresolved == []
-        assert len(adjustments) == 1
-        adj = adjustments[0]
-        assert adj.node == "A"
-        assert adj.max_deviation_after == pytest.approx(0.0, abs=1e-6)
-        # The neighbour itself must never be modified.
-        assert graph.nodes["B"]["x"] == 10.0 and graph.nodes["B"]["y"] == 0.0
 
     def test_corner_node_with_two_perpendicular_neighbours(self):
         graph = nx.DiGraph()
@@ -423,23 +490,52 @@ class TestComputeGridAlignmentAdjustments:
         assert new_y == pytest.approx(0.0)  # aligned with East
         assert new_x == pytest.approx(0.0)  # aligned with North
 
-    def test_conflicting_neighbours_are_left_unresolved(self):
+    def test_corner_node_resolved_relative_to_a_rotated_local_grid(self):
+        """The two neighbours are already 90 degrees apart, just not
+        aligned to the global x/y axes; the node should be moved onto
+        that (rotated) right angle rather than the global one."""
         graph = nx.DiGraph()
-        graph.add_node("A", x=5.0, y=5.0)
-        graph.add_node("B", x=0.0, y=0.0)   # diagonal from A
-        graph.add_node("C", x=20.0, y=5.0)  # already axis-aligned with A
-        graph.add_edge(
-            "A", "B", edge_id="a_b", action="navigate_to_pose", action_type="", properties={}, weight=1.0
-        )
-        graph.add_edge(
-            "A", "C", edge_id="a_c", action="navigate_to_pose", action_type="", properties={}, weight=1.0
-        )
+        graph.add_node("Corner", x=2.0, y=1.0)
+        for name, bearing in (("N1", 30.0), ("N2", 120.0)):
+            x = 10.0 * math.cos(math.radians(bearing))
+            y = 10.0 * math.sin(math.radians(bearing))
+            graph.add_node(name, x=x, y=y)
+            graph.add_edge(
+                "Corner", name, edge_id=f"c_{name}", action="navigate_to_pose",
+                action_type="", properties={}, weight=1.0,
+            )
+
+        adjustments, unresolved = compute_grid_alignment_adjustments(graph, ["Corner"])
+        assert unresolved == []
+        assert len(adjustments) == 1
+        new_x, new_y = adjustments[0].new_position
+        b1 = compute_edge_bearing(graph, "Corner", "N1")
+        # compute_edge_bearing reads from the (unmodified) graph, so
+        # recompute the post-move bearings from the new position directly.
+        bearing_n1 = math.degrees(math.atan2(
+            graph.nodes["N1"]["y"] - new_y, graph.nodes["N1"]["x"] - new_x
+        )) % 360.0
+        bearing_n2 = math.degrees(math.atan2(
+            graph.nodes["N2"]["y"] - new_y, graph.nodes["N2"]["x"] - new_x
+        )) % 360.0
+        assert (bearing_n2 - bearing_n1) % 360.0 == pytest.approx(90.0)
+        assert adjustments[0].max_deviation_after == pytest.approx(0.0, abs=1e-6)
+
+    def test_conflicting_neighbours_are_left_unresolved(self):
+        """Three fixed neighbours where one is genuinely inconsistent with
+        the other two cannot be reconciled by moving a single node."""
+        graph = _bearing_graph("A", (0.0, 0.0), [
+            ("East", 0.0), ("North", 90.0), ("Diag", 45.0),
+        ])
 
         adjustments, unresolved = compute_grid_alignment_adjustments(
             graph, ["A"], threshold_deg=DEFAULT_GRID_ANGLE_THRESHOLD_DEG
         )
         assert adjustments == []
         assert unresolved == ["A"]
+        # Neighbours must never be modified, even when unresolved.
+        assert graph.nodes["East"]["x"] == pytest.approx(10.0)
+        assert graph.nodes["East"]["y"] == pytest.approx(0.0)
 
 
 # ---------------------------------------------------------------------------

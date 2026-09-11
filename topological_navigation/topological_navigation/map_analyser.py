@@ -10,9 +10,10 @@ Analyses a ``.tmap2.yaml`` topological map file and reports:
   type breakdown, bidirectional edge count, etc.)
 * overlapping influence zones (node polygons that overlap, or a node
   whose position falls inside another node's polygon)
-* grid angle deviation (disabled by default) - flags edges whose
-  bearing deviates too far from a multiple of 90 degrees, for nodes
-  that are expected to sit on a regular grid
+* grid angle deviation (disabled by default) - flags edges whose angle
+  to a node's *other* edges deviates too far from a multiple of 90
+  degrees, for nodes that are expected to have mutually right-angled
+  edges (regardless of the map's overall orientation)
 
 It can also render an SVG representation of the whole map, with
 bidirectional edges drawn without arrow heads, directional edges drawn
@@ -49,11 +50,11 @@ Defaults: schema/orphaned-node = error, sub-map-separation/
 influence-zone-overlap = warning, grid-angle-deviation = disabled.
 
 The grid-angle-deviation check (and the ``grid-align`` command) select
-which nodes are expected to lie on a regular grid via repeatable
-``--grid-angle-filter``/``--grid-angle-exclude`` switches, each of the
-form ``name:<glob>`` or ``property:<key>[=<value>]``; the selected set
-is the union of every ``--grid-angle-filter`` match (or every node, if
-none given), minus any ``--grid-angle-exclude`` match.
+which nodes are expected to have mutually right-angled edges via
+repeatable ``--grid-angle-filter``/``--grid-angle-exclude`` switches,
+each of the form ``name:<glob>`` or ``property:<key>[=<value>]``; the
+selected set is the union of every ``--grid-angle-filter`` match (or
+every node, if none given), minus any ``--grid-angle-exclude`` match.
 
 Exit codes for the ``check`` command:
     0 - Map is valid
@@ -107,8 +108,9 @@ DEFAULT_CHECK_SEVERITY: Dict[str, Optional[str]] = {
     "orphaned-node": "error",
     "sub-map-separation": "warning",
     "influence-zone-overlap": "warning",
-    # Disabled by default: most maps are not laid out on a regular grid, so
-    # this check must be explicitly opted into via --grid-angle-deviation.
+    # Disabled by default: most maps do not expect their nodes to have
+    # mutually right-angled edges, so this check must be explicitly opted
+    # into via --grid-angle-deviation.
     "grid-angle-deviation": None,
 }
 
@@ -116,8 +118,8 @@ DEFAULT_CHECK_SEVERITY: Dict[str, Optional[str]] = {
 # double-underscore prefix keeps it visually distinct from real map data.
 DEFAULT_ANCHORS_KEY = "__yaml_anchors"
 
-# Default maximum allowed deviation (degrees) of an edge's bearing from the
-# nearest multiple of 90 degrees before it is flagged by the
+# Default maximum allowed deviation (degrees) of the angle between a node's
+# edges from a multiple of 90 degrees before it is flagged by the
 # grid-angle-deviation check / grid-align command.
 DEFAULT_GRID_ANGLE_THRESHOLD_DEG = 5.0
 
@@ -488,12 +490,51 @@ def compute_edge_bearing(graph: "nx.DiGraph", u: str, v: str) -> float:
     return math.degrees(math.atan2(vy - uy, vx - ux)) % 360.0
 
 
-def grid_angle_deviation(bearing_deg: float) -> float:
-    """Return how far *bearing_deg* is from the nearest multiple of 90 degrees.
+def _local_grid_phase(bearings_deg: Iterable[float]) -> float:
+    """Return the best-fit "local grid" phase, in ``[0, 90)``, implied by a
+    set of edge bearings around a single node.
 
-    The result is always in ``[0, 45]``.
+    This check is about the angle *between* a node's edges, not about how
+    those edges are oriented relative to the map's global x/y axes: a node
+    whose edges point at 30/120/210/300 degrees is just as "grid-aligned"
+    as one whose edges point at 0/90/180/270, because in both cases the
+    edges are mutually separated by multiples of 90 degrees. Folding every
+    bearing modulo 90 collapses the four cardinal-equivalent directions
+    onto a single value; if the edges are mutually consistent, all folded
+    values are (near) identical regardless of the node's absolute
+    rotation. The circular mean of those folded values is therefore the
+    best-fit local grid orientation for the node, used as the reference
+    against which each edge's individual deviation is measured.
     """
-    remainder = bearing_deg % 90.0
+    phases = [b % 90.0 for b in bearings_deg]
+    if not phases:
+        return 0.0
+    # The folded values lie on a circle with a period of 90 degrees rather
+    # than 360; scaling by 4 maps that period onto a full circle so the
+    # standard circular-mean trick (via atan2 of summed sin/cos) applies,
+    # then the result is scaled back down.
+    sin_sum = sum(math.sin(math.radians(p * 4.0)) for p in phases)
+    cos_sum = sum(math.cos(math.radians(p * 4.0)) for p in phases)
+    if abs(sin_sum) < 1e-9 and abs(cos_sum) < 1e-9:
+        # Perfectly ambiguous (e.g. two edges exactly 45 degrees apart, so
+        # there is no better-fitting phase than any other); fall back to a
+        # plain average rather than an arbitrary atan2(0, 0) == 0.
+        return (sum(phases) / len(phases)) % 90.0
+    return (math.degrees(math.atan2(sin_sum, cos_sum)) / 4.0) % 90.0
+
+
+def grid_angle_deviation(bearing_deg: float, reference_phase_deg: float = 0.0) -> float:
+    """Return how far *bearing_deg* is from being a multiple of 90 degrees
+    away from *reference_phase_deg*.
+
+    The result is always in ``[0, 45]``. With the default
+    ``reference_phase_deg=0`` this measures alignment with the global
+    0/90/180/270 degree directions; passing the node-specific phase from
+    :func:`_local_grid_phase` instead measures alignment relative to the
+    *local* grid implied by a node's own edges (i.e. the angle *between*
+    edges), independent of the map's overall orientation.
+    """
+    remainder = (bearing_deg - reference_phase_deg) % 90.0
     return min(remainder, 90.0 - remainder)
 
 
@@ -502,12 +543,19 @@ def find_grid_angle_deviations(
     threshold_deg: float = DEFAULT_GRID_ANGLE_THRESHOLD_DEG,
     nodes: Optional[Iterable[str]] = None,
 ) -> List[Dict[str, Any]]:
-    """Find edges whose bearing deviates too far from a 90-degree grid.
+    """Find edges whose angle to their node's other edges deviates too far
+    from a multiple of 90 degrees.
 
     For every node in *nodes* (or every node in the graph, if *nodes* is
-    None), every incident edge (whether the node is the edge's source or
-    target) is checked; an edge is flagged if
-    :func:`grid_angle_deviation` of its bearing exceeds *threshold_deg*.
+    None) that has at least two incident edges (whether the node is the
+    edge's source or target), the best-fit local grid phase is computed
+    from all of that node's edge bearings (see :func:`_local_grid_phase`),
+    and each edge is flagged if its :func:`grid_angle_deviation` relative
+    to that phase exceeds *threshold_deg*. This is a check of the angles
+    *between* a node's own edges, not of their absolute orientation: a
+    node whose edges are mutually at right angles is never flagged, no
+    matter how the whole map is rotated. Nodes with fewer than two edges
+    have no angle between edges to evaluate and are skipped.
 
     Returns a list of dicts: ``{'node', 'neighbour', 'bearing_deg',
     'deviation_deg', 'edge_ids'}``, sorted by node then neighbour name.
@@ -517,9 +565,14 @@ def find_grid_angle_deviations(
     for node in candidates:
         if node not in graph:
             continue
-        for neighbour, edges in sorted(_incident_edges(graph, node).items()):
-            bearing = compute_edge_bearing(graph, node, neighbour)
-            deviation = grid_angle_deviation(bearing)
+        incident = _incident_edges(graph, node)
+        if len(incident) < 2:
+            continue
+        bearings = {neighbour: compute_edge_bearing(graph, node, neighbour) for neighbour in incident}
+        reference_phase = _local_grid_phase(bearings.values())
+        for neighbour, edges in sorted(incident.items()):
+            bearing = bearings[neighbour]
+            deviation = grid_angle_deviation(bearing, reference_phase)
             if deviation > threshold_deg:
                 edge_ids = sorted({data.get("edge_id") or f"{u}->{v}" for u, v, data in edges})
                 findings.append({
@@ -550,15 +603,22 @@ def compute_grid_alignment_adjustments(
     threshold_deg: float = DEFAULT_GRID_ANGLE_THRESHOLD_DEG,
 ) -> Tuple[List[GridAlignmentAdjustment], List[str]]:
     """Compute new positions for *nodes* that align their incident edges to
-    the nearest cardinal (horizontal/vertical) direction.
+    a local right-angle grid, i.e. minimise the angle *between* each
+    node's own edges relative to multiples of 90 degrees.
 
-    For each node, every incident edge (incoming or outgoing) is classified
-    as "horizontal" or "vertical" depending on which axis its current
-    bearing is closer to; the node is then moved to the average y (of its
-    "horizontal" neighbours) and/or average x (of its "vertical"
-    neighbours) that would make those edges exactly axis-aligned.
-    Neighbour positions are never modified, and nodes already within
-    *threshold_deg* on every incident edge are left untouched.
+    For each node, the best-fit local grid phase is first computed from
+    all of its edge bearings (see :func:`_local_grid_phase`); this is the
+    orientation of the node's *own* right-angle grid, which need not
+    match the map's global x/y axes. Each incident edge (incoming or
+    outgoing) is then classified as running "along" or "across" that
+    local phase, and the node is moved to the position that would make
+    edges in each group exactly consistent with one another (analogous to
+    averaging the y of "horizontal" neighbours and the x of "vertical"
+    neighbours, but in a frame rotated to the node's own local phase
+    rather than the global axes). Neighbour positions are never modified,
+    and nodes already within *threshold_deg* on every incident edge (or
+    with fewer than two incident edges, i.e. nothing to compare) are left
+    untouched.
 
     Returns ``(adjustments, unresolved)``:
 
@@ -566,9 +626,9 @@ def compute_grid_alignment_adjustments(
       was moved and, after the move, satisfies *threshold_deg* on every
       incident edge.
     * *unresolved* - node names that have at least one edge outside
-      *threshold_deg* which could not be fixed by a single coherent
-      axis-aligned move (e.g. neighbours that conflict along the same
-      axis, or edges that are inherently diagonal).
+      *threshold_deg* which could not be fixed by a single coherent move
+      (e.g. neighbours that conflict along the same local axis, or edges
+      that are inherently at odds with one another).
     """
     adjustments: List[GridAlignmentAdjustment] = []
     unresolved: List[str] = []
@@ -577,43 +637,59 @@ def compute_grid_alignment_adjustments(
         if node not in graph:
             continue
         incident = _incident_edges(graph, node)
-        if not incident:
-            continue
+        if len(incident) < 2:
+            continue  # nothing to align without at least two edges to compare
 
         orig_x = graph.nodes[node]["x"]
         orig_y = graph.nodes[node]["y"]
 
-        deviations_before = []
-        horizontal_ys = []
-        vertical_xs = []
-        for neighbour in incident:
-            bearing = compute_edge_bearing(graph, node, neighbour)
-            deviations_before.append(grid_angle_deviation(bearing))
+        bearings = {neighbour: compute_edge_bearing(graph, node, neighbour) for neighbour in incident}
+        reference_phase = _local_grid_phase(bearings.values())
 
-            # Classify the edge as (closer to) horizontal or vertical: the
-            # residual mod 180 is near 0/180 for a horizontal edge, near 90
-            # for a vertical one.
-            residual = bearing % 180.0
-            dist_horizontal = min(residual, 180.0 - residual)
-            dist_vertical = abs(residual - 90.0)
-            if dist_horizontal <= dist_vertical:
-                horizontal_ys.append(graph.nodes[neighbour]["y"])
-            else:
-                vertical_xs.append(graph.nodes[neighbour]["x"])
-
-        max_before = max(deviations_before) if deviations_before else 0.0
+        deviations_before = [grid_angle_deviation(b, reference_phase) for b in bearings.values()]
+        max_before = max(deviations_before)
         if max_before <= threshold_deg:
             continue  # already compliant, nothing to do
 
-        new_x = (sum(vertical_xs) / len(vertical_xs)) if vertical_xs else orig_x
-        new_y = (sum(horizontal_ys) / len(horizontal_ys)) if horizontal_ys else orig_y
+        # Work in a frame rotated by reference_phase, so that the node's own
+        # local grid becomes axis-aligned: "along" the phase direction maps
+        # onto the u-axis, "across" it (phase + 90) maps onto the w-axis.
+        theta = math.radians(reference_phase)
+        cos_t, sin_t = math.cos(theta), math.sin(theta)
+
+        along_us = []   # neighbour u-coordinates, for edges running across the phase axis
+        across_ws = []  # neighbour w-coordinates, for edges running along the phase axis
+        for neighbour, bearing in bearings.items():
+            neighbour_x = graph.nodes[neighbour]["x"]
+            neighbour_y = graph.nodes[neighbour]["y"]
+            neighbour_u = neighbour_x * cos_t + neighbour_y * sin_t
+            neighbour_w = -neighbour_x * sin_t + neighbour_y * cos_t
+
+            # Classify the edge as (closer to) running along the phase
+            # direction or across it (phase + 90): the residual mod 180 is
+            # near 0/180 for "along", near 90 for "across".
+            residual = (bearing - reference_phase) % 180.0
+            dist_along = min(residual, 180.0 - residual)
+            dist_across = abs(residual - 90.0)
+            if dist_along <= dist_across:
+                across_ws.append(neighbour_w)
+            else:
+                along_us.append(neighbour_u)
+
+        orig_u = orig_x * cos_t + orig_y * sin_t
+        orig_w = -orig_x * sin_t + orig_y * cos_t
+        new_u = (sum(along_us) / len(along_us)) if along_us else orig_u
+        new_w = (sum(across_ws) / len(across_ws)) if across_ws else orig_w
+
+        new_x = new_u * cos_t - new_w * sin_t
+        new_y = new_u * sin_t + new_w * cos_t
 
         deviations_after = []
         for neighbour in incident:
             neighbour_x = graph.nodes[neighbour]["x"]
             neighbour_y = graph.nodes[neighbour]["y"]
             bearing = math.degrees(math.atan2(neighbour_y - new_y, neighbour_x - new_x)) % 360.0
-            deviations_after.append(grid_angle_deviation(bearing))
+            deviations_after.append(grid_angle_deviation(bearing, reference_phase))
         max_after = max(deviations_after) if deviations_after else 0.0
 
         if max_after <= threshold_deg:
@@ -903,7 +979,8 @@ class AnalysisResult:
         elif self.grid_angle_deviations:
             lines.append(
                 f"  {label}: {len(self.grid_angle_deviations)} edge(s) deviate more than "
-                f"{self.grid_angle_threshold_deg:g} deg from a 90 deg grid multiple:"
+                f"{self.grid_angle_threshold_deg:g} deg from a 90 deg multiple of another edge "
+                f"at the same node:"
             )
             for d in self.grid_angle_deviations:
                 edges = ", ".join(d["edge_ids"])
@@ -949,8 +1026,9 @@ def analyse_map(
     :data:`DEFAULT_CHECK_SEVERITY`) for each check; a severity of ``None``
     disables that check so it is neither run nor reported. The
     grid-angle-deviation check (disabled by default) additionally accepts
-    *grid_angle_threshold_deg* (maximum allowed deviation, in degrees, from
-    a 90-degree multiple) and *grid_angle_filters*/*grid_angle_exclude_filters*
+    *grid_angle_threshold_deg* (maximum allowed deviation, in degrees, of
+    the angle between a node's edges from a 90-degree multiple) and
+    *grid_angle_filters*/*grid_angle_exclude_filters*
     (see :func:`select_nodes_by_filters`) to restrict which nodes it applies to.
     """
     severities = dict(DEFAULT_CHECK_SEVERITY)
@@ -1586,8 +1664,9 @@ def _add_check_severity_args(parser: argparse.ArgumentParser) -> None:
         default=DEFAULT_CHECK_SEVERITY["grid-angle-deviation"],
         metavar="{false,warning,error}",
         help=(
-            "Severity of grid-angle deviations (edges deviating too far from a 90 degree "
-            "multiple, see --grid-angle-*); disabled by default (default: %(default)s)"
+            "Severity of grid-angle deviations (edges at a node deviating too far from a 90 "
+            "degree multiple of that node's other edges, see --grid-angle-*); disabled by "
+            "default (default: %(default)s)"
         ),
     )
 
@@ -1600,8 +1679,8 @@ def _add_grid_angle_args(parser: argparse.ArgumentParser) -> None:
         default=DEFAULT_GRID_ANGLE_THRESHOLD_DEG,
         metavar="DEG",
         help=(
-            "Max allowed deviation (degrees) of an edge's bearing from the nearest 90 degree "
-            "multiple before it is flagged (default: %(default)s)"
+            "Max allowed deviation (degrees) of the angle between a node's edges from a 90 "
+            "degree multiple before an edge is flagged (default: %(default)s)"
         ),
     )
     parser.add_argument(
@@ -1610,7 +1689,7 @@ def _add_grid_angle_args(parser: argparse.ArgumentParser) -> None:
         action="append",
         metavar="FILTER",
         help=(
-            "Select nodes expected to lie on a regular grid: 'name:<glob>' or "
+            "Select nodes expected to have mutually right-angled edges: 'name:<glob>' or "
             "'property:<key>[=<value>]'. Repeatable; the selected set is the union of all "
             "matches (default: every node)"
         ),

@@ -22,11 +22,13 @@ subcommand) `pyproj`, so it can be run locally or in a CI pipeline
   zone polygons (`verts`) overlap, including the case where a node's
   position falls inside another node's polygon.
 * **Grid angle deviation** *(disabled by default)* – for a configurable
-  set of nodes, checks that every incoming/outgoing edge points in a
-  direction close to a multiple of 90 degrees (i.e. the map is laid
-  out on a regular grid). Edges whose bearing deviates from the
-  nearest 0/90/180/270 degree direction by more than a configurable
-  threshold (default 5 degrees) are flagged. See
+  set of nodes, checks that each node's own incoming/outgoing edges are
+  mutually separated by multiples of 90 degrees (i.e. the node looks
+  like a right-angle grid corner/cross/T, regardless of how the node's
+  local neighbourhood is oriented relative to the rest of the map).
+  Edges whose bearing deviates from the node's best-fit local
+  right-angle pattern by more than a configurable threshold (default 5
+  degrees) are flagged. See
   [Grid angle deviation check](#grid-angle-deviation-check) below.
 * **SVG rendering** – a full-map SVG image with nodes as circles,
   edges colour-coded by action, bidirectional edges drawn as plain
@@ -42,8 +44,8 @@ subcommand) `pyproj`, so it can be run locally or in a CI pipeline
   [`merge` command](#merge-command) below).
 * **Grid alignment** – in a separate mode (the `grid-align` command,
   as opposed to a `check`), the tool can reposition the nodes selected
-  for the grid angle deviation check so that their edges align with a
-  90-degree grid, and save the adjusted map (see
+  for the grid angle deviation check so that their own incident edges
+  become mutually right-angled, and save the adjusted map (see
   [`grid-align` command](#grid-align-command) below).
 
 ## Usage
@@ -71,11 +73,12 @@ ros2 run topological_navigation map_analyser.py minify my_map.tmap2.yaml
 # Merge two or more maps into one (writes map_a.merged.tmap2.yaml by default)
 ros2 run topological_navigation map_analyser.py merge map_a.tmap2.yaml map_b.tmap2.yaml -o merged.tmap2.yaml
 
-# Check that nodes named Row* only have edges aligned to a 90 degree grid
+# Check that nodes named Row* have mutually right-angled edges
 ros2 run topological_navigation map_analyser.py check my_map.tmap2.yaml \
   --grid-angle-deviation=error --grid-angle-filter "name:Row*"
 
-# Reposition the nodes matched by the filter to minimise grid-angle deviation
+# Reposition the nodes matched by the filter to minimise the deviation of
+# their own edges from a 90 degree multiple of one another
 # (writes my_map.gridalign.tmap2.yaml alongside the input by default)
 ros2 run topological_navigation map_analyser.py grid-align my_map.tmap2.yaml \
   --grid-angle-filter "name:Row*"
@@ -140,16 +143,26 @@ map_analyser.py check my_map.tmap2.yaml \
 
 ## Grid angle deviation check
 
-Many topological maps are laid out on (or expected to follow) a
-regular grid, e.g. rows in a field, aisles in a warehouse. The
-grid-angle-deviation check looks at the bearing of every edge incident
-to a node (both incoming and outgoing) and flags any edge whose
-direction deviates from the nearest multiple of 90 degrees (0/90/180/
-270) by more than a threshold, since such edges often indicate a
-mapping mistake.
+Many topological maps are expected to have nodes that look locally
+like right-angle grid corners/crosses/T-junctions, e.g. rows in a
+field, aisles in a warehouse — even if the whole layout is rotated
+relative to the map's x/y axes, or different areas of the map are
+rotated relative to one another. The grid-angle-deviation check looks
+at the bearing of every edge incident to a node (both incoming and
+outgoing) and flags any edge whose direction deviates by more than a
+threshold from the *node's own* best-fit right-angle pattern (i.e. the
+angle **between** that node's edges), since such edges often indicate
+a mapping mistake. It does **not** compare edge bearings to the map's
+global 0/90/180/270 degree axes: a node whose edges point at, say,
+30/120/210/300 degrees passes the check just as well as one whose
+edges point at 0/90/180/270, because in both cases every edge is a
+90-degree multiple away from every other edge at that node. A node
+needs at least two incident edges for there to be an angle between
+edges to check; nodes with zero or one incident edge are never
+flagged.
 
 This check is **disabled by default**, since not every map (or every
-node in a map) is expected to be grid-aligned. Enable it with
+node in a map) is expected to have right-angled edges. Enable it with
 `--grid-angle-deviation=warning` (report only) or
 `--grid-angle-deviation=error` (also fail `check`), and restrict which
 nodes it applies to with one or more `--grid-angle-filter`/
@@ -157,8 +170,8 @@ nodes it applies to with one or more `--grid-angle-filter`/
 
 | Switch | Meaning | Default |
 |--------|---------|---------|
-| `--grid-angle-threshold DEG` | Maximum allowed deviation (degrees) from the nearest 90 degree multiple before an edge is flagged | `5.0` |
-| `--grid-angle-filter FILTER` | Select nodes expected to be grid-aligned. Repeatable; the selected set is the union (OR) of every match | every node |
+| `--grid-angle-threshold DEG` | Maximum allowed deviation (degrees) of an edge from the node's own best-fit 90 degree multiple pattern before it is flagged | `5.0` |
+| `--grid-angle-filter FILTER` | Select nodes expected to have mutually right-angled edges. Repeatable; the selected set is the union (OR) of every match | every node |
 | `--grid-angle-exclude FILTER` | Remove nodes matching `FILTER` from the selected set (applied after all `--grid-angle-filter` matches are unioned). Repeatable | none |
 
 Both `--grid-angle-filter` and `--grid-angle-exclude` accept the same
@@ -198,9 +211,9 @@ map_analyser.py check my_map.tmap2.yaml --grid-angle-deviation=warning \
 `grid-align` automatically repositions the nodes selected by
 `--grid-angle-filter`/`--grid-angle-exclude` (same syntax as the
 grid-angle-deviation check above) to minimise the deviation of their
-incident edges from a 90 degree grid, and writes the result to a new
-map file. Nodes not selected by the filters (i.e. the neighbours used
-as reference points) are never moved.
+incident edges from a 90 degree multiple of one another, and writes
+the result to a new map file. Nodes not selected by the filters (i.e.
+the neighbours used as reference points) are never moved.
 
 ```bash
 map_analyser.py grid-align my_map.tmap2.yaml
@@ -213,17 +226,22 @@ If `-o`/`--output` is omitted, the output path is derived from the
 input file by inserting `.gridalign` before the extension, e.g.
 `my_map.tmap2.yaml` -> `my_map.gridalign.tmap2.yaml`.
 
-For each selected node, every neighbour it shares an edge with
-(incoming or outgoing) is classified as lying roughly to the
-"horizontal" or "vertical" side of the node (based on the existing
-bearing between them), and the node is moved onto the average
-horizontal/vertical alignment of those neighbours (e.g. a node with
-one neighbour due east and one neighbour due north is moved to share
-that neighbour's `y` with the east neighbour and `x` with the north
-neighbour). Neighbouring nodes themselves are never moved by this
-process, even if they are also part of the selected set: each
-selected node is repositioned independently, in a single pass, based
-on the original (pre-alignment) positions of all its neighbours.
+For each selected node, the node's own best-fit local right-angle
+pattern is first computed from the bearings of all of its own
+incident edges (before any node is moved). Every neighbour it shares
+an edge with (incoming or outgoing) is then classified as lying
+roughly "along" or "across" that local pattern, and the node is moved
+onto the average alignment of those neighbours within that same
+locally-oriented frame (e.g. a node with one neighbour roughly along
+its pattern and one neighbour roughly across it is moved to share
+each neighbour's corresponding coordinate in that frame). This works
+the same way regardless of how the node's local neighbourhood happens
+to be rotated relative to the rest of the map — it never snaps nodes
+onto the map's global x/y axes. Neighbouring nodes themselves are
+never moved by this process, even if they are also part of the
+selected set: each selected node is repositioned independently, in a
+single pass, based on the original (pre-alignment) positions of all
+its neighbours.
 
 If, after being repositioned, a node still has at least one incident
 edge outside the angle threshold (e.g. because its neighbours are not
