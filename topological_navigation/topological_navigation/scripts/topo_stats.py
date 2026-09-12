@@ -68,6 +68,12 @@ Coverage SVG for a map, filtered by node name pattern::
     python3 topo_stats.py /data/nav_stats.db coverage svg -m my_field_map \\
         --filter "name:Row*" -o coverage.svg
 
+Coverage report for nodes with roboflow enabled in field 1 or 2::
+
+    python3 topo_stats.py /data/nav_stats.db coverage report -a \\
+        --filter "property:roboflow.enabled and (property:field=1 or property:field=2)" \\
+        -o field_1_2_signoff.md
+
 Show traversal summary for all maps::
 
     python3 topo_stats.py /data/nav_stats.db traversals summary
@@ -910,7 +916,10 @@ def _build_parser() -> argparse.ArgumentParser:
             "Restrict which nodes (and their incident edges) are considered "
             "with repeatable --filter/--exclude node-selector specs, each of "
             "the form 'name:<glob>', 'tag:<glob>' or "
-            "'property:<key>[=<value>]'. The selected set is the union of "
+            "'property:<key>[=<value>]', optionally combined with "
+            "'and'/'or'/'not' and parentheses, e.g. "
+            "'property:roboflow.enabled and (property:field=1 or property:field=2)'. "
+            "The selected set is the union of "
             "every --filter match (or every node, if none given), minus any "
             "--exclude match. All edges are still shown in the SVG, but "
             "unselected ones are drawn in faint grey."
@@ -942,7 +951,10 @@ def _build_parser() -> argparse.ArgumentParser:
             metavar="SPEC",
             help=(
                 "Node selector: 'name:<glob>', 'tag:<glob>' or "
-                "'property:<key>[=<value>]' (repeatable, OR'd together)."
+                "'property:<key>[=<value>]', optionally combined with "
+                "'and'/'or'/'not' and parentheses, e.g. "
+                "'property:roboflow.enabled and (property:field=1 or property:field=2)' "
+                "(repeatable; multiple --filter specs are OR'd together)."
             ),
         )
         sp.add_argument(

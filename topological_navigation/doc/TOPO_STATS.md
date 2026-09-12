@@ -126,7 +126,21 @@ or more `--filter`/`--exclude` node selectors, using the same DSL as
 * `tag:<glob>` -- any of the node's `meta.tag` entries matches a
   shell-style wildcard, e.g. `tag:row_entry` or `tag:vineyard_*`.
 * `property:<key>[=<value>]` -- the node's `properties` dict has
-  (optionally, a specific value at) the given (dotted) key.
+  (optionally, a specific value at) the given (dotted) key, e.g.
+  `property:roboflow.enabled` or `property:field=1`.
+
+Each `--filter`/`--exclude` value can combine several of the terms
+above with `and`, `or`, `not` (case-insensitive) and parentheses to
+express arbitrary logical combinations, e.g. select nodes that have
+roboflow enabled *and* are in field 1 or field 2:
+
+```
+property:roboflow.enabled and (property:field=1 or property:field=2)
+```
+
+Operator precedence, from lowest to highest, is `or`, `and`, `not`;
+use parentheses to override it. A `--filter`/`--exclude` value with no
+operators behaves exactly like a single term.
 
 A node is selected if it matches any `--filter` (or if no `--filter`
 is given, every node is selected), minus any node matched by
@@ -147,6 +161,15 @@ topo_stats.py site.db coverage summary -a --filter "tag:row_entry"
 # Sign-off report for two named maps, excluding a decommissioned row
 topo_stats.py site.db coverage report -m field_a -m field_b \
     --filter "name:Row*" --exclude "name:RowZ*" -o signoff.md
+
+# Sign-off report restricted to nodes with roboflow enabled in field 1 or 2
+topo_stats.py site.db coverage report -a \
+    --filter "property:roboflow.enabled and (property:field=1 or property:field=2)" \
+    -o field_1_2_signoff.md
+
+# Coverage for tunnel 17, but only where roboflow is enabled
+topo_stats.py site.db coverage summary -a \
+    --filter "property:tunnel=17 and property:roboflow.enabled"
 
 # SVG for a single map, restricted to a time window
 topo_stats.py site.db coverage svg -m field_a -o coverage.svg \
