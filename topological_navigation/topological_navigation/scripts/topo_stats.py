@@ -17,6 +17,9 @@ map
     Operations on the stored topological maps table.
 traversals
     Operations on the recorded traversal statistics.
+coverage
+    Route sign-off coverage reporting (summary/report/svg), computed from
+    the recorded traversal statistics against one or more stored maps.
 
 Run ``python3 topo_stats.py --help`` or
 ``python3 topo_stats.py <command> --help`` for detailed help.
@@ -46,6 +49,24 @@ Import a map YAML file::
 Delete a stored map::
 
     python3 topo_stats.py /data/nav_stats.db map rm my_field_map
+
+Merge another database's maps and traversals into this one::
+
+    python3 topo_stats.py /data/nav_stats.db map merge /data/run2.db /data/run3.db
+
+Coverage summary across all maps in the database::
+
+    python3 topo_stats.py /data/nav_stats.db coverage summary -a
+
+Coverage sign-off report for selected maps, filtered by node tag::
+
+    python3 topo_stats.py /data/nav_stats.db coverage report -m my_field_map \\
+        --filter "tag:row_entry" -o coverage_report.md
+
+Coverage SVG for a map, filtered by node name pattern::
+
+    python3 topo_stats.py /data/nav_stats.db coverage svg -m my_field_map \\
+        --filter "name:Row*" -o coverage.svg
 
 Show traversal summary for all maps::
 
@@ -86,6 +107,14 @@ import yaml
 
 from topological_navigation.nav_stats_db import NavStatsDB
 from topological_navigation.networkx_utils import build_graph_from_tmap
+from topological_navigation.coverage_analysis import (
+    build_merged_graph_for_maps,
+    compute_coverage,
+    generate_coverage_svg,
+    render_markdown_report,
+    render_markdown_summary,
+    resolve_map_hashes,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -292,6 +321,36 @@ def cmd_map_stats(db: NavStatsDB, args) -> int:
         ["bbox_area_sqm", str(road["bbox_area_sqm"])],
     ]
     print(_markdown_table(["metric", "value"], rows))
+    return 0
+
+
+def cmd_map_merge(db: NavStatsDB, args) -> int:
+    """Merge one or more other databases' maps/traversals into this one."""
+    total_maps_added = 0
+    total_maps_skipped = 0
+    total_trav_added = 0
+    for other_path in args.other_databases:
+        if not Path(other_path).is_file():
+            print("ERROR: Database not found: %s" % other_path, file=sys.stderr)
+            return 1
+        result = db.merge_from(other_path)
+        print(
+            "Merged '%s': %d map(s) added, %d map(s) already present, "
+            "%d traversal record(s) added."
+            % (
+                other_path,
+                result["maps_added"],
+                result["maps_skipped"],
+                result["traversals_added"],
+            )
+        )
+        total_maps_added += result["maps_added"]
+        total_maps_skipped += result["maps_skipped"]
+        total_trav_added += result["traversals_added"]
+    print(
+        "Done. Total: %d map(s) added, %d map(s) already present, "
+        "%d traversal record(s) added." % (total_maps_added, total_maps_skipped, total_trav_added)
+    )
     return 0
 
 
@@ -544,6 +603,91 @@ def cmd_traversals_map_stats(db: NavStatsDB, args) -> int:
 
 
 # ---------------------------------------------------------------------------
+# 'coverage' sub-commands
+# ---------------------------------------------------------------------------
+
+def _resolve_coverage_maps(db: NavStatsDB, args) -> List[str]:
+    """Return the list of map identifiers selected by ``-a``/``-m``."""
+    if getattr(args, "all_maps", False):
+        maps = db.list_maps()
+        if not maps:
+            print("ERROR: No maps stored in the database.", file=sys.stderr)
+            sys.exit(1)
+        return [m["map_hash"] for m in maps]
+    map_ids = getattr(args, "map_ids", None) or []
+    if not map_ids:
+        print("ERROR: Specify at least one map with -m/--map, or use -a/--all.",
+              file=sys.stderr)
+        sys.exit(1)
+    return map_ids
+
+
+def _build_coverage_report(db: NavStatsDB, args):
+    """Build (graph, report, map_names) for the given coverage CLI args."""
+    map_ids = _resolve_coverage_maps(db, args)
+    graph = build_merged_graph_for_maps(db, map_ids)
+    map_hashes = resolve_map_hashes(db, map_ids)
+    map_names = []
+    for map_id in map_ids:
+        m = db.get_map(map_id)
+        map_names.append(m["map_name"] or m["map_hash"])
+
+    report = compute_coverage(
+        graph,
+        db,
+        map_hashes,
+        filters=getattr(args, "filter", None),
+        exclude_filters=getattr(args, "exclude", None),
+        where=getattr(args, "sql_filter", None),
+    )
+    return graph, report, map_names
+
+
+def cmd_coverage_summary(db: NavStatsDB, args) -> int:
+    """Print a brief Markdown coverage summary."""
+    try:
+        _graph, report, _names = _build_coverage_report(db, args)
+    except ValueError as exc:
+        print("ERROR: %s" % exc, file=sys.stderr)
+        return 1
+    print(render_markdown_summary(report), end="")
+    return 0
+
+
+def cmd_coverage_report(db: NavStatsDB, args) -> int:
+    """Generate a comprehensive Markdown sign-off report."""
+    try:
+        _graph, report, map_names = _build_coverage_report(db, args)
+    except ValueError as exc:
+        print("ERROR: %s" % exc, file=sys.stderr)
+        return 1
+    markdown = render_markdown_report(report, map_names=map_names)
+    if getattr(args, "output", None):
+        Path(args.output).write_text(markdown, encoding="utf-8")
+        print("Coverage report written to %s" % args.output)
+    else:
+        print(markdown, end="")
+    return 0
+
+
+def cmd_coverage_svg(db: NavStatsDB, args) -> int:
+    """Generate an SVG map coloured by coverage."""
+    try:
+        graph, report, map_names = _build_coverage_report(db, args)
+    except ValueError as exc:
+        print("ERROR: %s" % exc, file=sys.stderr)
+        return 1
+    title = args.title or ("Coverage: %s" % ", ".join(map_names))
+    try:
+        generate_coverage_svg(graph, report, args.output, title=title)
+    except ValueError as exc:
+        print("ERROR: %s" % exc, file=sys.stderr)
+        return 1
+    print("Coverage SVG written to %s" % args.output)
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # Argument parser
 # ---------------------------------------------------------------------------
 
@@ -632,6 +776,27 @@ def _build_parser() -> argparse.ArgumentParser:
     stats_p.add_argument(
         "identifier",
         help="Map name or map hash.",
+    )
+
+    # map merge
+    merge_p = map_sub.add_parser(
+        "merge",
+        help=(
+            "Merge one or more other stats databases (maps + traversals) "
+            "into this one."
+        ),
+        description=(
+            "Merge maps and traversal records from other database files "
+            "into the target database given as the first CLI argument. "
+            "Each run of the navigation system typically produces its own "
+            "database; use this to combine several runs before computing "
+            "coverage across all of them."
+        ),
+    )
+    merge_p.add_argument(
+        "other_databases",
+        nargs="+",
+        help="Path(s) to other SQLite database file(s) to merge in.",
     )
 
     # ------------------------------------------------------------------
@@ -728,6 +893,111 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Report top N edges with the highest aborted count.",
     )
 
+    # ------------------------------------------------------------------
+    # 'coverage' command
+    # ------------------------------------------------------------------
+    cov_p = sub.add_parser(
+        "coverage",
+        help="Route sign-off coverage reporting (summary/report/svg).",
+        description=(
+            "Compute route sign-off coverage: the fraction of selected edges "
+            "with at least one recorded successful traversal, and the number "
+            "of traversals per edge.\n\n"
+            "Select which map(s) to analyse with repeatable -m/--map "
+            "(name or hash), or -a/--all to consider every stored map. When "
+            "several maps are selected, nodes/edges with the same name/ID "
+            "are merged and considered the same edge for coverage purposes.\n\n"
+            "Restrict which nodes (and their incident edges) are considered "
+            "with repeatable --filter/--exclude node-selector specs, each of "
+            "the form 'name:<glob>', 'tag:<glob>' or "
+            "'property:<key>[=<value>]'. The selected set is the union of "
+            "every --filter match (or every node, if none given), minus any "
+            "--exclude match. All edges are still shown in the SVG, but "
+            "unselected ones are drawn in faint grey."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    cov_sub = cov_p.add_subparsers(dest="coverage_subcommand", metavar="<sub-command>")
+    cov_sub.required = True
+
+    def _add_coverage_selection_args(sp: argparse.ArgumentParser) -> None:
+        group = sp.add_mutually_exclusive_group(required=True)
+        group.add_argument(
+            "-m", "--map",
+            dest="map_ids",
+            action="append",
+            metavar="MAP_ID",
+            help="Map name or hash to include (repeatable).",
+        )
+        group.add_argument(
+            "-a", "--all",
+            dest="all_maps",
+            action="store_true",
+            help="Consider every map stored in the database.",
+        )
+        sp.add_argument(
+            "--filter",
+            dest="filter",
+            action="append",
+            metavar="SPEC",
+            help=(
+                "Node selector: 'name:<glob>', 'tag:<glob>' or "
+                "'property:<key>[=<value>]' (repeatable, OR'd together)."
+            ),
+        )
+        sp.add_argument(
+            "--exclude",
+            dest="exclude",
+            action="append",
+            metavar="SPEC",
+            help="Node selector to exclude (same syntax as --filter, repeatable).",
+        )
+        sp.add_argument(
+            "--sql-filter",
+            dest="sql_filter",
+            metavar="SQL_EXPR",
+            default=None,
+            help="Optional SQL WHERE expression to restrict traversal records.",
+        )
+
+    # coverage summary
+    cov_summary_p = cov_sub.add_parser(
+        "summary",
+        help="Brief Markdown summary of coverage.",
+    )
+    _add_coverage_selection_args(cov_summary_p)
+
+    # coverage report
+    cov_report_p = cov_sub.add_parser(
+        "report",
+        help="Comprehensive Markdown sign-off report of coverage.",
+    )
+    _add_coverage_selection_args(cov_report_p)
+    cov_report_p.add_argument(
+        "-o", "--output",
+        metavar="FILE",
+        default=None,
+        help="Write the report to FILE instead of stdout.",
+    )
+
+    # coverage svg
+    cov_svg_p = cov_sub.add_parser(
+        "svg",
+        help="Render an SVG map coloured by coverage.",
+    )
+    _add_coverage_selection_args(cov_svg_p)
+    cov_svg_p.add_argument(
+        "-o", "--output",
+        metavar="FILE",
+        required=True,
+        help="Path to write the generated SVG file to.",
+    )
+    cov_svg_p.add_argument(
+        "--title",
+        default=None,
+        help="Optional title rendered at the top of the image.",
+    )
+
     return p
 
 
@@ -742,12 +1012,19 @@ _MAP_DISPATCH = {
     "import": cmd_map_import,
     "rm": cmd_map_rm,
     "stats": cmd_map_stats,
+    "merge": cmd_map_merge,
 }
 
 _TRAV_DISPATCH = {
     "summary": cmd_traversals_summary,
     "edge_stats": cmd_traversals_edge_stats,
     "map_stats": cmd_traversals_map_stats,
+}
+
+_COVERAGE_DISPATCH = {
+    "summary": cmd_coverage_summary,
+    "report": cmd_coverage_report,
+    "svg": cmd_coverage_svg,
 }
 
 
@@ -772,6 +1049,13 @@ def main():
 
         elif args.command == "traversals":
             handler = _TRAV_DISPATCH.get(args.trav_subcommand)
+            if handler is None:
+                parser.print_help()
+                sys.exit(1)
+            rc = handler(db, args)
+
+        elif args.command == "coverage":
+            handler = _COVERAGE_DISPATCH.get(args.coverage_subcommand)
             if handler is None:
                 parser.print_help()
                 sys.exit(1)
