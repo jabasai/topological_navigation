@@ -95,6 +95,13 @@ def resolve_map_hashes(db: NavStatsDB, map_ids: List[str]) -> List[str]:
 # Coverage computation
 # ---------------------------------------------------------------------------
 
+#: Default minimum number of recorded successful traversals an edge needs
+#: before it is considered "covered" (signed off). Configurable per-report
+#: via ``compute_coverage(..., min_success=...)`` / the CLI's
+#: ``--min-success`` option.
+DEFAULT_MIN_SUCCESS_TRAVERSALS = 2
+
+
 @dataclass
 class EdgeCoverage:
     """Coverage information for a single edge."""
@@ -108,11 +115,13 @@ class EdgeCoverage:
     success: int = 0
     failed: int = 0
     aborted: int = 0
+    min_success: int = DEFAULT_MIN_SUCCESS_TRAVERSALS
 
     @property
     def covered(self) -> bool:
-        """True if the edge has at least one recorded successful traversal."""
-        return self.success > 0
+        """True if the edge has at least :attr:`min_success` recorded
+        successful traversals (the configurable sign-off threshold)."""
+        return self.success >= self.min_success
 
 
 @dataclass
@@ -121,6 +130,7 @@ class CoverageReport:
 
     edges: List[EdgeCoverage] = field(default_factory=list)
     tags: Dict[str, List[str]] = field(default_factory=dict)  # tag -> selected edge_ids
+    min_success: int = DEFAULT_MIN_SUCCESS_TRAVERSALS
 
     @property
     def selected_edges(self) -> List[EdgeCoverage]:
@@ -180,6 +190,7 @@ def compute_coverage(
     filters: Optional[List[str]] = None,
     exclude_filters: Optional[List[str]] = None,
     where: Optional[str] = None,
+    min_success: int = DEFAULT_MIN_SUCCESS_TRAVERSALS,
 ) -> CoverageReport:
     """Compute a :class:`CoverageReport` for *graph*.
 
@@ -200,7 +211,15 @@ def compute_coverage(
     where:
         Additional raw SQL WHERE expression applied to the traversals
         table (e.g. a time-window filter).
+    min_success:
+        Minimum number of recorded successful traversals an edge needs
+        before it is considered "covered"/signed off (default
+        :data:`DEFAULT_MIN_SUCCESS_TRAVERSALS`). Must be a positive
+        integer.
     """
+    if min_success < 1:
+        raise ValueError("min_success must be a positive integer (got %r)" % (min_success,))
+
     selected_nodes = select_nodes_by_filters(graph, filters, exclude_filters)
 
     if not map_hashes:
@@ -228,7 +247,7 @@ def compute_coverage(
     )
     stats_by_edge = {r["edge_id"]: r for r in stats_rows}
 
-    report = CoverageReport()
+    report = CoverageReport(min_success=min_success)
     tag_edges: Dict[str, Set[str]] = {}
 
     for u, v, data in graph.edges(data=True):
@@ -245,6 +264,7 @@ def compute_coverage(
             success=int(s.get("success") or 0),
             failed=int(s.get("failed") or 0),
             aborted=int(s.get("aborted") or 0),
+            min_success=min_success,
         )
         report.edges.append(ec)
 
@@ -268,6 +288,9 @@ def render_markdown_summary(report: CoverageReport, title: str = "Coverage Summa
     s = report.summary()
     lines = [
         "# %s" % title,
+        "",
+        "Sign-off threshold: an edge is considered covered once it has "
+        "at least %d recorded successful traversal(s)." % report.min_success,
         "",
         "| Metric | Value |",
         "| --- | --- |",
@@ -302,6 +325,11 @@ def render_markdown_report(
     lines = ["# %s" % title, ""]
     if map_names:
         lines += ["**Maps considered:** %s" % ", ".join(map_names), ""]
+    lines += [
+        "**Sign-off threshold:** an edge is considered covered once it has "
+        "at least %d recorded successful traversal(s)." % report.min_success,
+        "",
+    ]
 
     lines += [
         "## Overall Coverage",
@@ -309,7 +337,7 @@ def render_markdown_report(
         "| Metric | Value |",
         "| --- | --- |",
         "| Selected edges | %d |" % s["total_edges"],
-        "| Covered edges (>=1 success) | %d |" % s["covered_edges"],
+        "| Covered edges (>=%d success) | %d |" % (report.min_success, s["covered_edges"]),
         "| Uncovered edges | %d |" % s["uncovered_edges"],
         "| Coverage | %.2f%% |" % s["coverage_pct"],
         "| Total traversals | %d |" % s["total_traversals"],
@@ -363,10 +391,8 @@ def render_markdown_report(
 
 _UNSELECTED_COLOUR = "#cccccc"
 _UNCOVERED_COLOUR = "#d62728"   # red - selected, never successfully traversed
-_LOW_COVERAGE_COLOUR = "#ff9900"  # amber - selected, few successful traversals
-_COVERED_COLOUR = "#2ca02c"    # green - selected, well covered
-
-_LOW_COVERAGE_THRESHOLD = 3  # fewer than this many successes counts as "low coverage"
+_LOW_COVERAGE_COLOUR = "#ff9900"  # amber - selected, some but not enough successes yet
+_COVERED_COLOUR = "#2ca02c"    # green - selected, signed off (>= min_success successes)
 
 
 def _svg_text(value: Any) -> str:
@@ -388,7 +414,7 @@ def _edge_colour(ec: EdgeCoverage) -> str:
         return _UNSELECTED_COLOUR
     if ec.success == 0:
         return _UNCOVERED_COLOUR
-    if ec.success < _LOW_COVERAGE_THRESHOLD:
+    if ec.success < ec.min_success:
         return _LOW_COVERAGE_COLOUR
     return _COVERED_COLOUR
 
@@ -405,8 +431,9 @@ def generate_coverage_svg(
     """Render *graph* as an SVG, colour-coded by coverage.
 
     Selected edges are coloured red (never successfully traversed), amber
-    (fewer than :data:`_LOW_COVERAGE_THRESHOLD` successes) or green (well
-    covered). Unselected edges/nodes are drawn in faint grey.
+    (fewer than *report*'s ``min_success`` recorded successes) or green
+    (signed off: at least ``min_success`` successes). Unselected
+    edges/nodes are drawn in faint grey.
     """
     node_names = list(graph.nodes())
     if not node_names:
@@ -509,8 +536,8 @@ def generate_coverage_svg(
 
     # --- legend --------------------------------------------------------
     legend = [
-        (_COVERED_COLOUR, "Covered (>= %d successes)" % _LOW_COVERAGE_THRESHOLD),
-        (_LOW_COVERAGE_COLOUR, "Low coverage (< %d successes)" % _LOW_COVERAGE_THRESHOLD),
+        (_COVERED_COLOUR, "Covered (>= %d successes)" % report.min_success),
+        (_LOW_COVERAGE_COLOUR, "Low coverage (< %d successes)" % report.min_success),
         (_UNCOVERED_COLOUR, "Uncovered (0 successes)"),
         (_UNSELECTED_COLOUR, "Not selected"),
     ]

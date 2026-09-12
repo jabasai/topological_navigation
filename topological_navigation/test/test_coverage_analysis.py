@@ -1,6 +1,9 @@
 """Tests for ``coverage_analysis.py`` -- route sign-off coverage computation."""
 
+import pytest
+
 from topological_navigation.coverage_analysis import (
+    DEFAULT_MIN_SUCCESS_TRAVERSALS,
     build_merged_graph_for_maps,
     compute_coverage,
     generate_coverage_svg,
@@ -158,6 +161,55 @@ def test_compute_coverage_no_traversals(tmp_path):
     assert s["total_edges"] == 2
     assert s["covered_edges"] == 0
     assert s["coverage_pct"] == 0.0
+    db.close()
+
+
+def test_default_min_success_threshold_is_two():
+    assert DEFAULT_MIN_SUCCESS_TRAVERSALS == 2
+
+
+def test_compute_coverage_default_min_success_is_two(tmp_path):
+    # _make_db records exactly 2 successful traversals for WP1_WP2.
+    db = _make_db(tmp_path)
+    graph = build_merged_graph_for_maps(db, ["TestMap"])
+    hashes = resolve_map_hashes(db, ["TestMap"])
+    report = compute_coverage(graph, db, hashes)
+    edge = next(e for e in report.edges if e.edge_id == "WP1_WP2")
+    assert edge.min_success == 2
+    assert edge.covered is True
+    db.close()
+
+
+def test_compute_coverage_min_success_configurable_raises_threshold(tmp_path):
+    # With only 2 successes, requiring 3 should make the edge uncovered.
+    db = _make_db(tmp_path)
+    graph = build_merged_graph_for_maps(db, ["TestMap"])
+    hashes = resolve_map_hashes(db, ["TestMap"])
+    report = compute_coverage(graph, db, hashes, min_success=3)
+    s = report.summary()
+    edge = next(e for e in report.edges if e.edge_id == "WP1_WP2")
+    assert edge.covered is False
+    assert s["covered_edges"] == 0
+    db.close()
+
+
+def test_compute_coverage_min_success_configurable_lowers_threshold(tmp_path):
+    # With min_success=1, a single success is already enough to be covered.
+    db = _make_db(tmp_path)
+    graph = build_merged_graph_for_maps(db, ["TestMap"])
+    hashes = resolve_map_hashes(db, ["TestMap"])
+    report = compute_coverage(graph, db, hashes, min_success=1)
+    edge = next(e for e in report.edges if e.edge_id == "WP1_WP2")
+    assert edge.covered is True
+    db.close()
+
+
+def test_compute_coverage_rejects_non_positive_min_success(tmp_path):
+    db = _make_db(tmp_path)
+    graph = build_merged_graph_for_maps(db, ["TestMap"])
+    hashes = resolve_map_hashes(db, ["TestMap"])
+    with pytest.raises(ValueError):
+        compute_coverage(graph, db, hashes, min_success=0)
     db.close()
 
 

@@ -87,11 +87,12 @@ topo_stats.py nav_stats.db traversals map_stats my_field_map \
 ## `coverage` command
 
 Computes **route sign-off coverage**: for a set of selected edges
-(across one or more maps), how many have at least one recorded
-*successful* traversal ("covered"), and how many traversals each edge
-has recorded in total. This supports a mapping/deployment QA workflow
-where a site is only signed off once a sufficient fraction of its
-routes have been demonstrably tested.
+(across one or more maps), how many have at least a configurable
+minimum number of recorded *successful* traversals ("covered"), and
+how many traversals each edge has recorded in total. This supports a
+mapping/deployment QA workflow where a site is only signed off once a
+sufficient fraction of its routes have been demonstrably (and
+repeatedly) tested.
 
 | Sub-command | Description |
 |-------------|-------------|
@@ -154,6 +155,25 @@ An additional `--sql-filter "SQL_EXPR"` restricts which traversal rows
 count towards coverage (e.g. a time window), analogous to
 `traversals`' `--filter`.
 
+### Sign-off threshold (`--min-success`)
+
+An edge only counts as **covered** once it has at least `--min-success`
+recorded successful traversals (default: **2**). This threshold is
+configurable per invocation with `--min-success N` on every `coverage`
+sub-command (`summary`, `report` and `svg`), and applies consistently
+to the covered/uncovered counts, the per-tag breakdown, the "Uncovered
+Edges" list and the SVG colour-coding (an edge with at least one, but
+fewer than `--min-success`, successes is drawn amber rather than
+green -- see the `coverage svg` colour table below).
+
+```bash
+# Require at least 3 successful traversals before an edge counts as signed off
+topo_stats.py site.db coverage report -a --min-success 3 -o signoff.md
+
+# A single successful traversal is enough (more permissive than the default)
+topo_stats.py site.db coverage summary -a --min-success 1
+```
+
 ```bash
 # Coverage across every stored map, filtered to nodes tagged row_entry
 topo_stats.py site.db coverage summary -a --filter "tag:row_entry"
@@ -193,9 +213,9 @@ containing:
 2. A **Coverage by Tag** table.
 3. A **Per-Edge Detail** table listing every selected edge's id,
    endpoints, action, traversal/outcome counts and covered status.
-4. An **Uncovered Edges** list naming every selected edge with zero
-   recorded successful traversals -- the concrete list of routes that
-   still need to be driven before sign-off.
+4. An **Uncovered Edges** list naming every selected edge with fewer
+   than `--min-success` recorded successful traversals -- the concrete
+   list of routes that still need to be driven before sign-off.
 
 Pass `-o/--output FILE` to write the report to a file instead of
 stdout.
@@ -207,8 +227,8 @@ required), colour-coding edges by coverage:
 
 | Colour | Meaning |
 |--------|---------|
-| Green | Selected edge with several (>= 3) successful traversals. |
-| Amber | Selected edge with at least one, but fewer than 3, successful traversals. |
+| Green | Selected edge with at least `--min-success` (default 2) successful traversals -- signed off. |
+| Amber | Selected edge with at least one, but fewer than `--min-success`, successful traversals. |
 | Red | Selected edge with zero successful traversals. |
 | Grey | Edge (or node) not selected by the `--filter`/`--exclude` node selectors. |
 

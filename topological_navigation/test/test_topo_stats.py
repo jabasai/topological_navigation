@@ -396,6 +396,46 @@ def test_coverage_summary_name_filter_no_match(populated_db, capsys):
     assert "Selected edges | 0" in out
 
 
+def test_coverage_summary_default_min_success_is_two(populated_db, capsys):
+    # WP1_WP2 has exactly 2 recorded successes; default threshold covers it.
+    out, rc = _run(
+        [populated_db, "coverage", "summary", "-m", "Driscoll Field"],
+        capsys,
+    )
+    assert rc == 0
+    assert "Covered edges | 1" in out
+
+
+def test_coverage_summary_min_success_raises_threshold(populated_db, capsys):
+    # Requiring 3 successes makes the (2-success) edge uncovered.
+    out, rc = _run(
+        [populated_db, "coverage", "summary", "-m", "Driscoll Field",
+         "--min-success", "3"],
+        capsys,
+    )
+    assert rc == 0
+    assert "Covered edges | 0" in out
+
+
+def test_coverage_summary_min_success_lowers_threshold(populated_db, capsys):
+    out, rc = _run(
+        [populated_db, "coverage", "summary", "-m", "Driscoll Field",
+         "--min-success", "1"],
+        capsys,
+    )
+    assert rc == 0
+    assert "Covered edges | 1" in out
+
+
+def test_coverage_summary_min_success_invalid_value(populated_db, capsys):
+    _out, rc = _run(
+        [populated_db, "coverage", "summary", "-m", "Driscoll Field",
+         "--min-success", "0"],
+        capsys,
+    )
+    assert rc == 1
+
+
 # ---------------------------------------------------------------------------
 # coverage report
 # ---------------------------------------------------------------------------

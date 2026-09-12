@@ -114,6 +114,7 @@ import yaml
 from topological_navigation.nav_stats_db import NavStatsDB
 from topological_navigation.networkx_utils import build_graph_from_tmap
 from topological_navigation.coverage_analysis import (
+    DEFAULT_MIN_SUCCESS_TRAVERSALS,
     build_merged_graph_for_maps,
     compute_coverage,
     generate_coverage_svg,
@@ -645,6 +646,7 @@ def _build_coverage_report(db: NavStatsDB, args):
         filters=getattr(args, "filter", None),
         exclude_filters=getattr(args, "exclude", None),
         where=getattr(args, "sql_filter", None),
+        min_success=getattr(args, "min_success", DEFAULT_MIN_SUCCESS_TRAVERSALS),
     )
     return graph, report, map_names
 
@@ -970,6 +972,17 @@ def _build_parser() -> argparse.ArgumentParser:
             metavar="SQL_EXPR",
             default=None,
             help="Optional SQL WHERE expression to restrict traversal records.",
+        )
+        sp.add_argument(
+            "--min-success",
+            dest="min_success",
+            type=int,
+            default=DEFAULT_MIN_SUCCESS_TRAVERSALS,
+            metavar="N",
+            help=(
+                "Minimum number of recorded successful traversals an edge needs "
+                "before it is considered covered/signed off (default: %(default)s)."
+            ),
         )
 
     # coverage summary
