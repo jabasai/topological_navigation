@@ -175,16 +175,31 @@ nodes it applies to with one or more `--grid-angle-filter`/
 | `--grid-angle-exclude FILTER` | Remove nodes matching `FILTER` from the selected set (applied after all `--grid-angle-filter` matches are unioned). Repeatable | none |
 
 Both `--grid-angle-filter` and `--grid-angle-exclude` accept the same
-`FILTER` syntax:
+`FILTER` syntax, which is a single term or a boolean expression
+combining several terms:
 
 * `name:<glob>` – matches node names against a shell-style wildcard
   pattern (`*`, `?`, `[seq]`), e.g. `name:Row*` or `name:Junction?`.
+* `tag:<glob>` – matches any of the node's `meta.tag` entries against
+  a shell-style wildcard pattern, e.g. `tag:row_entry`.
 * `property:<key>` – matches nodes whose `properties` dict has a
   truthy value at `<key>` (dotted for nested keys, e.g.
   `property:roboflow.enabled`).
 * `property:<key>=<value>` – matches nodes whose `properties` dict has
   a value at `<key>` that case-insensitively equals `<value>` as a
-  string, e.g. `property:semantics=row_entry`.
+  string, e.g. `property:semantics=row_entry` or `property:field=1`.
+
+Terms can be combined with `and`, `or`, `not` (case-insensitive) and
+parentheses to express arbitrary logical combinations, e.g. select
+every node with roboflow enabled that is in field 1 or field 2:
+
+```
+property:roboflow.enabled and (property:field=1 or property:field=2)
+```
+
+Operator precedence, from lowest to highest, is `or`, `and`, `not`;
+use parentheses to override it. A `FILTER` with no operators behaves
+exactly like a single term as before.
 
 If no `--grid-angle-filter` is given, every node in the map is
 selected (minus any `--grid-angle-exclude` matches). Multiple
@@ -200,6 +215,10 @@ map_analyser.py check my_map.tmap2.yaml --grid-angle-deviation=error \
 # Only check nodes explicitly tagged as grid-aligned via a property
 map_analyser.py check my_map.tmap2.yaml --grid-angle-deviation=error \
   --grid-angle-filter "property:grid_aligned"
+
+# Only check nodes with roboflow enabled that are in field 1 or 2
+map_analyser.py check my_map.tmap2.yaml --grid-angle-deviation=error \
+  --grid-angle-filter "property:roboflow.enabled and (property:field=1 or property:field=2)"
 
 # Use a looser 10 degree threshold
 map_analyser.py check my_map.tmap2.yaml --grid-angle-deviation=warning \

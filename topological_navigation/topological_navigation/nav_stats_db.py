@@ -393,6 +393,84 @@ class NavStatsDB:
         sql += " ORDER BY edge_id"
         return [r["edge_id"] for r in self.query(sql)]
 
+    def merge_from(self, other_db_path: str) -> Dict[str, int]:
+        """Merge all maps and traversals from *other_db_path* into this database.
+
+        Each run of the navigation system typically creates its own
+        database file; this method allows several such databases to be
+        combined into one so that coverage can be analysed across runs.
+
+        Topological maps are merged idempotently: a map already present
+        (matched by ``map_hash``) is skipped. Traversal records are always
+        copied across (they represent distinct historical events), each
+        getting a new row id in the destination database.
+
+        Parameters
+        ----------
+        other_db_path:
+            Path to the source SQLite database to merge from. It is opened
+            read-only and left untouched.
+
+        Returns
+        -------
+        dict
+            ``{"maps_added": int, "maps_skipped": int, "traversals_added": int}``
+        """
+        other = NavStatsDB(other_db_path)
+        try:
+            maps_added = 0
+            maps_skipped = 0
+            for m in other.list_maps():
+                full = other.get_map(m["map_hash"])
+                if full is None:
+                    continue
+                existing = self.query(
+                    "SELECT id FROM topological_maps WHERE map_hash = ?",
+                    (full["map_hash"],),
+                )
+                if existing:
+                    maps_skipped += 1
+                    continue
+                with self._conn:
+                    self._conn.execute(_INSERT_TOPOMAP, {
+                        "map_name": full["map_name"],
+                        "map_hash": full["map_hash"],
+                        "latitude": full.get("latitude"),
+                        "longitude": full.get("longitude"),
+                        "map_data": full["map_data"],
+                    })
+                maps_added += 1
+
+            traversals = other.query("SELECT * FROM traversals")
+            traversals_added = 0
+            for t in traversals:
+                row = {
+                    "map_name": t.get("map_name") or "",
+                    "map_hash": t.get("map_hash") or "",
+                    "edge_id": t.get("edge_id") or "",
+                    "origin": t.get("origin") or "",
+                    "target": t.get("target") or "",
+                    "status": t.get("status") or "unknown",
+                    "failure_reason": t.get("failure_reason") or "none",
+                    "start_time": t.get("start_time"),
+                    "end_time": t.get("end_time"),
+                    "duration_s": t.get("duration_s"),
+                    "avg_speed": t.get("avg_speed"),
+                    "is_segment": t.get("is_segment") or 0,
+                    "segment_edges": t.get("segment_edges"),
+                }
+                with self._conn:
+                    self._conn.execute(_INSERT_TRAVERSAL, row)
+                traversals_added += 1
+        finally:
+            other.close()
+
+        return {
+            "maps_added": maps_added,
+            "maps_skipped": maps_skipped,
+            "traversals_added": traversals_added,
+        }
+
     def edge_stats(self, edge_id: str, where: str = "") -> dict:
         """Aggregate statistics for *edge_id*.
 

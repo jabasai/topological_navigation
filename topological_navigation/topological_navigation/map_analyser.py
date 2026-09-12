@@ -456,6 +456,154 @@ def node_matches_filter(graph: "nx.DiGraph", node_name: str, node_filter: NodeFi
     return False
 
 
+# ---------------------------------------------------------------------
+# Boolean filter expressions: combine name:/tag:/property: terms with
+# 'and'/'or'/'not' and parentheses, e.g.
+#   "property:roboflow.enabled and (property:field=1 or property:field=2)"
+# ---------------------------------------------------------------------
+
+_FILTER_TOKEN_RE = re.compile(
+    r"""\s*(?:(?P<lparen>\()|(?P<rparen>\))|(?P<op>(?i:and|or|not)\b)|(?P<term>[^\s()]+))"""
+)
+
+
+def _tokenize_filter_expression(spec: str) -> List[Tuple[str, str]]:
+    """Tokenize a filter expression into ``(kind, value)`` pairs.
+
+    *kind* is one of ``"("``, ``")"``, ``"op"`` (value is the lower-cased
+    ``and``/``or``/``not`` keyword) or ``"term"`` (value is the raw
+    ``name:``/``tag:``/``property:`` spec string).
+    """
+    tokens: List[Tuple[str, str]] = []
+    pos = 0
+    length = len(spec)
+    while pos < length:
+        match = _FILTER_TOKEN_RE.match(spec, pos)
+        if not match or match.end() == pos:
+            if spec[pos:].strip() == "":
+                break
+            raise ValueError(f"Invalid filter expression {spec!r} near position {pos}")
+        pos = match.end()
+        if match.group("lparen"):
+            tokens.append(("(", "("))
+        elif match.group("rparen"):
+            tokens.append((")", ")"))
+        elif match.group("op"):
+            tokens.append(("op", match.group("op").lower()))
+        elif match.group("term"):
+            tokens.append(("term", match.group("term")))
+    return tokens
+
+
+class _FilterExpressionParser:
+    """Recursive-descent parser for boolean filter expressions.
+
+    Grammar (lowest to highest precedence): ``or`` > ``and`` > ``not`` >
+    parenthesised/leaf terms. Produces a tuple-based AST: ``("leaf",
+    NodeFilter)``, ``("not", node)``, ``("and", lhs, rhs)`` or ``("or",
+    lhs, rhs)``.
+    """
+
+    def __init__(self, tokens: List[Tuple[str, str]], spec: str) -> None:
+        self.tokens = tokens
+        self.spec = spec
+        self.pos = 0
+
+    def _peek(self) -> Optional[Tuple[str, str]]:
+        return self.tokens[self.pos] if self.pos < len(self.tokens) else None
+
+    def _advance(self) -> Tuple[str, str]:
+        tok = self.tokens[self.pos]
+        self.pos += 1
+        return tok
+
+    def parse(self) -> Any:
+        if not self.tokens:
+            raise ValueError(f"Invalid filter expression {self.spec!r}: empty expression")
+        node = self._parse_or()
+        if self._peek() is not None:
+            raise ValueError(
+                f"Invalid filter expression {self.spec!r}: unexpected trailing token "
+                f"{self._peek()[1]!r}"
+            )
+        return node
+
+    def _parse_or(self) -> Any:
+        node = self._parse_and()
+        while self._peek() == ("op", "or"):
+            self._advance()
+            node = ("or", node, self._parse_and())
+        return node
+
+    def _parse_and(self) -> Any:
+        node = self._parse_not()
+        while self._peek() == ("op", "and"):
+            self._advance()
+            node = ("and", node, self._parse_not())
+        return node
+
+    def _parse_not(self) -> Any:
+        if self._peek() == ("op", "not"):
+            self._advance()
+            return ("not", self._parse_not())
+        return self._parse_atom()
+
+    def _parse_atom(self) -> Any:
+        tok = self._peek()
+        if tok is None:
+            raise ValueError(f"Invalid filter expression {self.spec!r}: unexpected end of expression")
+        if tok[0] == "(":
+            self._advance()
+            node = self._parse_or()
+            closing = self._peek()
+            if closing != (")", ")"):
+                raise ValueError(f"Invalid filter expression {self.spec!r}: missing closing ')'")
+            self._advance()
+            return node
+        if tok[0] == "term":
+            self._advance()
+            return ("leaf", parse_node_filter(tok[1]))
+        raise ValueError(f"Invalid filter expression {self.spec!r}: unexpected token {tok[1]!r}")
+
+
+def parse_node_filter_expression(spec: str) -> Any:
+    """Parse a boolean node filter expression string into an AST.
+
+    Supports single terms (``"name:<glob>"``, ``"tag:<glob>"``,
+    ``"property:<key>[=<value>]"``, see :func:`parse_node_filter`) combined
+    with ``and``/``or``/``not`` (case-insensitive) and parentheses, e.g.::
+
+        "property:roboflow.enabled and (property:field=1 or property:field=2)"
+
+    Operator precedence, from lowest to highest: ``or``, ``and``, ``not``.
+    A bare spec string with no operators behaves exactly as a single
+    :func:`parse_node_filter` term.
+    """
+    tokens = _tokenize_filter_expression(spec)
+    return _FilterExpressionParser(tokens, spec).parse()
+
+
+def node_matches_filter_expression(graph: "nx.DiGraph", node_name: str, expr: Any) -> bool:
+    """Return True if *node_name* matches the parsed filter expression *expr*.
+
+    *expr* is an AST produced by :func:`parse_node_filter_expression`.
+    """
+    kind = expr[0]
+    if kind == "leaf":
+        return node_matches_filter(graph, node_name, expr[1])
+    if kind == "not":
+        return not node_matches_filter_expression(graph, node_name, expr[1])
+    if kind == "and":
+        return node_matches_filter_expression(graph, node_name, expr[1]) and node_matches_filter_expression(
+            graph, node_name, expr[2]
+        )
+    if kind == "or":
+        return node_matches_filter_expression(graph, node_name, expr[1]) or node_matches_filter_expression(
+            graph, node_name, expr[2]
+        )
+    raise ValueError(f"Unknown filter expression node kind {kind!r}")
+
+
 def select_nodes_by_filters(
     graph: "nx.DiGraph",
     filters: Optional[List[str]] = None,
@@ -463,21 +611,32 @@ def select_nodes_by_filters(
 ) -> Set[str]:
     """Return the set of node names selected by *filters*/*exclude_filters*.
 
+    Each entry in *filters*/*exclude_filters* may be a single term (e.g.
+    ``"tag:row_entry"``) or a boolean expression combining several terms
+    with ``and``/``or``/``not`` and parentheses (see
+    :func:`parse_node_filter_expression`), e.g.::
+
+        "property:roboflow.enabled and (property:field=1 or property:field=2)"
+
     The selected set is the disjunction (union) of every positive filter
     match, minus every negative (*exclude_filters*) match. If *filters* is
     empty/None, every node in the graph is selected before exclusions are
     applied.
     """
-    include = [parse_node_filter(f) for f in (filters or [])]
-    exclude = [parse_node_filter(f) for f in (exclude_filters or [])]
+    include = [parse_node_filter_expression(f) for f in (filters or [])]
+    exclude = [parse_node_filter_expression(f) for f in (exclude_filters or [])]
 
     if include:
-        selected = {n for n in graph.nodes() if any(node_matches_filter(graph, n, f) for f in include)}
+        selected = {
+            n for n in graph.nodes() if any(node_matches_filter_expression(graph, n, e) for e in include)
+        }
     else:
         selected = set(graph.nodes())
 
     if exclude:
-        selected -= {n for n in graph.nodes() if any(node_matches_filter(graph, n, f) for f in exclude)}
+        selected -= {
+            n for n in graph.nodes() if any(node_matches_filter_expression(graph, n, e) for e in exclude)
+        }
 
     return selected
 
@@ -1799,8 +1958,10 @@ def _add_grid_angle_args(parser: argparse.ArgumentParser) -> None:
         metavar="FILTER",
         help=(
             "Select nodes expected to have mutually right-angled edges: 'name:<glob>', "
-            "'tag:<glob>' or 'property:<key>[=<value>]'. Repeatable; the selected set is the "
-            "union of all matches (default: every node)"
+            "'tag:<glob>' or 'property:<key>[=<value>]', optionally combined with "
+            "'and'/'or'/'not' and parentheses, e.g. "
+            "'property:roboflow.enabled and (property:field=1 or property:field=2)'. "
+            "Repeatable; the selected set is the union of all matches (default: every node)"
         ),
     )
     parser.add_argument(

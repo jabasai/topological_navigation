@@ -38,7 +38,9 @@ from topological_navigation.map_analyser import (
     main,
     minify_map,
     node_matches_filter,
+    node_matches_filter_expression,
     parse_node_filter,
+    parse_node_filter_expression,
     point_in_polygon,
     polygons_overlap,
     select_nodes_by_filters,
@@ -195,6 +197,29 @@ def _make_filter_graph() -> "nx.DiGraph":
     return graph
 
 
+def _make_field_filter_graph() -> "nx.DiGraph":
+    """Graph with 'field'/'tunnel'/'roboflow.enabled' properties as raised in
+    issue feedback, for testing boolean filter expressions."""
+    graph = nx.DiGraph()
+    graph.add_node(
+        "A", x=0.0, y=0.0,
+        properties={"roboflow": {"enabled": True}, "field": 1, "tunnel": 17},
+    )
+    graph.add_node(
+        "B", x=1.0, y=0.0,
+        properties={"roboflow": {"enabled": True}, "field": 2, "tunnel": 18},
+    )
+    graph.add_node(
+        "C", x=2.0, y=0.0,
+        properties={"roboflow": {"enabled": False}, "field": 1, "tunnel": 17},
+    )
+    graph.add_node(
+        "D", x=3.0, y=0.0,
+        properties={"roboflow": {"enabled": True}, "field": 3, "tunnel": 19},
+    )
+    return graph
+
+
 class TestParseNodeFilter:
     def test_parses_name_filter(self):
         node_filter = parse_node_filter("name:Row*")
@@ -279,6 +304,89 @@ class TestSelectNodesByFilters:
         graph = _make_filter_graph()
         selected = select_nodes_by_filters(graph, exclude_filters=["name:Junction1"])
         assert selected == {"RowA1", "RowA2"}
+
+
+class TestParseNodeFilterExpression:
+    def test_bare_term_behaves_like_single_filter(self):
+        expr = parse_node_filter_expression("name:Row*")
+        assert expr == ("leaf", parse_node_filter("name:Row*"))
+
+    def test_and_combination(self):
+        graph = _make_field_filter_graph()
+        expr = parse_node_filter_expression("property:roboflow.enabled and property:field=1")
+        assert node_matches_filter_expression(graph, "A", expr) is True
+        assert node_matches_filter_expression(graph, "C", expr) is False  # roboflow disabled
+        assert node_matches_filter_expression(graph, "B", expr) is False  # field=2
+
+    def test_or_combination(self):
+        graph = _make_field_filter_graph()
+        expr = parse_node_filter_expression("property:field=1 or property:field=2")
+        assert node_matches_filter_expression(graph, "A", expr) is True
+        assert node_matches_filter_expression(graph, "B", expr) is True
+        assert node_matches_filter_expression(graph, "C", expr) is True
+        assert node_matches_filter_expression(graph, "D", expr) is False
+
+    def test_not_negates(self):
+        graph = _make_field_filter_graph()
+        expr = parse_node_filter_expression("not property:roboflow.enabled")
+        assert node_matches_filter_expression(graph, "C", expr) is True
+        assert node_matches_filter_expression(graph, "A", expr) is False
+
+    def test_and_or_precedence_with_parentheses(self):
+        graph = _make_field_filter_graph()
+        expr = parse_node_filter_expression(
+            "property:roboflow.enabled and (property:field=1 or property:field=2)"
+        )
+        assert node_matches_filter_expression(graph, "A", expr) is True
+        assert node_matches_filter_expression(graph, "B", expr) is True
+        assert node_matches_filter_expression(graph, "C", expr) is False  # roboflow disabled
+        assert node_matches_filter_expression(graph, "D", expr) is False  # field=3
+
+    def test_and_binds_tighter_than_or_without_parentheses(self):
+        # "a or b and c" == "a or (b and c)"
+        graph = _make_field_filter_graph()
+        expr = parse_node_filter_expression(
+            "property:tunnel=19 or property:roboflow.enabled and property:field=1"
+        )
+        assert node_matches_filter_expression(graph, "A", expr) is True  # roboflow & field=1
+        assert node_matches_filter_expression(graph, "D", expr) is True  # tunnel=19
+        assert node_matches_filter_expression(graph, "B", expr) is False
+
+    def test_case_insensitive_operators(self):
+        graph = _make_field_filter_graph()
+        expr = parse_node_filter_expression("property:field=1 AND property:roboflow.enabled")
+        assert node_matches_filter_expression(graph, "A", expr) is True
+
+    def test_unbalanced_parenthesis_raises(self):
+        with pytest.raises(ValueError):
+            parse_node_filter_expression("(property:field=1")
+
+    def test_trailing_operator_raises(self):
+        with pytest.raises(ValueError):
+            parse_node_filter_expression("property:field=1 and")
+
+    def test_empty_expression_raises(self):
+        with pytest.raises(ValueError):
+            parse_node_filter_expression("")
+
+
+class TestSelectNodesByFiltersWithExpressions:
+    def test_select_nodes_by_combined_expression(self):
+        graph = _make_field_filter_graph()
+        selected = select_nodes_by_filters(
+            graph,
+            filters=["property:roboflow.enabled and (property:field=1 or property:field=2)"],
+        )
+        assert selected == {"A", "B"}
+
+    def test_exclude_with_combined_expression(self):
+        graph = _make_field_filter_graph()
+        selected = select_nodes_by_filters(
+            graph,
+            filters=["property:roboflow.enabled"],
+            exclude_filters=["property:field=3"],
+        )
+        assert selected == {"A", "B"}
 
 
 # ---------------------------------------------------------------------------

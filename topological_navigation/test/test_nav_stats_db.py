@@ -379,3 +379,103 @@ def test_store_map_added_at_populated(tmp_db):
     rows = tmp_db.query("SELECT added_at FROM topological_maps")
     assert rows[0]["added_at"] is not None
     assert len(rows[0]["added_at"]) > 0
+
+
+# ---------------------------------------------------------------------------
+# merge_from
+# ---------------------------------------------------------------------------
+
+def test_merge_from_copies_maps_and_traversals(tmp_path):
+    src_path = str(tmp_path / "src.db")
+    dst_path = str(tmp_path / "dst.db")
+
+    src = NavStatsDB(src_path)
+    h = src.store_map(_SIMPLE_YAML)
+    src.record_traversal(
+        map_name="Test Field", map_hash=h, edge_id="A_B",
+        origin="A", target="B", status="success", duration_s=5.0,
+    )
+    src.close()
+
+    dst = NavStatsDB(dst_path)
+    result = dst.merge_from(src_path)
+    assert result["maps_added"] == 1
+    assert result["maps_skipped"] == 0
+    assert result["traversals_added"] == 1
+
+    assert dst.get_map("Test Field") is not None
+    trav = dst.query("SELECT * FROM traversals")
+    assert len(trav) == 1
+    assert trav[0]["edge_id"] == "A_B"
+    dst.close()
+
+
+def test_merge_from_skips_existing_maps(tmp_path):
+    src_path = str(tmp_path / "src.db")
+    dst_path = str(tmp_path / "dst.db")
+
+    src = NavStatsDB(src_path)
+    src.store_map(_SIMPLE_YAML)
+    src.close()
+
+    dst = NavStatsDB(dst_path)
+    dst.store_map(_SIMPLE_YAML)  # already present with the same hash
+    result = dst.merge_from(src_path)
+    assert result["maps_added"] == 0
+    assert result["maps_skipped"] == 1
+
+    maps = dst.list_maps()
+    assert len(maps) == 1
+    dst.close()
+
+
+def test_merge_from_is_additive_for_traversals(tmp_path):
+    """Merging the same source twice should double the traversal count."""
+    src_path = str(tmp_path / "src.db")
+    dst_path = str(tmp_path / "dst.db")
+
+    src = NavStatsDB(src_path)
+    h = src.store_map(_SIMPLE_YAML)
+    src.record_traversal(
+        map_name="Test Field", map_hash=h, edge_id="A_B",
+        origin="A", target="B", status="success", duration_s=5.0,
+    )
+    src.close()
+
+    dst = NavStatsDB(dst_path)
+    dst.merge_from(src_path)
+    dst.merge_from(src_path)
+    trav = dst.query("SELECT * FROM traversals")
+    assert len(trav) == 2
+    dst.close()
+
+
+def test_merge_from_multiple_sources(tmp_path):
+    src1_path = str(tmp_path / "src1.db")
+    src2_path = str(tmp_path / "src2.db")
+    dst_path = str(tmp_path / "dst.db")
+
+    src1 = NavStatsDB(src1_path)
+    h1 = src1.store_map(_SIMPLE_YAML)
+    src1.record_traversal(
+        map_name="Test Field", map_hash=h1, edge_id="A_B",
+        origin="A", target="B", status="success", duration_s=5.0,
+    )
+    src1.close()
+
+    src2 = NavStatsDB(src2_path)
+    h2 = src2.store_map(_ANOTHER_YAML)
+    src2.record_traversal(
+        map_name="Another Map", map_hash=h2, edge_id="C_D",
+        origin="C", target="D", status="failed", duration_s=5.0,
+    )
+    src2.close()
+
+    dst = NavStatsDB(dst_path)
+    dst.merge_from(src1_path)
+    dst.merge_from(src2_path)
+
+    assert len(dst.list_maps()) == 2
+    trav = dst.query("SELECT edge_id FROM traversals ORDER BY edge_id")
+    assert [r["edge_id"] for r in trav] == ["A_B", "C_D"]
+    dst.close()

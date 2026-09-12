@@ -317,3 +317,165 @@ def test_map_stats_traversals_map_not_found(db_path, capsys):
         capsys,
     )
     assert rc == 1
+
+
+# ---------------------------------------------------------------------------
+# map merge
+# ---------------------------------------------------------------------------
+
+def test_map_merge(populated_db, db_path, capsys):
+    _out, rc = _run([db_path, "map", "merge", populated_db], capsys)
+    assert rc == 0
+    out, rc2 = _run([db_path, "map", "list"], capsys)
+    assert rc2 == 0
+    assert "Driscoll Field" in out
+    out2, rc3 = _run([db_path, "traversals", "summary"], capsys)
+    assert rc3 == 0
+    assert "4" in out2
+
+
+def test_map_merge_missing_source(db_path, capsys):
+    _out, rc = _run([db_path, "map", "merge", "/nonexistent/other.db"], capsys)
+    assert rc == 1
+
+
+# ---------------------------------------------------------------------------
+# coverage summary
+# ---------------------------------------------------------------------------
+
+def test_coverage_summary_single_map(populated_db, capsys):
+    out, rc = _run(
+        [populated_db, "coverage", "summary", "-m", "Driscoll Field"],
+        capsys,
+    )
+    assert rc == 0
+    assert "Coverage Summary" in out
+    assert "Selected edges | 1" in out
+    assert "Covered edges | 1" in out
+
+
+def test_coverage_summary_all_maps(populated_db, capsys):
+    out, rc = _run(
+        [populated_db, "coverage", "summary", "-a"],
+        capsys,
+    )
+    assert rc == 0
+    assert "Coverage Summary" in out
+
+
+def test_coverage_summary_requires_selection(populated_db, capsys):
+    _out, rc = _run([populated_db, "coverage", "summary"], capsys)
+    assert rc != 0
+
+
+def test_coverage_summary_map_not_found(populated_db, capsys):
+    _out, rc = _run(
+        [populated_db, "coverage", "summary", "-m", "nonexistent"],
+        capsys,
+    )
+    assert rc == 1
+
+
+def test_coverage_summary_name_filter(populated_db, capsys):
+    out, rc = _run(
+        [populated_db, "coverage", "summary", "-m", "Driscoll Field",
+         "--filter", "name:WP1"],
+        capsys,
+    )
+    assert rc == 0
+    assert "Selected edges | 1" in out
+
+
+def test_coverage_summary_name_filter_no_match(populated_db, capsys):
+    out, rc = _run(
+        [populated_db, "coverage", "summary", "-m", "Driscoll Field",
+         "--filter", "name:NoSuchNode*"],
+        capsys,
+    )
+    assert rc == 0
+    assert "Selected edges | 0" in out
+
+
+def test_coverage_summary_default_min_success_is_two(populated_db, capsys):
+    # WP1_WP2 has exactly 2 recorded successes; default threshold covers it.
+    out, rc = _run(
+        [populated_db, "coverage", "summary", "-m", "Driscoll Field"],
+        capsys,
+    )
+    assert rc == 0
+    assert "Covered edges | 1" in out
+
+
+def test_coverage_summary_min_success_raises_threshold(populated_db, capsys):
+    # Requiring 3 successes makes the (2-success) edge uncovered.
+    out, rc = _run(
+        [populated_db, "coverage", "summary", "-m", "Driscoll Field",
+         "--min-success", "3"],
+        capsys,
+    )
+    assert rc == 0
+    assert "Covered edges | 0" in out
+
+
+def test_coverage_summary_min_success_lowers_threshold(populated_db, capsys):
+    out, rc = _run(
+        [populated_db, "coverage", "summary", "-m", "Driscoll Field",
+         "--min-success", "1"],
+        capsys,
+    )
+    assert rc == 0
+    assert "Covered edges | 1" in out
+
+
+def test_coverage_summary_min_success_invalid_value(populated_db, capsys):
+    _out, rc = _run(
+        [populated_db, "coverage", "summary", "-m", "Driscoll Field",
+         "--min-success", "0"],
+        capsys,
+    )
+    assert rc == 1
+
+
+# ---------------------------------------------------------------------------
+# coverage report
+# ---------------------------------------------------------------------------
+
+def test_coverage_report_stdout(populated_db, capsys):
+    out, rc = _run(
+        [populated_db, "coverage", "report", "-m", "Driscoll Field"],
+        capsys,
+    )
+    assert rc == 0
+    assert "Route Coverage Sign-off Report" in out
+    assert "WP1_WP2" in out
+    assert "Per-Edge Detail" in out
+
+
+def test_coverage_report_to_file(populated_db, tmp_path, capsys):
+    out_file = tmp_path / "report.md"
+    _out, rc = _run(
+        [populated_db, "coverage", "report", "-m", "Driscoll Field",
+         "-o", str(out_file)],
+        capsys,
+    )
+    assert rc == 0
+    content = out_file.read_text(encoding="utf-8")
+    assert "Route Coverage Sign-off Report" in content
+    assert "WP1_WP2" in content
+
+
+# ---------------------------------------------------------------------------
+# coverage svg
+# ---------------------------------------------------------------------------
+
+def test_coverage_svg(populated_db, tmp_path, capsys):
+    out_file = tmp_path / "coverage.svg"
+    _out, rc = _run(
+        [populated_db, "coverage", "svg", "-m", "Driscoll Field",
+         "-o", str(out_file)],
+        capsys,
+    )
+    assert rc == 0
+    content = out_file.read_text(encoding="utf-8")
+    assert "<svg" in content
+    assert "WP1_WP2" in content
