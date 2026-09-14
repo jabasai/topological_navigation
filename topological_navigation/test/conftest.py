@@ -296,6 +296,26 @@ def _install_ros_test_stubs():
     topo_msgs.msg.NavStatistics = NavStatistics
     topo_msgs.msg.TopologicalRoute = TopologicalRoute
 
+    # tf2_ros -----------------------------------------------------------
+    tf2_ros = _module('tf2_ros')
+    tf2_ros.buffer = _module('tf2_ros.buffer')
+    tf2_ros.transform_listener = _module('tf2_ros.transform_listener')
+
+    class TransformException(Exception):
+        pass
+
+    class Buffer:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    class TransformListener:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    tf2_ros.TransformException = TransformException
+    tf2_ros.buffer.Buffer = Buffer
+    tf2_ros.transform_listener.TransformListener = TransformListener
+
 
 try:
     import rclpy  # noqa: F401

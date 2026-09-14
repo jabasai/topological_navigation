@@ -1,5 +1,7 @@
 """Targeted tests for ``navigation2.py`` action-server behavior."""
 
+from datetime import datetime
+
 import pytest
 import networkx as nx
 from types import SimpleNamespace
@@ -808,3 +810,132 @@ def test_policy_outside_main_map_does_not_create_local_map():
 
     assert result.success is False
     assert goal_handle.final_state == 'aborted'
+
+
+def _make_segment_graph(nodes):
+    """Build a real DiGraph with x positions, one edge per consecutive node."""
+    graph = nx.DiGraph()
+    for i, node in enumerate(nodes):
+        graph.add_node(node, x=float(i), y=0.0)
+    for u, v in zip(nodes, nodes[1:]):
+        graph.add_edge(u, v, weight=1.0)
+    return graph
+
+
+def _make_stats_server(nodes, current_node):
+    """Server double wired up for ``_log_segment_edges``/``_execute_segment`` tests."""
+    server = _make_server()
+    server._graph = _make_segment_graph(nodes)
+    server._current_node = current_node
+    server._map_hash = 'test-hash'
+    server._stat = None
+    server._pending_segment = None
+    server._published = []
+    server._publish_stats = lambda: server._published.append(server._stat)
+    return server
+
+
+def _make_test_segment(nodes, edge_ids):
+    return ActionSegment(
+        action_type='NavigateToPose',
+        edge_ids=list(edge_ids),
+        source_nodes=list(nodes[:-1]),
+        target_nodes=list(nodes[1:]),
+        edge_data=[{} for _ in edge_ids],
+    )
+
+
+def test_log_segment_edges_success_logs_every_edge():
+    """A fully successful segment gets one 'success' row per edge."""
+    nodes = ['WP1', 'WP2', 'WP3', 'WP4']
+    server = _make_stats_server(nodes, current_node='WP4')
+    segment = _make_test_segment(nodes, ['e12', 'e23', 'e34'])
+    start, end = datetime.now(), datetime.now()
+
+    server._log_segment_edges(segment, True, 'none', start, end)
+
+    assert [s.edge_id for s in server._published] == ['e12', 'e23', 'e34']
+    assert all(s.status == 'success' for s in server._published)
+    assert all(s.is_segment for s in server._published)
+    assert all(s.segment_edge_ids == ['e12', 'e23', 'e34'] for s in server._published)
+
+
+def test_log_segment_edges_partial_failure_leaves_remaining_edges_unlogged():
+    """Completed edges are logged success, the failing edge failed, the rest absent."""
+    nodes = ['WP1', 'WP2', 'WP3', 'WP4', 'WP5']
+    # Robot got as far as WP2 (1 completed edge) before the segment failed.
+    server = _make_stats_server(nodes, current_node='WP2')
+    segment = _make_test_segment(nodes, ['e12', 'e23', 'e34', 'e45'])
+    start, end = datetime.now(), datetime.now()
+
+    server._log_segment_edges(segment, False, 'aborted_by_costmap', start, end)
+
+    assert [s.edge_id for s in server._published] == ['e12', 'e23']
+    assert server._published[0].status == 'success'
+    assert server._published[1].status == 'failed'
+    assert server._published[1].failure_reason == 'aborted_by_costmap'
+
+
+def test_log_segment_edges_cancelled_marks_boundary_edge_aborted():
+    """A cancelled segment marks the in-flight edge 'aborted', not 'failed'."""
+    nodes = ['WP1', 'WP2', 'WP3']
+    server = _make_stats_server(nodes, current_node='WP1')
+    segment = _make_test_segment(nodes, ['e12', 'e23'])
+    start, end = datetime.now(), datetime.now()
+
+    server._log_segment_edges(segment, False, 'cancelled', start, end)
+
+    assert len(server._published) == 1
+    assert server._published[0].edge_id == 'e12'
+    assert server._published[0].status == 'aborted'
+
+
+def test_execute_segment_exception_logs_failure_and_returns_false():
+    """An unhandled exception mid-goal still yields a DB row, not a crash."""
+    nodes = ['WP1', 'WP2']
+    server = _make_stats_server(nodes, current_node='WP1')
+    segment = _make_test_segment(nodes, ['e12'])
+    segment.edge_data = [{'source': 'WP1', 'target': 'WP2', 'edge_id': 'e12'}]
+    server._tmap = {
+        'nodes': [{'node': {'name': 'WP1', 'edges': [
+            {'edge_id': 'e12', 'node': 'WP2'},
+        ]}}],
+    }
+    server._topol_map = 'test_map'
+    server._action_clients = {'NavigateToPose': {'client': object()}}
+    server._apply_segment_parameters = lambda _seg: {}
+    server._restore_segment_parameters = lambda _prev: None
+    server._build_segment_goal = lambda _seg, _is_final: object()
+    server._publish_current_edge = lambda *_a, **_kw: None
+    server._publish_segment_boundary = lambda *_a, **_kw: None
+    server._goal_reached = False
+
+    def _raise(*_a, **_kw):
+        raise RuntimeError('nav2 client exploded')
+
+    server._send_nav2_goal = _raise
+
+    result = server._execute_segment(segment, True, 0, 1)
+
+    assert result is False
+    assert server._pending_segment is None
+    assert len(server._published) == 1
+    assert server._published[0].status == 'failed'
+    assert 'nav2 client exploded' in server._published[0].failure_reason
+
+
+def test_on_shutdown_flushes_pending_segment():
+    """A segment still in flight at shutdown is logged instead of dropped."""
+    nodes = ['WP1', 'WP2']
+    server = _make_stats_server(nodes, current_node='WP1')
+    segment = _make_test_segment(nodes, ['e12'])
+    server._pending_segment = (segment, datetime.now())
+    server._navigation_activated = False
+    server._stats_db = None
+
+    server._on_shutdown()
+
+    assert server._pending_segment is None
+    assert len(server._published) == 1
+    assert server._published[0].status == 'failed'
+    assert server._published[0].failure_reason == 'shutdown'
