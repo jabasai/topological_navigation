@@ -322,8 +322,13 @@ class TopologicalNavServer(rclpy.node.Node):
 
         # -- Stats ---------------------------------------------------
         self._stat = None
+        # (segment, start_time) of a goal currently in flight, used as a
+        # fallback to still log a row if an exception or shutdown occurs
+        # before the normal per-edge logging in _execute_segment runs.
+        self._pending_segment = None
         self._stats_db: 'NavStatsDB | None' = None
         self._map_hash: str = ""
+        self._stats_db_errors = 0
 
         # -- Parameters ----------------------------------------------
         self._declare_parameters()
@@ -857,6 +862,13 @@ class TopologicalNavServer(rclpy.node.Node):
         if self._navigation_activated:
             self._preempted = True
             self._cancel_nav2_goal(timeout_sec=2.0)
+        if self._pending_segment is not None:
+            # Flush the in-flight segment so it isn't silently dropped.
+            seg, start_time = self._pending_segment
+            self._log_segment_edges(
+                seg, False, "shutdown", start_time, datetime.now(),
+            )
+            self._pending_segment = None
         if self._stats_db is not None:
             self._stats_db.close()
             self._stats_db = None
@@ -1302,7 +1314,11 @@ class TopologicalNavServer(rclpy.node.Node):
                 segment_edges=s.segment_edge_ids if s.segment_edge_ids else None,
             )
         except Exception as exc:
-            self.get_logger().error("[STATS] DB write error: %s" % exc)
+            self._stats_db_errors += 1
+            self.get_logger().error(
+                "[STATS] DB write error (%d total): %s"
+                % (self._stats_db_errors, exc),
+            )
 
     def _publish_current_edge(self, edge_id):
         msg = String()
@@ -2512,56 +2528,60 @@ class TopologicalNavServer(rclpy.node.Node):
         )
 
         goal = self._build_segment_goal(segment, is_final)
-        self._stat = nav_stats(
-            segment.first_source or "?",
-            segment.last_target or "?",
-            self._topol_map,
-            segment.edge_ids[0] if segment.edge_ids else "",
-        )
-        # Populate extras for DB recording
-        self._stat.map_hash = self._map_hash
-        self._stat.is_segment = segment.num_edges > 1
-        self._stat.segment_edge_ids = list(segment.edge_ids)
-        self._stat.edge_length = get_route_distance(
-            self._graph,
-            (segment.source_nodes + [segment.last_target])
-            if segment.source_nodes else [],
-        )
+
+        start_time = datetime.now()
+        # Fallback context for the exception/shutdown safety net -- cleared
+        # once the per-edge outcome below has been logged normally.
+        self._pending_segment = (segment, start_time)
 
         info = self._action_clients.get(action)
         client = info['client'] if info else None
         try:
-            status = self._send_nav2_goal(goal, action_client=client)
-        finally:
-            # Restore parameters regardless of outcome (success, failure,
-            # cancellation, or exception).
-            self._restore_segment_parameters(prev_params)
+            try:
+                status = self._send_nav2_goal(goal, action_client=client)
+            finally:
+                # Restore parameters regardless of outcome (success,
+                # failure, cancellation, or exception).
+                self._restore_segment_parameters(prev_params)
+        except Exception as exc:
+            # Make sure an unexpected exception still yields a DB row
+            # instead of silently dropping the in-flight segment.
+            self.get_logger().error("[SEG] Unhandled exception: %s" % exc)
+            self._log_segment_edges(
+                segment, False, "exception:%s" % exc,
+                start_time, datetime.now(),
+            )
+            self._pending_segment = None
+            return False
 
         self._publish_move_status(
             segment.last_target or "?", action, _status_str(status),
         )
 
-        # Evaluate
-        self._stat.set_ended(self._current_node)
-        if status == GoalStatus.STATUS_SUCCEEDED or self._goal_reached:
-            self._stat.status = "success"
-            self._publish_stats()
+        end_time = datetime.now()
+        overall_ok = status == GoalStatus.STATUS_SUCCEEDED or self._goal_reached
+        failure_reason = "none"
+        if not overall_ok:
+            if status == GoalStatus.STATUS_CANCELED:
+                failure_reason = "cancelled"
+                self._preempted = True
+            else:
+                failure_reason = _status_str(status).lower()
+
+        self._log_segment_edges(
+            segment, overall_ok, failure_reason, start_time, end_time,
+        )
+        self._pending_segment = None
+
+        if overall_ok:
             self.get_logger().info(
                 "  Segment OK: %s -> %s (%.1fs)" % (
                     segment.first_source, segment.last_target,
-                    self._stat.operation_time,
+                    (end_time - start_time).total_seconds(),
                 ),
             )
             self._goal_reached = False
         else:
-            if status == GoalStatus.STATUS_CANCELED:
-                self._stat.status = "aborted"
-                self._stat.failure_reason = "cancelled"
-                self._preempted = True
-            else:
-                self._stat.status = "failed"
-                self._stat.failure_reason = _status_str(status).lower()
-            self._publish_stats()
             self.get_logger().warning(
                 "  Segment FAILED: %s -> %s (%s)" % (
                     segment.first_source, segment.last_target,
@@ -2572,6 +2592,63 @@ class TopologicalNavServer(rclpy.node.Node):
 
         self._publish_current_edge("none")
         return True
+
+    def _log_segment_edges(
+        self, segment, overall_ok, failure_reason, start_time, end_time,
+    ):
+        """Record one traversal row per edge in ``segment``.
+
+        On success every edge is logged as ``"success"``. On failure the
+        edges actually completed (inferred from ``self._current_node``
+        against the segment's node sequence) are logged as ``"success"``,
+        the edge at the failure boundary is logged as ``"failed"``/
+        ``"aborted"``, and any edges beyond that point -- never attempted
+        -- are left unlogged rather than given a placeholder row.
+        """
+        n = segment.num_edges
+        if n == 0:
+            return
+
+        if overall_ok:
+            boundary = n
+        else:
+            node_seq = [segment.source_nodes[0]] + list(segment.target_nodes)
+            try:
+                boundary = node_seq.index(self._current_node)
+            except ValueError:
+                boundary = 0
+            boundary = min(boundary, n - 1)
+
+        for i in range(n):
+            if i < boundary:
+                edge_status = "success"
+            elif i == boundary and not overall_ok:
+                edge_status = "aborted" if failure_reason == "cancelled" else "failed"
+            else:
+                continue  # not attempted -- leave absent from the DB
+
+            src = segment.source_nodes[i]
+            tgt = segment.target_nodes[i]
+            eid = segment.edge_ids[i]
+
+            stat = nav_stats(src, tgt, self._topol_map, eid)
+            stat.map_hash = self._map_hash
+            stat.is_segment = n > 1
+            stat.segment_edge_ids = list(segment.edge_ids)
+            stat.edge_length = get_route_distance(self._graph, [src, tgt])
+            stat.status = edge_status
+            if edge_status != "success":
+                stat.failure_reason = failure_reason
+            # Per-edge timing isn't available from a single multi-waypoint
+            # Nav2 goal; approximate with the whole segment's timestamps.
+            stat.date_started = start_time
+            stat.date_at_node = start_time
+            stat.date_finished = end_time
+            stat.get_operation_time()
+            stat.get_time_to_wp()
+
+            self._stat = stat
+            self._publish_stats()
 
     # =================================================================
     # Boundary publishing
