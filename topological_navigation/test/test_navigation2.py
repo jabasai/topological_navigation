@@ -14,6 +14,8 @@ from topological_navigation.scripts import navigation2 as navigation2_module
 from topological_navigation.scripts.navigation2 import (
     TopologicalNavServer,
     _make_ros_param_value,
+    _merge_ros_param_specs,
+    _normalise_ros_param_spec,
     _ros_param_value,
 )
 
@@ -162,6 +164,8 @@ def _make_server():
     server._action_clients = {}
     server._xy_tolerance_param = 'goal_checker.xy_goal_tolerance'
     server._yaw_tolerance_param = 'goal_checker.yaw_goal_tolerance'
+    server._goal_checker_node = 'controller_server'
+    server._param_clients = {}
     server._publish_status = lambda *_args, **_kwargs: None
     server._publish_route = lambda *_args, **_kwargs: None
     server._publish_route_segment_metric_map = (
@@ -390,6 +394,56 @@ class TestRosParamHelpers:
 
 
 # =====================================================================
+# set_ros_params spec normalisation
+# =====================================================================
+
+
+class TestNormaliseRosParamSpec:
+    """Accepted authoring styles for ``set_ros_params``."""
+
+    def test_none_returns_empty(self):
+        assert _normalise_ros_param_spec(None, 'controller_server') == {}
+
+    def test_node_keyed_mapping(self):
+        spec = {'collision_monitor': {'FootprintApproach.enabled': False}}
+        assert _normalise_ros_param_spec(spec, 'controller_server') == {
+            'collision_monitor': {'FootprintApproach.enabled': False},
+        }
+
+    def test_flat_mapping_uses_default_node(self):
+        spec = {'FollowPath.max_robot_speed': 0.3}
+        assert _normalise_ros_param_spec(spec, 'controller_server') == {
+            'controller_server': {'FollowPath.max_robot_speed': 0.3},
+        }
+
+    def test_list_entries_with_param_and_params(self):
+        spec = [
+            {'node': '/collision_monitor',
+             'param': 'FootprintApproach.enabled', 'value': False},
+            {'node': 'controller_server',
+             'params': {'FollowPath.max_robot_speed': 0.3}},
+            {'param': 'some.param', 'value': 1},
+        ]
+        assert _normalise_ros_param_spec(spec, 'controller_server') == {
+            'collision_monitor': {'FootprintApproach.enabled': False},
+            'controller_server': {
+                'FollowPath.max_robot_speed': 0.3,
+                'some.param': 1,
+            },
+        }
+
+    def test_merge_override_wins_per_parameter(self):
+        base = {'collision_monitor': {'a': 1, 'b': 2}}
+        override = {'collision_monitor': {'b': 3}, 'other': {'c': 4}}
+        merged = _merge_ros_param_specs(base, override)
+        assert merged == {
+            'collision_monitor': {'a': 1, 'b': 3},
+            'other': {'c': 4},
+        }
+        assert base == {'collision_monitor': {'a': 1, 'b': 2}}
+
+
+# =====================================================================
 # _apply_segment_parameters / _restore_segment_parameters
 # =====================================================================
 
@@ -414,8 +468,8 @@ class TestApplyRestoreSegmentParameters:
         server = _make_server()
         # Use a dict-of-dicts with a nodes accessor (networkx-style)
         server._graph = _FakeGraph({'WP2': {'properties': {}, 'name': 'WP2'}})
-        server._get_ros_params_sync = lambda names: {}
-        server._set_ros_params_async = lambda _d: None
+        server._get_ros_params_sync = lambda names, node=None: {}
+        server._set_ros_params_async = lambda _d, node=None: None
 
         seg = self._make_segment()
         prev = server._apply_segment_parameters(seg)
@@ -436,12 +490,14 @@ class TestApplyRestoreSegmentParameters:
         queried_names = []
         set_calls = []
 
-        def _fake_get(names):
+        def _fake_get(names, node=None):
             queried_names.extend(names)
             return {n: 0.5 for n in names}  # pretend current value is 0.5
 
         server._get_ros_params_sync = _fake_get
-        server._set_ros_params_async = lambda d: set_calls.append(dict(d))
+        server._set_ros_params_async = (
+            lambda d, node=None: set_calls.append((node, dict(d)))
+        )
 
         seg = self._make_segment()
         prev = server._apply_segment_parameters(seg)
@@ -451,13 +507,16 @@ class TestApplyRestoreSegmentParameters:
         assert 'goal_checker.yaw_goal_tolerance' in queried_names
 
         # The returned dict contains the old values (0.5 faked above)
-        assert prev.get('goal_checker.xy_goal_tolerance') == 0.5
-        assert prev.get('goal_checker.yaw_goal_tolerance') == 0.5
+        gc = prev['controller_server']
+        assert gc.get('goal_checker.xy_goal_tolerance') == 0.5
+        assert gc.get('goal_checker.yaw_goal_tolerance') == 0.5
 
         # SetParameters was called with new values
         assert len(set_calls) == 1
-        assert set_calls[0]['goal_checker.xy_goal_tolerance'] == pytest.approx(0.1)
-        assert set_calls[0]['goal_checker.yaw_goal_tolerance'] == pytest.approx(0.05)
+        node, params = set_calls[0]
+        assert node == 'controller_server'
+        assert params['goal_checker.xy_goal_tolerance'] == pytest.approx(0.1)
+        assert params['goal_checker.yaw_goal_tolerance'] == pytest.approx(0.05)
 
     def test_edge_ros_parameters_queried_and_set(self):
         """Edge properties mapped via ros_parameters are queried and applied."""
@@ -478,12 +537,14 @@ class TestApplyRestoreSegmentParameters:
         queried_names = []
         set_calls = []
 
-        def _fake_get(names):
+        def _fake_get(names, node=None):
             queried_names.extend(names)
             return {'FollowPath.max_robot_speed': 1.0}
 
         server._get_ros_params_sync = _fake_get
-        server._set_ros_params_async = lambda d: set_calls.append(dict(d))
+        server._set_ros_params_async = (
+            lambda d, node=None: set_calls.append((node, dict(d)))
+        )
 
         seg = self._make_segment(
             target='WP2',
@@ -493,27 +554,110 @@ class TestApplyRestoreSegmentParameters:
         prev = server._apply_segment_parameters(seg)
 
         assert 'FollowPath.max_robot_speed' in queried_names
-        assert prev.get('FollowPath.max_robot_speed') == pytest.approx(1.0)
-        assert set_calls[0]['FollowPath.max_robot_speed'] == pytest.approx(0.3)
+        assert prev['controller_server'].get(
+            'FollowPath.max_robot_speed') == pytest.approx(1.0)
+        assert set_calls[0][1]['FollowPath.max_robot_speed'] == pytest.approx(0.3)
+
+    def test_action_set_ros_params_applied_to_other_node(self):
+        """Action-level set_ros_params targets an arbitrary node."""
+        server = _make_server()
+        server._graph = _FakeGraph({})
+        server._action_clients = {
+            'row_traversal': {
+                'config': {
+                    'set_ros_params': {
+                        'collision_monitor': {
+                            'FootprintApproach.enabled': False,
+                        },
+                    },
+                },
+            },
+        }
+        set_calls = []
+        server._get_ros_params_sync = (
+            lambda names, node=None: {n: True for n in names}
+        )
+        server._set_ros_params_async = (
+            lambda d, node=None: set_calls.append((node, dict(d)))
+        )
+
+        seg = self._make_segment(action='row_traversal')
+        prev = server._apply_segment_parameters(seg)
+
+        assert set_calls == [
+            ('collision_monitor', {'FootprintApproach.enabled': False}),
+        ]
+        assert prev == {
+            'collision_monitor': {'FootprintApproach.enabled': True},
+        }
+
+    def test_edge_set_ros_params_overrides_action_level(self):
+        """Edge-level set_ros_params wins over the action-level default."""
+        server = _make_server()
+        server._graph = _FakeGraph({})
+        server._action_clients = {
+            'row_traversal': {
+                'config': {
+                    'set_ros_params': {
+                        'collision_monitor': {
+                            'FootprintApproach.enabled': False,
+                            'polygon_slow.action_type': 'slowdown',
+                        },
+                    },
+                },
+            },
+        }
+        set_calls = []
+        server._get_ros_params_sync = lambda names, node=None: {}
+        server._set_ros_params_async = (
+            lambda d, node=None: set_calls.append((node, dict(d)))
+        )
+
+        seg = self._make_segment(
+            action='row_traversal',
+            edge_props={
+                'set_ros_params': [
+                    {
+                        'node': '/collision_monitor',
+                        'param': 'FootprintApproach.enabled',
+                        'value': True,
+                    },
+                ],
+            },
+        )
+        server._apply_segment_parameters(seg)
+
+        assert len(set_calls) == 1
+        node, params = set_calls[0]
+        assert node == 'collision_monitor'
+        assert params['FootprintApproach.enabled'] is True
+        assert params['polygon_slow.action_type'] == 'slowdown'
 
     def test_restore_calls_set_with_prev_values(self):
         """_restore_segment_parameters sends saved values via SetParameters."""
         server = _make_server()
         set_calls = []
-        server._set_ros_params_async = lambda d: set_calls.append(dict(d))
+        server._set_ros_params_async = (
+            lambda d, node=None: set_calls.append((node, dict(d)))
+        )
 
-        prev = {'goal_checker.xy_goal_tolerance': 0.5,
-                'goal_checker.yaw_goal_tolerance': 0.2}
+        prev = {
+            'controller_server': {
+                'goal_checker.xy_goal_tolerance': 0.5,
+                'goal_checker.yaw_goal_tolerance': 0.2,
+            },
+            'collision_monitor': {'FootprintApproach.enabled': True},
+        }
         server._restore_segment_parameters(prev)
 
-        assert len(set_calls) == 1
-        assert set_calls[0] == prev
+        assert len(set_calls) == 2
+        assert dict(set_calls) == prev
 
     def test_restore_empty_is_noop(self):
         """_restore_segment_parameters({}) must not call SetParameters."""
         server = _make_server()
         set_calls = []
-        server._set_ros_params_async = lambda d: set_calls.append(d)
+        server._set_ros_params_async = lambda d, node=None: set_calls.append(d)
 
         server._restore_segment_parameters({})
         assert set_calls == []
@@ -527,6 +671,7 @@ class TestApplyRestoreSegmentParameters:
                 return False
 
         server._get_params_client = _FakeClient()
+        server._set_params_client = _FakeClient()
 
         result = server._get_ros_params_sync(['some_param'])
         assert result == {}

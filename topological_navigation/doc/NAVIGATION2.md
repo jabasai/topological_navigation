@@ -164,7 +164,7 @@ For each segment:
 
 - Transition to action-specific execution state (`ACTION_TO_STATE`)
 - Publish boundary polygon when boundary properties exist
-- Apply ROS 2 parameters at segment entrance and restore them after exit (`_apply_segment_parameters` / `_restore_segment_parameters`)
+- Apply ROS 2 parameters at segment entrance and restore them after exit (`_apply_segment_parameters` / `_restore_segment_parameters`), on the goal-checker node and on any node named by `set_ros_params`
 - Build goal dynamically from map template (`_build_segment_goal`)
 - Dispatch goal with `_send_nav2_goal`
 - Publish move status + nav statistics
@@ -332,6 +332,62 @@ the segment runs.  The mapping is `{edge_property_name: ros2_param_name}`.
 Only properties actually present in the segment's effective parameters (see
 segment merging rules) are applied.
 
+### Arbitrary node parameters — `set_ros_params`
+
+`ros_parameters` can only target the goal-checker node and only forwards values
+that come from an edge property.  `set_ros_params` lifts both restrictions: it
+sets **constant values** on **any node**, for the duration of the segment.
+
+Declare it on the action to apply it to every edge using that action:
+
+```yaml
+actions:
+  row_traversal:
+    composable: true
+    action_type: nav2_msgs.action.NavigateThroughPoses
+    action_server: /navigate_through_poses
+    set_ros_params:
+      collision_monitor:
+        FootprintApproach.enabled: false
+    action_goal_template: ...
+```
+
+…and/or on an individual edge to override the action-level value.  The merge is
+per node **and** per parameter, so an edge can flip one parameter while keeping
+the rest of the action's defaults:
+
+```yaml
+- edge_id: N3_N4
+  action: row_traversal
+  node: N4
+  properties:
+    set_ros_params:
+      collision_monitor:
+        FootprintApproach.enabled: true   # override just for this segment
+```
+
+Three authoring styles are accepted in both places:
+
+| Style | Example |
+|---|---|
+| Node-keyed mapping | `{collision_monitor: {FootprintApproach.enabled: false}}` |
+| Flat mapping (goal-checker node) | `{FollowPath.max_robot_speed: 0.3}` |
+| List of entries | `[{node: collision_monitor, param: FootprintApproach.enabled, value: false}]` |
+
+List entries accept either `param` + `value` or a `params` mapping, and the
+`node` may be written with or without a leading `/`.  Values may be `bool`,
+`int`, `float` or `str`.
+
+Parameter clients for non-goal-checker nodes are created on first use and
+cached.  As with the other sources, the previous values are read back before the
+change and restored when the segment exits.  The precedence order when several
+sources set the same parameter is:
+
+1. node goal tolerances → 2. `ros_parameters` → 3. action `set_ros_params` →
+4. edge `set_ros_params` (highest).
+
+Worked examples: [SET_ROS_PARAMS.md](SET_ROS_PARAMS.md).
+
 ### Save / restore guarantee
 
 Before any parameter is changed, its current value is queried via
@@ -472,6 +528,10 @@ Safe extension points:
    - Set the desired property on the entry edge of each aisle / segment
    - Edges without properties are transparent and inherit the segment's values
 
+6. **Parameters on other nodes (e.g. disabling a collision-monitor polygon)**
+   - Add `set_ros_params` to the action config for the global default
+   - Override it in an edge's `properties` where a specific segment differs
+
 ---
 
 ## Backward Compatibility with Existing Topological Maps
@@ -486,6 +546,7 @@ to previous versions:
 | Edges with `properties: {}` | Same as above |
 | Edges with `properties: null` | Normalised to `{}`; same as above |
 | `ros_parameters` absent from action config | No dynamic parameters are applied or restored |
+| `set_ros_params` absent from action config and edge properties | No dynamic parameters are applied or restored |
 | Node `properties` without `xy_goal_tolerance` / `yaw_goal_tolerance` | No tolerance change |
 
 **No changes to map YAML files are required.**
