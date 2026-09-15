@@ -36,6 +36,20 @@ properties:
           type: string
           minLength: 1
           description: ROS 2 action server name.
+        set_ros_params:
+          description: >-
+            ROS 2 parameters applied while this action executes and restored afterwards.
+            Either a node-keyed mapping ({node: {param: value}}), a flat {param: value}
+            mapping targeting the goal-checker node, or a list of
+            {node, param, value} / {node, params} entries. Edge-level 'set_ros_params'
+            overrides these per node/parameter.
+          oneOf:
+            - type: object
+              additionalProperties: true
+            - type: array
+              items:
+                type: object
+                additionalProperties: true
         action_goal_template:
           type: object
           description: Goal template matching the selected action goal structure.

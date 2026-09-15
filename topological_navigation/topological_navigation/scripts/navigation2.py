@@ -193,6 +193,86 @@ def _make_ros_param_value(value):
     return pv
 
 
+def _normalise_node_name(name):
+    """Return a bare ROS node name (no leading/trailing slashes)."""
+    return str(name or '').strip('/')
+
+
+def _normalise_ros_param_spec(spec, default_node):
+    """Normalise a ``set_ros_params`` declaration to ``{node: {param: value}}``.
+
+    Three authoring styles are accepted:
+
+    1. Node-keyed mapping::
+
+           set_ros_params:
+             collision_monitor:
+               FootprintApproach.enabled: false
+
+    2. List of entries, each with a ``node`` plus either a single
+       ``param``/``value`` pair or a ``params`` mapping::
+
+           set_ros_params:
+             - node: collision_monitor
+               param: FootprintApproach.enabled
+               value: false
+             - node: controller_server
+               params:
+                 FollowPath.max_robot_speed: 0.3
+
+    3. Flat ``{param: value}`` mapping, applied to *default_node*::
+
+           set_ros_params:
+             FollowPath.max_robot_speed: 0.3
+
+    Styles 1 and 3 are told apart per key: a key whose value is a dict is
+    treated as a node name, anything else as a parameter name.
+
+    Args:
+        spec: The raw declaration (dict, list, or ``None``).
+        default_node: Node used for entries that do not name one.
+
+    Returns:
+        ``{node_name: {param_name: value}}`` (possibly empty).
+    """
+    out = {}
+
+    def _add(node, param, value):
+        node = _normalise_node_name(node) or _normalise_node_name(default_node)
+        if not node or not param:
+            return
+        out.setdefault(node, {})[str(param)] = value
+
+    if isinstance(spec, dict):
+        for key, value in spec.items():
+            if isinstance(value, dict):
+                for param, pval in value.items():
+                    _add(key, param, pval)
+            else:
+                _add(default_node, key, value)
+    elif isinstance(spec, (list, tuple)):
+        for entry in spec:
+            if not isinstance(entry, dict):
+                continue
+            node = entry.get('node', default_node)
+            params = entry.get('params')
+            if isinstance(params, dict):
+                for param, pval in params.items():
+                    _add(node, param, pval)
+            if 'param' in entry:
+                _add(node, entry.get('param'), entry.get('value'))
+
+    return out
+
+
+def _merge_ros_param_specs(base, override):
+    """Deep-merge two normalised param specs; *override* wins per parameter."""
+    merged = {node: dict(params) for node, params in base.items()}
+    for node, params in override.items():
+        merged.setdefault(node, {}).update(params)
+    return merged
+
+
 # =====================================================================
 # Navigation statistics
 # =====================================================================
@@ -457,7 +537,7 @@ class TopologicalNavServer(rclpy.node.Node):
         )
 
         # -- Goal checker service clients --------------------------
-        gc_node = self._goal_checker_node
+        gc_node = _normalise_node_name(self._goal_checker_node)
         self._set_params_client = self.create_client(
             SetParameters,
             '/%s/set_parameters' % gc_node,
@@ -468,6 +548,9 @@ class TopologicalNavServer(rclpy.node.Node):
             '/%s/get_parameters' % gc_node,
             callback_group=ReentrantCallbackGroup(),
         )
+        # Parameter clients for arbitrary nodes targeted by edge/action
+        # 'set_ros_params', created on demand: {node: (set, get)}.
+        self._param_clients = {}
 
         self.get_logger().info(
             "[INIT] Navigation server READY ('%s', algo=%s, weight=%s)"
@@ -1480,8 +1563,39 @@ class TopologicalNavServer(rclpy.node.Node):
     # Segment parameter management (save / apply / restore)
     # =================================================================
 
-    def _get_ros_params_sync(self, names):
-        """Synchronously query ROS 2 parameters from the goal-checker node.
+    def _param_clients_for(self, node_name):
+        """Return ``(set_client, get_client)`` for *node_name*.
+
+        The goal-checker clients created in ``__init__`` are reused for
+        the goal-checker node; clients for any other node are created on
+        first use and cached.
+        """
+        node = _normalise_node_name(node_name)
+        gc_node = _normalise_node_name(self._goal_checker_node)
+        if not node or node == gc_node:
+            return self._set_params_client, self._get_params_client
+
+        cache = getattr(self, '_param_clients', None)
+        if cache is None:
+            cache = self._param_clients = {}
+        if node not in cache:
+            cache[node] = (
+                self.create_client(
+                    SetParameters, '/%s/set_parameters' % node,
+                    callback_group=ReentrantCallbackGroup(),
+                ),
+                self.create_client(
+                    GetParameters, '/%s/get_parameters' % node,
+                    callback_group=ReentrantCallbackGroup(),
+                ),
+            )
+            self.get_logger().info(
+                "[PARAM] Parameter clients created for node '%s'" % node,
+            )
+        return cache[node]
+
+    def _get_ros_params_sync(self, names, node=None):
+        """Synchronously query ROS 2 parameters from a node.
 
         Polls the ``GetParameters`` service until the future resolves
         or a 2-second deadline elapses.  Returns a ``{name: value}``
@@ -1491,21 +1605,24 @@ class TopologicalNavServer(rclpy.node.Node):
 
         Args:
             names: List of ROS 2 parameter names to query.
+            node: Target node name; defaults to the goal-checker node.
 
         Returns:
             Dict mapping parameter name to its current Python value.
         """
         if not names:
             return {}
-        if not self._get_params_client.service_is_ready():
+        _, get_client = self._param_clients_for(node)
+        if not get_client.service_is_ready():
             self.get_logger().debug(
-                "[PARAM] GetParameters service not available",
+                "[PARAM] GetParameters service not available on '%s'"
+                % (_normalise_node_name(node) or self._goal_checker_node),
             )
             return {}
 
         req = GetParameters.Request()
         req.names = list(names)
-        future = self._get_params_client.call_async(req)
+        future = get_client.call_async(req)
 
         deadline = time.time() + 2.0
         while rclpy.ok() and not future.done() and time.time() < deadline:
@@ -1532,17 +1649,20 @@ class TopologicalNavServer(rclpy.node.Node):
                 out[name] = val
         return out
 
-    def _set_ros_params_async(self, params_dict):
+    def _set_ros_params_async(self, params_dict, node=None):
         """Send a ``SetParameters`` request (fire-and-forget).
 
         Args:
             params_dict: ``{ros_param_name: python_value}`` mapping.
+            node: Target node name; defaults to the goal-checker node.
         """
         if not params_dict:
             return
-        if not self._set_params_client.service_is_ready():
+        set_client, _ = self._param_clients_for(node)
+        if not set_client.service_is_ready():
             self.get_logger().debug(
-                "[PARAM] SetParameters service not available, skipping",
+                "[PARAM] SetParameters service not available on '%s', skipping"
+                % (_normalise_node_name(node) or self._goal_checker_node),
             )
             return
 
@@ -1555,7 +1675,7 @@ class TopologicalNavServer(rclpy.node.Node):
 
         req = SetParameters.Request()
         req.parameters = params
-        future = self._set_params_client.call_async(req)
+        future = set_client.call_async(req)
         future.add_done_callback(self._set_params_cb)
 
     def _set_params_cb(self, future):
@@ -1582,25 +1702,38 @@ class TopologicalNavServer(rclpy.node.Node):
         2. The new value (derived from the segment) is sent via
            ``SetParameters``.
 
-        The returned dict maps parameter name to the value that was in
-        place *before* this call; pass it to
-        :meth:`_restore_segment_parameters` after the segment
+        The returned dict maps *node name* to ``{param: previous_value}``;
+        pass it to :meth:`_restore_segment_parameters` after the segment
         completes to undo the changes.
 
-        **Parameter sources**
+        **Parameter sources** (later sources override earlier ones)
 
         - *Node-level goal tolerances* – ``xy_goal_tolerance`` and
-          ``yaw_goal_tolerance`` from the target node's properties.
-        - *Edge-level parameters* – any entry in the segment's edge
-          ``properties`` that is listed under ``ros_parameters`` in
-          the action's map configuration.  The ``ros_parameters`` dict
-          maps edge property name to the corresponding ROS 2 parameter
-          name on the goal-checker node::
+          ``yaw_goal_tolerance`` from the target node's properties,
+          applied to the goal-checker node.
+        - *Edge property mapping* – any entry in the segment's edge
+          ``properties`` that is listed under ``ros_parameters`` in the
+          action's map configuration.  The ``ros_parameters`` dict maps
+          edge property name to a ROS 2 parameter name on the
+          goal-checker node::
 
               actions:
                 row_traversal:
                   ros_parameters:
                     max_speed: FollowPath.max_robot_speed
+
+        - *Action-level ``set_ros_params``* – constant parameters
+          applied on any node whenever this action runs::
+
+              actions:
+                row_traversal:
+                  set_ros_params:
+                    collision_monitor:
+                      FootprintApproach.enabled: false
+
+        - *Edge-level ``set_ros_params``* – same syntax inside an edge's
+          ``properties``; overrides the action-level values per
+          node/parameter.
 
         All operations are best-effort; if the parameter service is
         unavailable the segment still executes with the currently
@@ -1610,9 +1743,10 @@ class TopologicalNavServer(rclpy.node.Node):
             segment: The :class:`ActionSegment` about to be executed.
 
         Returns:
-            ``{ros_param_name: previous_value}`` dict (may be empty).
+            ``{node_name: {ros_param_name: previous_value}}`` (may be empty).
         """
-        params_to_set = {}
+        gc_node = _normalise_node_name(self._goal_checker_node)
+        by_node = {}
 
         # -- Node-level goal tolerances --------------------------------
         target_node = segment.last_target
@@ -1621,34 +1755,47 @@ class TopologicalNavServer(rclpy.node.Node):
             xy_tol = node_props.get('xy_goal_tolerance')
             yaw_tol = node_props.get('yaw_goal_tolerance')
             if xy_tol is not None:
-                params_to_set[self._xy_tolerance_param] = float(xy_tol)
+                by_node.setdefault(gc_node, {})[
+                    self._xy_tolerance_param] = float(xy_tol)
             if yaw_tol is not None:
-                params_to_set[self._yaw_tolerance_param] = float(yaw_tol)
+                by_node.setdefault(gc_node, {})[
+                    self._yaw_tolerance_param] = float(yaw_tol)
 
         # -- Edge-level parameters from the action's ros_parameters ----
         action = segment.action_type
         info = self._action_clients.get(action) or {}
-        ros_param_mapping = (info.get('config') or {}).get(
-            'ros_parameters', {},
-        )
+        action_cfg = info.get('config') or {}
+        ros_param_mapping = action_cfg.get('ros_parameters', {}) or {}
         edge_props = segment.parameters  # consistent across segment
         for prop_name, ros_param_name in ros_param_mapping.items():
             if prop_name in edge_props:
-                params_to_set[ros_param_name] = edge_props[prop_name]
+                by_node.setdefault(gc_node, {})[ros_param_name] = \
+                    edge_props[prop_name]
 
-        if not params_to_set:
+        # -- set_ros_params: action defaults, overridden per edge ------
+        action_spec = _normalise_ros_param_spec(
+            action_cfg.get('set_ros_params'), gc_node,
+        )
+        edge_spec = _normalise_ros_param_spec(
+            edge_props.get('set_ros_params'), gc_node,
+        )
+        by_node = _merge_ros_param_specs(
+            by_node, _merge_ros_param_specs(action_spec, edge_spec),
+        )
+
+        if not by_node:
             return {}
 
-        # Query current values before making any changes
-        prev_values = self._get_ros_params_sync(list(params_to_set.keys()))
-
-        # Apply the new values
-        self._set_ros_params_async(params_to_set)
-
-        if params_to_set:
+        prev_values = {}
+        for node, params in by_node.items():
+            # Query current values before making any changes
+            prev = self._get_ros_params_sync(list(params.keys()), node)
+            if prev:
+                prev_values[node] = prev
+            self._set_ros_params_async(params, node)
             self.get_logger().info(
-                "[PARAM] Segment '%s': setting %s"
-                % (action, list(params_to_set.keys())),
+                "[PARAM] Segment '%s': setting %s on '%s'"
+                % (action, list(params.keys()), node),
             )
 
         return prev_values
@@ -1662,17 +1809,19 @@ class TopologicalNavServer(rclpy.node.Node):
         values that were recorded by :meth:`_apply_segment_parameters`.
 
         Args:
-            prev_values: ``{ros_param_name: previous_value}`` dict as
-                returned by :meth:`_apply_segment_parameters`.  An
+            prev_values: ``{node_name: {ros_param_name: previous_value}}``
+                as returned by :meth:`_apply_segment_parameters`.  An
                 empty dict is a no-op.
         """
         if not prev_values:
             return
+        total = sum(len(p) for p in prev_values.values())
         self.get_logger().info(
-            "[PARAM] Restoring %d parameter(s) to pre-segment values"
-            % len(prev_values),
+            "[PARAM] Restoring %d parameter(s) on %d node(s) to "
+            "pre-segment values" % (total, len(prev_values)),
         )
-        self._set_ros_params_async(prev_values)
+        for node, params in prev_values.items():
+            self._set_ros_params_async(params, node)
 
     # =================================================================
     # Goal construction (map-driven)
